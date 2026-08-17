@@ -1,6 +1,9 @@
 import type { AIContext } from "@p2p-hub/sdk";
 import type { ActionHandler, FilterFn } from "../hooks/hook-registry";
-import type { SkillHandler } from "../task-broker/task-broker";
+import type {
+  SkillHandler,
+  SkillRegistrationOptions,
+} from "../task-broker/task-broker";
 
 /**
  * Namespace-aware view over the shared {@link HookRegistry}. `emit` and
@@ -20,7 +23,11 @@ export interface HookContext {
  * outside its own namespace by construction.
  */
 export interface SkillContext {
-  register(skillName: string, handler: SkillHandler): void;
+  register(
+    skillName: string,
+    handler: SkillHandler,
+    options?: SkillRegistrationOptions,
+  ): void;
   unregister(skillName: string): void;
 }
 
@@ -28,6 +35,13 @@ export interface SkillContext {
  * Restricted vault surface exposed to plugins. There is deliberately no
  * `getSecret` here — plugins can set, list and delete secrets, but can never
  * read a raw secret value. Only the core AI provider reads raw keys.
+ *
+ * The reserved key namespaces (e.g. `ai.`, configurable via
+ * `VaultManagerOptions.reservedPrefixes`) are blocked here: `setSecret` and
+ * `deleteSecret` reject them, and `listSecretKeys` filters them out, so no
+ * plugin can rewrite the AI key or endpoint that core will later send prompts
+ * to. The reserved prefixes live on `VaultManager` and are enforced at this
+ * plugin-facing boundary only — core still reads/writes them directly.
  */
 export interface VaultContext {
   setSecret(key: string, value: string): Promise<void>;

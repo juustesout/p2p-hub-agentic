@@ -56,3 +56,40 @@ test("a different master key cannot decrypt existing secrets", async () => {
   const reader = new VaultManager({ dataDir, masterKey: "master-B" });
   assert.equal(await reader.getSecret("openai.key"), null);
 });
+
+test("refuses to start in production without a master key", async () => {
+  const dataDir = await makeDataDir();
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevKey = process.env.P2P_HUB_VAULT_KEY;
+  process.env.NODE_ENV = "production";
+  delete process.env.P2P_HUB_VAULT_KEY;
+
+  try {
+    assert.throws(() => new VaultManager({ dataDir }), /no vault master key/);
+  } finally {
+    process.env.NODE_ENV = prevNodeEnv;
+    if (prevKey === undefined) {
+      delete process.env.P2P_HUB_VAULT_KEY;
+    } else {
+      process.env.P2P_HUB_VAULT_KEY = prevKey;
+    }
+  }
+});
+
+test("uses the P2P_HUB_VAULT_KEY env var when no explicit key is passed", async () => {
+  const dataDir = await makeDataDir();
+  const prevKey = process.env.P2P_HUB_VAULT_KEY;
+  process.env.P2P_HUB_VAULT_KEY = "env-master";
+
+  try {
+    const vault = new VaultManager({ dataDir });
+    await vault.setSecret("k", "v");
+    assert.equal(await vault.getSecret("k"), "v");
+  } finally {
+    if (prevKey === undefined) {
+      delete process.env.P2P_HUB_VAULT_KEY;
+    } else {
+      process.env.P2P_HUB_VAULT_KEY = prevKey;
+    }
+  }
+});

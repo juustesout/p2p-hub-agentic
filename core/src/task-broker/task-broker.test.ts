@@ -42,3 +42,39 @@ test("a throwing handler is caught and returned as an error result", async () =>
   assert.equal(result.status, "error");
   assert.equal(result.error, "kaboom");
 });
+
+test("skills are local-only by default and rejected over the network", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("vault.setSecret", async () => ({ ok: true }));
+
+  const result = await broker.handleRemote(task({ skill: "vault.setSecret" }));
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /local-only/);
+});
+
+test("handleRemote allows skills explicitly opted in to the network", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("calendar.listEvents", async () => [], {
+    localOnly: false,
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "calendar.listEvents" }),
+  );
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.result, []);
+});
+
+test("a local-only skill is still reachable via handle (local callers)", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("vault.setSecret", async (payload) => payload);
+
+  const result = await broker.handle(
+    task({ skill: "vault.setSecret", payload: "x" }),
+  );
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.result, "x");
+});

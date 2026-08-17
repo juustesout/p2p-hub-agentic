@@ -4,13 +4,25 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 export interface VaultManagerOptions {
-  /** Directory holding the encrypted vault file. Defaults to a temp dir. */
+  /**
+   * Directory holding the encrypted vault file. Defaults to a persistent,
+   * user-scoped location (`~/.p2p-hub/vault`).
+   */
   dataDir?: string;
   /**
    * Master passphrase used to derive the AES-256 key (via scrypt). Defaults to
-   * the `P2P_HUB_VAULT_KEY` env var, then to an insecure dev-only fallback.
+   * the `P2P_HUB_VAULT_KEY` env var, then to an insecure dev-only fallback that
+   * logs a loud warning and refuses to start when `NODE_ENV === "production"`.
    */
   masterKey?: string;
+  /**
+   * Key-name prefixes that are reserved for core configuration and may not be
+   * read or written through the plugin-facing vault surface. This is a policy
+   * the plugin loader enforces — {@link VaultManager} itself is not bound by
+   * it and can still read/write reserved keys (that is how core manages
+   * `ai.*`). Defaults to {@link DEFAULT_RESERVED_PREFIXES}.
+   */
+  reservedPrefixes?: string[];
 }
 
 interface EncryptedEntry {
@@ -29,6 +41,23 @@ const IV_LENGTH = 12;
 const SALT_LENGTH = 16;
 const DEV_MASTER_KEY = "p2p-hub-insecure-dev-key";
 
+/** Key-name prefixes reserved for core configuration (e.g. `ai.*`). */
+export const DEFAULT_RESERVED_PREFIXES = ["ai."];
+
+function resolveMasterKey(explicit?: string): {
+  masterKey: string;
+  usedFallback: boolean;
+} {
+  if (explicit) {
+    return { masterKey: explicit, usedFallback: false };
+  }
+  const fromEnv = process.env.P2P_HUB_VAULT_KEY;
+  if (fromEnv) {
+    return { masterKey: fromEnv, usedFallback: false };
+  }
+  return { masterKey: DEV_MASTER_KEY, usedFallback: true };
+}
+
 /**
  * Central encrypted store for secrets (API keys, certs/tokens).
  *
@@ -40,13 +69,33 @@ const DEV_MASTER_KEY = "p2p-hub-insecure-dev-key";
 export class VaultManager {
   private readonly dataDir: string;
   private readonly masterKey: string;
+  readonly reservedPrefixes: string[];
   private salt: Buffer | null = null;
   private entries: Record<string, EncryptedEntry> = {};
 
   constructor(options: VaultManagerOptions = {}) {
-    this.dataDir = options.dataDir ?? path.join(os.tmpdir(), "p2p-hub-vault");
-    this.masterKey =
-      options.masterKey ?? process.env.P2P_HUB_VAULT_KEY ?? DEV_MASTER_KEY;
+    this.dataDir =
+      options.dataDir ?? path.join(os.homedir(), ".p2p-hub", "vault");
+    this.reservedPrefixes =
+      options.reservedPrefixes ?? DEFAULT_RESERVED_PREFIXES;
+
+    const { masterKey, usedFallback } = resolveMasterKey(options.masterKey);
+    this.masterKey = masterKey;
+
+    if (usedFallback) {
+      console.warn(
+        "[p2p-hub] no vault master key configured (set P2P_HUB_VAULT_KEY or " +
+          "pass masterKey). Falling back to a hard-coded, insecure dev-only " +
+          "key — secrets are NOT protected from anyone who can read this " +
+          "source.",
+      );
+      if (process.env.NODE_ENV === "production") {
+        throw new Error(
+          "refusing to start: no vault master key in production " +
+            "(set P2P_HUB_VAULT_KEY)",
+        );
+      }
+    }
   }
 
   private filePath(): string {

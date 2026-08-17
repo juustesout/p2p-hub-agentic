@@ -12,26 +12,38 @@ interface SetSecretPayload {
 }
 
 export default function activate(ctx: PluginContext): VaultApi {
-  ctx.skills.register("setSecret", async (payload) => {
-    const { key, value } = (payload ?? {}) as SetSecretPayload;
-    if (typeof key !== "string" || typeof value !== "string") {
-      throw new Error("setSecret expects { key: string, value: string }");
-    }
-    await ctx.vault.setSecret(key, value);
-    return { ok: true };
-  });
+  ctx.skills.register(
+    "setSecret",
+    async (payload) => {
+      const { key, value } = (payload ?? {}) as SetSecretPayload;
+      if (typeof key !== "string" || typeof value !== "string") {
+        throw new Error("setSecret expects { key: string, value: string }");
+      }
+      await ctx.vault.setSecret(key, value);
+      return { ok: true };
+    },
+    { localOnly: true },
+  );
 
-  ctx.skills.register("listKeys", async () => {
-    return ctx.vault.listSecretKeys();
-  });
+  ctx.skills.register(
+    "listKeys",
+    async () => {
+      return ctx.vault.listSecretKeys();
+    },
+    { localOnly: true },
+  );
 
-  ctx.skills.register("deleteSecret", async (payload) => {
-    const { key } = (payload ?? {}) as SetSecretPayload;
-    if (typeof key !== "string") {
-      throw new Error("deleteSecret expects { key: string }");
-    }
-    return ctx.vault.deleteSecret(key);
-  });
+  ctx.skills.register(
+    "deleteSecret",
+    async (payload) => {
+      const { key } = (payload ?? {}) as SetSecretPayload;
+      if (typeof key !== "string") {
+        throw new Error("deleteSecret expects { key: string }");
+      }
+      return ctx.vault.deleteSecret(key);
+    },
+    { localOnly: true },
+  );
 
   return {
     async setSecret(key, value) {

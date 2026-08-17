@@ -6,10 +6,14 @@ import { TaskBroker } from "./task-broker";
  * incoming tasks are routed through the broker. Deliberately not called
  * automatically from `PluginHost` or the providers themselves — the caller
  * (a test, or later the real application entrypoint) wires them explicitly.
+ *
+ * Network tasks go through {@link TaskBroker.handleRemote}, which rejects
+ * skills registered as `localOnly`, so sensitive skills (e.g. `vault.*`) are
+ * never reachable over the wire.
  */
 export function wireNetworkToBroker(
   provider: NetworkProvider,
   broker: TaskBroker,
 ): void {
-  provider.onTask((task) => broker.handle(task));
+  provider.onTask((task) => broker.handleRemote(task));
 }

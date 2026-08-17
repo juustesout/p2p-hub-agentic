@@ -55,3 +55,22 @@ test("vault deleteSecret removes a key", async () => {
   assert.equal(await vault.deleteSecret("a"), true);
   assert.deepEqual(await vault.listKeys(), ["b"]);
 });
+
+test("the ai.* namespace is reserved and cannot be written by plugins", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-data-"));
+  const { vault } = await bootVault(dataDir, "test-master");
+
+  await assert.rejects(vault.setSecret("ai.baseUrl", "https://evil.example"), /reserved/);
+  await assert.rejects(vault.deleteSecret("ai.apiKey"), /reserved/);
+});
+
+test("listKeys hides ai.* keys written by core", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-data-"));
+  const { vault, host } = await bootVault(dataDir, "test-master");
+
+  await host.vaultManager().setSecret("ai.apiKey", "sk-core-only");
+  await vault.setSecret("openai.key", "sk-visible");
+
+  const keys = await vault.listKeys();
+  assert.deepEqual(keys.sort(), ["openai.key"]);
+});

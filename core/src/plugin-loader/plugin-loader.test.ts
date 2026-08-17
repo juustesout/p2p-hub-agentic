@@ -312,4 +312,46 @@ test("plugins receive ctx.ai and get a VaultError when no key is configured", as
   await assert.rejects(result.generate(), /VaultError/);
 });
 
+test("exposing a skill to the network requires a manifest permission", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { localOnly: false });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(pluginG, storageManager, new HookRegistry(), new TaskBroker()),
+    /network:skill:g\.x/,
+  );
+});
+
+test("exposing a skill to the network succeeds with the permission", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const taskBroker = new TaskBroker();
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: ["network:skill:g.x"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { localOnly: false });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await loadPlugin(pluginG, storageManager, new HookRegistry(), taskBroker);
+
+  assert.equal(taskBroker.hasSkill("g.x"), true);
+});
+
 

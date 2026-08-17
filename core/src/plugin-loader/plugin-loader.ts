@@ -161,9 +161,14 @@ export async function loadPlugin(
       // The plugin supplies only the local name; we prefix it with its id, so
       // it cannot register under another plugin's namespace by construction —
       // no runtime check is needed here, unlike hooks where the plugin can
-      // pass an arbitrary event string.
-      register: (skillName, handler) => {
-        taskBroker.registerSkill(`${manifest.id}.${skillName}`, handler);
+      // pass an arbitrary event string. Exposing a skill to the network
+      // (localOnly: false) additionally requires an explicit manifest
+      // permission, so a plugin author must make that choice deliberately.
+      register: (skillName, handler, options) => {
+        if (options?.localOnly === false) {
+          assertNetworkSkillPermission(manifest, skillName);
+        }
+        taskBroker.registerSkill(`${manifest.id}.${skillName}`, handler, options);
       },
       unregister: (skillName) => {
         taskBroker.unregisterSkill(`${manifest.id}.${skillName}`);
@@ -174,9 +179,20 @@ export async function loadPlugin(
       generateImage: (options) => aiProvider.generateImage(options),
     },
     vault: {
-      setSecret: (key, value) => vaultManager.setSecret(key, value),
-      listSecretKeys: () => vaultManager.listSecretKeys(),
-      deleteSecret: (key) => vaultManager.deleteSecret(key),
+      setSecret: (key, value) => {
+        assertWritable(key, vaultManager.reservedPrefixes);
+        return vaultManager.setSecret(key, value);
+      },
+      listSecretKeys: async () => {
+        const keys = await vaultManager.listSecretKeys();
+        return keys.filter(
+          (key) => !vaultManager.reservedPrefixes.some((p) => key.startsWith(p)),
+        );
+      },
+      deleteSecret: (key) => {
+        assertWritable(key, vaultManager.reservedPrefixes);
+        return vaultManager.deleteSecret(key);
+      },
     },
   };
 
@@ -215,6 +231,29 @@ function assertOwnNamespace(pluginId: string, event: string, verb: string): void
     const namespace = idx === -1 ? event : event.slice(0, idx);
     throw new Error(
       `plugin "${pluginId}" cannot ${verb} on namespace "${namespace}"`,
+    );
+  }
+}
+
+function assertWritable(key: string, reserved: string[]): void {
+  const match = reserved.find((p) => key.startsWith(p));
+  if (match) {
+    throw new Error(
+      `vault key "${key}" is in the reserved namespace "${match}" and ` +
+        `cannot be modified through the plugin vault`,
+    );
+  }
+}
+
+function assertNetworkSkillPermission(
+  manifest: PluginManifest,
+  skillName: string,
+): void {
+  const permission = `network:skill:${manifest.id}.${skillName}`;
+  if (!manifest.permissions.includes(permission)) {
+    throw new Error(
+      `plugin "${manifest.id}" exposes skill "${skillName}" to the network ` +
+        `but lacks permission "${permission}"`,
     );
   }
 }

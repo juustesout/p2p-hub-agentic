@@ -35,7 +35,9 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
     return events;
   }
 
-  ctx.skills.register("listEvents", async () => listEvents());
+  ctx.skills.register("listEvents", async () => listEvents(), {
+    localOnly: false,
+  });
 
   return {
     async addEvent(event) {
