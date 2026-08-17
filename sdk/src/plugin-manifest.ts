@@ -1,6 +1,18 @@
 export type PluginKind = "network-provider" | "storage-plugin" | "generic";
 
 /**
+ * Describes an optional bundled web UI for a plugin. Served as a static
+ * document; the desktop shell renders it inside a sandboxed iframe and talks
+ * to the plugin's skills through the postMessage bridge.
+ */
+export interface PluginManifestUI {
+  /** Path to the UI entry document, relative to the plugin root. */
+  entry: string;
+  defaultWidth?: number;
+  defaultHeight?: number;
+}
+
+/**
  * Metadata describing a plugin. Stored as `manifest.json` in the plugin root.
  *
  * Permission convention:
@@ -24,4 +36,6 @@ export interface PluginManifest {
    * explicitly lists them here.
    */
   exposedEvents?: string[];
+  /** Optional bundled web UI (see {@link PluginManifestUI}). */
+  ui?: PluginManifestUI;
 }
