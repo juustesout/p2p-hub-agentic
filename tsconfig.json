@@ -4,6 +4,7 @@
     { "path": "./sdk" },
     { "path": "./core" },
     { "path": "./plugins/network-light" },
-    { "path": "./plugins/network-agentanycast" }
+    { "path": "./plugins/network-agentanycast" },
+    { "path": "./plugins/calendar" }
   ]
 }
