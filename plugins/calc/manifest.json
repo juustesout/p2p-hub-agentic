@@ -1,0 +1,14 @@
+{
+  "id": "calc",
+  "name": "AI Grid & Sheet",
+  "version": "1.0.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": ["storage:read:calc"],
+  "exposedEvents": ["calc:sheetCreated", "calc:cellUpdated"],
+  "ui": {
+    "entry": "dist/index.html",
+    "defaultWidth": 1000,
+    "defaultHeight": 700
+  }
+}

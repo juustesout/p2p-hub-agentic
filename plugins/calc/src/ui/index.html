@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Grid & Sheet</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <span class="brand">AI Grid &amp; Sheet</span>
+        <div class="assist">
+          <button id="ai-fill" class="btn">AI Fill Column</button>
+          <button id="embed" class="btn">Embed Object</button>
+        </div>
+        <span id="bridge-status" class="bridge-status">mode: local demo</span>
+      </header>
+
+      <div class="formula-bar">
+        <span id="cell-ref" class="cell-ref">A1</span>
+        <input
+          id="formula-input"
+          class="formula-input"
+          placeholder="Enter a value or formula (e.g. =SUM(A1:A3), =AI('Summarize', A1))"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+
+      <div id="grid-scroll" class="grid-scroll">
+        <table id="grid" class="grid"></table>
+      </div>
+
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
