@@ -1,0 +1,14 @@
+{
+  "name": "@p2p-hub/sdk",
+  "version": "0.1.0",
+  "description": "Shared contracts for p2p-hub network providers",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "license": "MIT"
+}

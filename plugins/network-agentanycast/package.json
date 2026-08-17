@@ -1,0 +1,18 @@
+{
+  "name": "@p2p-hub/network-agentanycast",
+  "version": "0.1.0",
+  "description": "Transport backed by the agentanycastd daemon (detection only in stage 1)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@p2p-hub/sdk": "0.1.0"
+  },
+  "license": "MIT"
+}

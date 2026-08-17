@@ -1,0 +1,19 @@
+{
+  "name": "p2p-hub-agentic",
+  "version": "0.1.0",
+  "private": true,
+  "description": "P2P hub for agentic task distribution over a local network",
+  "workspaces": [
+    "sdk",
+    "core",
+    "plugins/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

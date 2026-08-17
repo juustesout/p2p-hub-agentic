@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./sdk" },
+    { "path": "./core" },
+    { "path": "./plugins/network-light" },
+    { "path": "./plugins/network-agentanycast" }
+  ]
+}
