@@ -1,4 +1,6 @@
 import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type {
@@ -49,19 +51,50 @@ export class AgentAnycastProvider implements NetworkProvider {
   }
 
   /**
-   * Detect the daemon state:
-   * 1. try the local gRPC address; if something listens there -> "ready";
-   * 2. otherwise, if the binary is on PATH -> "installed-not-running";
-   * 3. otherwise -> "not-installed".
+   * Detect the daemon state. The first check that succeeds wins:
+   * 1. Unix domain socket (SDK automanage default, skipped on win32);
+   * 2. TCP address from a manually configured `grpc_listen`;
+   * 3. binary on PATH -> "installed-not-running";
+   * 4. otherwise -> "not-installed".
    */
   async checkStatus(): Promise<AgentAnycastStatus> {
+    if (process.platform !== "win32" && (await this.isReachableViaSocket())) {
+      // Matched via unix domain socket (SDK automanage).
+      return "ready";
+    }
     if (await this.isReachable()) {
+      // Matched via TCP address (manual `grpc_listen` config).
       return "ready";
     }
     if (await this.isOnPath()) {
       return "installed-not-running";
     }
     return "not-installed";
+  }
+
+  private async isReachableViaSocket(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const socket = net.connect({ path: this.socketPath, timeout: 1500 });
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("timeout", () => {
+        socket.destroy();
+        resolve(false);
+      });
+      socket.once("error", () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+  }
+
+  private get socketPath(): string {
+    return (
+      process.env.AGENTANYCAST_SOCKET ??
+      path.join(os.homedir(), ".agentanycast", "daemon.sock")
+    );
   }
 
   private async isReachable(): Promise<boolean> {

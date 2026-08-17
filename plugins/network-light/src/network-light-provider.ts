@@ -34,6 +34,8 @@ interface WireMessage {
 
 interface DiscoveredPeer extends NetworkPeer {
   name?: string;
+  /** SHA-256 fingerprint of the peer's self-signed cert, announced via mDNS. */
+  certFingerprint?: string;
 }
 
 function encodeFrame(payload: string | Buffer): Buffer {
@@ -87,6 +89,7 @@ export class NetworkLightProvider implements NetworkProvider {
   private browser: Browser | null = null;
   private boundPort = 0;
   private ready = false;
+  private certFingerprint = "";
   private taskHandler: TaskHandler | null = null;
   private readonly discovered = new Map<string, DiscoveredPeer>();
 
@@ -109,6 +112,8 @@ export class NetworkLightProvider implements NetworkProvider {
     }
 
     const { key, cert } = generateSelfSignedCert();
+    const certInfo = new crypto.X509Certificate(cert);
+    this.certFingerprint = certInfo.fingerprint256;
 
     this.server = tls.createServer({ key, cert }, (socket) => {
       this.handleConnection(socket);
@@ -135,6 +140,7 @@ export class NetworkLightProvider implements NetworkProvider {
       txt: {
         id: this.instanceId,
         skills: JSON.stringify(this.skills),
+        certFingerprint: this.certFingerprint,
       },
     });
 
@@ -204,11 +210,36 @@ export class NetworkLightProvider implements NetworkProvider {
 
   async sendTask(peer: NetworkPeer, task: TaskRequest): Promise<TaskResult> {
     const { host, port } = parseAddress(peer.address);
+    const expectedFingerprint = this.discovered.get(peer.id)?.certFingerprint;
 
     return new Promise<TaskResult>((resolve) => {
+      const finish = (result: TaskResult) => {
+        clearTimeout(timer);
+        resolve(result);
+      };
+
       const socket = tls.connect(
         { host, port, rejectUnauthorized: false },
         () => {
+          if (!expectedFingerprint) {
+            socket.destroy();
+            finish({
+              taskId: task.id,
+              status: "error",
+              error: "no certificate fingerprint on record for peer",
+            });
+            return;
+          }
+          const presented = socket.getPeerCertificate().fingerprint256 ?? "";
+          if (!fingerprintsMatch(expectedFingerprint, presented)) {
+            socket.destroy();
+            finish({
+              taskId: task.id,
+              status: "error",
+              error: "certificate fingerprint mismatch",
+            });
+            return;
+          }
           socket.write(encodeFrame(JSON.stringify({ type: "task", task })));
         },
       );
@@ -216,7 +247,7 @@ export class NetworkLightProvider implements NetworkProvider {
       let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
       const timer = setTimeout(() => {
         socket.destroy();
-        resolve({
+        finish({
           taskId: task.id,
           status: "error",
           error: "timed out waiting for response",
@@ -231,15 +262,13 @@ export class NetworkLightProvider implements NetworkProvider {
         }
         buffer = message.rest;
         if (message.value.type === "result" && message.value.result) {
-          clearTimeout(timer);
           socket.destroy();
-          resolve(message.value.result);
+          finish(message.value.result);
         }
       });
 
       socket.once("error", (err) => {
-        clearTimeout(timer);
-        resolve({ taskId: task.id, status: "error", error: err.message });
+        finish({ taskId: task.id, status: "error", error: err.message });
       });
     });
   }
@@ -305,11 +334,13 @@ export class NetworkLightProvider implements NetworkProvider {
     } catch {
       skills = [];
     }
+    const certFingerprint = service.txt?.certFingerprint as string | undefined;
     this.discovered.set(id, {
       id,
       address,
       skills,
       name: service.name,
+      certFingerprint,
     });
   }
 
@@ -371,4 +402,14 @@ function parseAddress(address: string): { host: string; port: number } {
     throw new Error(`invalid peer address: ${address}`);
   }
   return { host, port };
+}
+
+function normalizeFingerprint(fingerprint: string | undefined | null): string {
+  return (fingerprint ?? "").replace(/:/g, "").toLowerCase();
+}
+
+function fingerprintsMatch(expected: string, presented: string): boolean {
+  const normalizedExpected = normalizeFingerprint(expected);
+  const normalizedPresented = normalizeFingerprint(presented);
+  return normalizedExpected.length > 0 && normalizedExpected === normalizedPresented;
 }
