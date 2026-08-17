@@ -1,0 +1,18 @@
+{
+  "name": "@p2p-hub/birthday-cards",
+  "version": "0.0.1",
+  "description": "Reference plugin reacting to calendar events via hooks",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@p2p-hub/core": "0.1.0"
+  },
+  "license": "MIT"
+}
