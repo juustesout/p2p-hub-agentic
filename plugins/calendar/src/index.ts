@@ -35,32 +35,65 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
     return events;
   }
 
+  async function addEvent(event: {
+    title: string;
+    date: string;
+  }): Promise<CalendarEvent> {
+    const title = event.title.trim();
+    const date = event.date.trim();
+    if (!title || !date) {
+      throw new Error("title and date must not be empty");
+    }
+    const id = `event-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    let stored: CalendarEvent = { id, title, date };
+    stored = (await ctx.hooks.applyFilters(
+      "calendar:beforeSave",
+      stored,
+    )) as CalendarEvent;
+    await ctx.storage.set(id, stored);
+    await ctx.hooks.emit("calendar:eventAdded", stored);
+    return stored;
+  }
+
+  async function removeEvent(id: string): Promise<void> {
+    await ctx.storage.delete(id);
+  }
+
   ctx.skills.register("listEvents", async () => listEvents(), {
     localOnly: false,
   });
 
-  return {
-    async addEvent(event) {
-      const title = event.title.trim();
-      const date = event.date.trim();
-      if (!title || !date) {
-        throw new Error("title and date must not be empty");
+  ctx.skills.register(
+    "addEvent",
+    async (payload) => {
+      const { title, date } = (payload ?? {}) as {
+        title?: unknown;
+        date?: unknown;
+      };
+      if (typeof title !== "string" || typeof date !== "string") {
+        throw new Error("addEvent expects { title: string, date: string }");
       }
-      const id = `event-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      let stored: CalendarEvent = { id, title, date };
-      stored = (await ctx.hooks.applyFilters(
-        "calendar:beforeSave",
-        stored,
-      )) as CalendarEvent;
-      await ctx.storage.set(id, stored);
-      await ctx.hooks.emit("calendar:eventAdded", stored);
-      return stored;
+      return addEvent({ title, date });
     },
+    { localOnly: true },
+  );
 
+  ctx.skills.register(
+    "removeEvent",
+    async (payload) => {
+      const { id } = (payload ?? {}) as { id?: unknown };
+      if (typeof id !== "string") {
+        throw new Error("removeEvent expects { id: string }");
+      }
+      await removeEvent(id);
+      return { ok: true };
+    },
+    { localOnly: true },
+  );
+
+  return {
+    addEvent,
     listEvents,
-
-    async removeEvent(id) {
-      await ctx.storage.delete(id);
-    },
+    removeEvent,
   };
 }

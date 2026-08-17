@@ -93,3 +93,41 @@ test("uses the P2P_HUB_VAULT_KEY env var when no explicit key is passed", async 
     }
   }
 });
+
+test("hasSecret reports existence without revealing the value", async () => {
+  const dataDir = await makeDataDir();
+  const vault = new VaultManager({ dataDir, masterKey: "test-master" });
+
+  assert.equal(await vault.hasSecret("missing"), false);
+  await vault.setSecret("openai.key", "sk-secret-123");
+  assert.equal(await vault.hasSecret("openai.key"), true);
+});
+
+test("getSecretMetadata returns timestamps but never the value", async () => {
+  const dataDir = await makeDataDir();
+  const vault = new VaultManager({ dataDir, masterKey: "test-master" });
+
+  await vault.setSecret("openai.key", "sk-secret-123");
+
+  const meta = await vault.getSecretMetadata("openai.key");
+  assert.equal(meta?.key, "openai.key");
+  assert.equal(typeof meta?.updatedAt, "string");
+  assert.equal(JSON.stringify(meta).includes("sk-secret-123"), false);
+
+  assert.equal(await vault.getSecretMetadata("missing"), null);
+});
+
+test("listSecretMetadata lists all keys without values", async () => {
+  const dataDir = await makeDataDir();
+  const vault = new VaultManager({ dataDir, masterKey: "test-master" });
+
+  await vault.setSecret("a", "value-a");
+  await vault.setSecret("b", "value-b");
+
+  const metas = await vault.listSecretMetadata();
+  assert.deepEqual(
+    metas.map((m) => m.key).sort(),
+    ["a", "b"],
+  );
+  assert.equal(JSON.stringify(metas).includes("value-a"), false);
+});

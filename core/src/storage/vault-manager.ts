@@ -29,11 +29,20 @@ interface EncryptedEntry {
   iv: string;
   tag: string;
   data: string;
+  /** ISO timestamp of the last write. Optional for backwards compat. */
+  updatedAt?: string;
 }
 
 interface VaultFile {
   salt: string;
   entries: Record<string, EncryptedEntry>;
+}
+
+/** Non-secret metadata about a stored secret. Never contains the value. */
+export interface SecretMetadata {
+  key: string;
+  /** ISO timestamp of the last write, or null if unknown (legacy entry). */
+  updatedAt: string | null;
 }
 
 const KEY_LENGTH = 32;
@@ -70,6 +79,8 @@ export class VaultManager {
   private readonly dataDir: string;
   private readonly masterKey: string;
   readonly reservedPrefixes: string[];
+  /** True when the master key fell back to the insecure dev-only key. */
+  readonly usesFallbackKey: boolean;
   private salt: Buffer | null = null;
   private entries: Record<string, EncryptedEntry> = {};
 
@@ -81,6 +92,7 @@ export class VaultManager {
 
     const { masterKey, usedFallback } = resolveMasterKey(options.masterKey);
     this.masterKey = masterKey;
+    this.usesFallbackKey = usedFallback;
 
     if (usedFallback) {
       console.warn(
@@ -149,6 +161,7 @@ export class VaultManager {
       iv: iv.toString("hex"),
       tag: cipher.getAuthTag().toString("hex"),
       data: encrypted.toString("hex"),
+      updatedAt: new Date().toISOString(),
     };
     await this.save();
   }
@@ -182,6 +195,34 @@ export class VaultManager {
   async listSecretKeys(): Promise<string[]> {
     await this.load();
     return Object.keys(this.entries);
+  }
+
+  /** Whether a secret exists under `key`. Never reveals the value. */
+  async hasSecret(key: string): Promise<boolean> {
+    await this.load();
+    return key in this.entries;
+  }
+
+  /**
+   * Metadata for a single secret — existence and last-write timestamp, but
+   * never the raw value. Returns null when the key is absent.
+   */
+  async getSecretMetadata(key: string): Promise<SecretMetadata | null> {
+    await this.load();
+    const entry = this.entries[key];
+    if (!entry) {
+      return null;
+    }
+    return { key, updatedAt: entry.updatedAt ?? null };
+  }
+
+  /** Metadata for every stored secret. Never contains any value. */
+  async listSecretMetadata(): Promise<SecretMetadata[]> {
+    await this.load();
+    return Object.keys(this.entries).map((key) => ({
+      key,
+      updatedAt: this.entries[key].updatedAt ?? null,
+    }));
   }
 
   async deleteSecret(key: string): Promise<boolean> {

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import * as path from "node:path";
+import type { PluginManifest } from "@p2p-hub/sdk";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
@@ -31,6 +32,7 @@ export class PluginHost {
   private readonly broker: TaskBroker;
   private readonly vault: VaultManager;
   private readonly activated = new Map<string, unknown>();
+  private readonly plugins: PluginManifest[] = [];
 
   constructor(private readonly options: PluginHostOptions) {
     this.storages = new StorageManager(options.dataDir);
@@ -69,9 +71,9 @@ export class PluginHost {
     for (const name of subdirs) {
       const pluginDir = path.join(this.options.pluginsDir, name);
 
-      let manifestId: string;
+      let manifest: PluginManifest;
       try {
-        manifestId = (await loadManifest(pluginDir)).id;
+        manifest = await loadManifest(pluginDir);
       } catch (err) {
         console.error(`[plugin-host] skipping "${name}": ${(err as Error).message}`);
         continue;
@@ -85,10 +87,11 @@ export class PluginHost {
           this.broker,
           this.vault,
         );
-        this.activated.set(manifestId, instance);
+        this.activated.set(manifest.id, instance);
+        this.plugins.push(manifest);
       } catch (err) {
         console.error(
-          `[plugin-host] failed to activate "${manifestId}": ${(err as Error).message}`,
+          `[plugin-host] failed to activate "${manifest.id}": ${(err as Error).message}`,
         );
       }
     }
@@ -114,5 +117,10 @@ export class PluginHost {
 
   vaultManager(): VaultManager {
     return this.vault;
+  }
+
+  /** Metadata for every successfully activated plugin. */
+  listPlugins(): PluginManifest[] {
+    return [...this.plugins];
   }
 }

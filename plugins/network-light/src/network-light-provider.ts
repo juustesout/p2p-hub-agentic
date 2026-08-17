@@ -204,6 +204,24 @@ export class NetworkLightProvider implements NetworkProvider {
     return peers;
   }
 
+  /**
+   * Return every currently discovered peer regardless of the skills it
+   * advertises. Useful for capability/inspector UIs that need the full peer
+   * set, not just the peers that serve one specific skill.
+   */
+  listPeers(): NetworkPeer[] {
+    const peers: NetworkPeer[] = [];
+    for (const peer of this.discovered.values()) {
+      peers.push({
+        id: peer.id,
+        address: peer.address,
+        skills: peer.skills,
+        name: peer.name,
+      });
+    }
+    return peers;
+  }
+
   onTask(handler: TaskHandler): void {
     this.taskHandler = handler;
   }

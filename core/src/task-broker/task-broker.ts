@@ -49,6 +49,14 @@ export class TaskBroker {
     return this.skills.has(skill);
   }
 
+  /** List every registered skill with its local-only flag. */
+  listSkills(): Array<{ skill: string; localOnly: boolean }> {
+    return [...this.skills.entries()].map(([skill, record]) => ({
+      skill,
+      localOnly: record.localOnly,
+    }));
+  }
+
   /**
    * Execute an incoming {@link TaskRequest} on behalf of a local caller.
    * Applies no network authorization. Never throws: an unknown skill or a
