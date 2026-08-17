@@ -1,4 +1,5 @@
 import type { ActionHandler, FilterFn } from "../hooks/hook-registry";
+import type { SkillHandler } from "../task-broker/task-broker";
 
 /**
  * Namespace-aware view over the shared {@link HookRegistry}. `emit` and
@@ -10,6 +11,16 @@ export interface HookContext {
   emit(event: string, payload: unknown): Promise<void>;
   registerFilter(event: string, fn: FilterFn, priority?: number): void;
   applyFilters(event: string, value: unknown): Promise<unknown>;
+}
+
+/**
+ * Skill registration for a plugin. The plugin supplies only the local name;
+ * the loader prefixes it with `${pluginId}.`, so a plugin cannot register
+ * outside its own namespace by construction.
+ */
+export interface SkillContext {
+  register(skillName: string, handler: SkillHandler): void;
+  unregister(skillName: string): void;
 }
 
 /**
@@ -35,4 +46,5 @@ export interface PluginContext {
     list(prefix?: string): Promise<string[]>;
   } | null;
   hooks: HookContext;
+  skills: SkillContext;
 }

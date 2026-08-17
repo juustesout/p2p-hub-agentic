@@ -23,6 +23,20 @@ function isCalendarEvent(value: unknown): value is CalendarEvent {
 }
 
 export default function activate(ctx: PluginContext): CalendarPlugin {
+  async function listEvents(): Promise<CalendarEvent[]> {
+    const keys = await ctx.storage.list();
+    const events: CalendarEvent[] = [];
+    for (const key of keys) {
+      const value = await ctx.storage.get(key);
+      if (isCalendarEvent(value)) {
+        events.push(value);
+      }
+    }
+    return events;
+  }
+
+  ctx.skills.register("listEvents", async () => listEvents());
+
   return {
     async addEvent(event) {
       const title = event.title.trim();
@@ -41,17 +55,7 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
       return stored;
     },
 
-    async listEvents() {
-      const keys = await ctx.storage.list();
-      const events: CalendarEvent[] = [];
-      for (const key of keys) {
-        const value = await ctx.storage.get(key);
-        if (isCalendarEvent(value)) {
-          events.push(value);
-        }
-      }
-      return events;
-    },
+    listEvents,
 
     async removeEvent(id) {
       await ctx.storage.delete(id);

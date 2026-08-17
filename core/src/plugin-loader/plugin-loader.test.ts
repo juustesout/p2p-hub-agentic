@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { loadManifest, loadPlugin } from "./plugin-loader";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
+import { TaskBroker } from "../task-broker/task-broker";
 
 async function makeTmpRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "plugin-loader-"));
@@ -258,3 +259,26 @@ test("cross-namespace filter requires permission and enriches calendar save", as
   const saved = await calendar.addEvent({ title: "Lunch", date: "2026-08-19" });
   assert.equal(saved.location, "unknown");
 });
+
+test("skills are registered under the plugin's own prefix", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const taskBroker = new TaskBroker();
+
+  const pluginE = await writePlugin(
+    root,
+    "e",
+    { id: "e", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y");
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await loadPlugin(pluginE, storageManager, new HookRegistry(), taskBroker);
+
+  assert.equal(taskBroker.hasSkill("e.x"), true);
+  assert.equal(taskBroker.hasSkill("x"), false);
+});
+

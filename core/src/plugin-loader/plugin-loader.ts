@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { PluginManifest } from "@p2p-hub/sdk";
 import { HookRegistry } from "../hooks/hook-registry";
+import { TaskBroker } from "../task-broker/task-broker";
 import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext } from "./plugin-context";
 
@@ -91,6 +92,7 @@ export async function loadPlugin(
   pluginDir: string,
   storageManager: StorageManager,
   hookRegistry: HookRegistry,
+  taskBroker: TaskBroker = new TaskBroker(),
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   const own = storageManager.getOrCreate(manifest.id);
@@ -135,6 +137,18 @@ export async function loadPlugin(
       applyFilters: async (event, value) => {
         assertOwnNamespace(manifest.id, event, "applyFilters");
         return hookRegistry.applyFilters(event, value);
+      },
+    },
+    skills: {
+      // The plugin supplies only the local name; we prefix it with its id, so
+      // it cannot register under another plugin's namespace by construction —
+      // no runtime check is needed here, unlike hooks where the plugin can
+      // pass an arbitrary event string.
+      register: (skillName, handler) => {
+        taskBroker.registerSkill(`${manifest.id}.${skillName}`, handler);
+      },
+      unregister: (skillName) => {
+        taskBroker.unregisterSkill(`${manifest.id}.${skillName}`);
       },
     },
   };

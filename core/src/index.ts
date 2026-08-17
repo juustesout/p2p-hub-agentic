@@ -5,3 +5,5 @@ export * from "./hooks/hook-registry";
 export * from "./plugin-loader/plugin-context";
 export * from "./plugin-loader/plugin-loader";
 export * from "./plugin-host/plugin-host";
+export * from "./task-broker/task-broker";
+export * from "./task-broker/wire-network";

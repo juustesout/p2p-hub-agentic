@@ -3,6 +3,7 @@ import type { Dirent } from "node:fs";
 import * as path from "node:path";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
+import { TaskBroker } from "../task-broker/task-broker";
 import { loadManifest, loadPlugin } from "../plugin-loader/plugin-loader";
 
 export interface PluginHostOptions {
@@ -24,11 +25,13 @@ export interface PluginHostOptions {
 export class PluginHost {
   private readonly storages: StorageManager;
   private readonly hooks: HookRegistry;
+  private readonly broker: TaskBroker;
   private readonly activated = new Map<string, unknown>();
 
   constructor(private readonly options: PluginHostOptions) {
     this.storages = new StorageManager(options.dataDir);
     this.hooks = new HookRegistry();
+    this.broker = new TaskBroker();
   }
 
   /**
@@ -67,7 +70,12 @@ export class PluginHost {
       }
 
       try {
-        const instance = await loadPlugin(pluginDir, this.storages, this.hooks);
+        const instance = await loadPlugin(
+          pluginDir,
+          this.storages,
+          this.hooks,
+          this.broker,
+        );
         this.activated.set(manifestId, instance);
       } catch (err) {
         console.error(
@@ -89,5 +97,9 @@ export class PluginHost {
 
   storageManager(): StorageManager {
     return this.storages;
+  }
+
+  taskBroker(): TaskBroker {
+    return this.broker;
   }
 }
