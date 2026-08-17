@@ -8,6 +8,7 @@
     { "path": "./plugins/calendar" },
     { "path": "./plugins/birthday-cards" },
     { "path": "./plugins/vault" },
+    { "path": "./plugins/notepad" },
     { "path": "./apps/core-server" }
   ]
 }

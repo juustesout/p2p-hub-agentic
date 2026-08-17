@@ -1,0 +1,14 @@
+{
+  "id": "notepad",
+  "name": "AI Smart Note",
+  "version": "1.0.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": ["storage:read:notepad"],
+  "exposedEvents": ["notepad:noteCreated", "notepad:noteUpdated"],
+  "ui": {
+    "entry": "dist/index.html",
+    "defaultWidth": 800,
+    "defaultHeight": 600
+  }
+}

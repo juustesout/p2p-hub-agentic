@@ -1,0 +1,19 @@
+{
+  "name": "@p2p-hub/notepad",
+  "version": "1.0.0",
+  "description": "AI Smart Note: reference app for the PBX/OLE document standard",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-ui.cjs",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/sdk": "0.1.0"
+  },
+  "license": "MIT"
+}

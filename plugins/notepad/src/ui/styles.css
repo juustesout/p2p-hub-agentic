@@ -1,0 +1,285 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --border: #2a2f3a;
+  --text: #e6e8ee;
+  --text-dim: #9aa2b1;
+  --accent: #4f8cff;
+  --accent-soft: rgba(79, 140, 255, 0.16);
+  --danger: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.note-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.note-list li {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+
+.note-list li:hover {
+  background: var(--panel-2);
+}
+
+.note-list li.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.bridge-status {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Editor */
+.editor {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.title-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.title-input::placeholder {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.content-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  color: var(--text);
+  padding: 20px 22px;
+  font-size: 15px;
+  line-height: 1.7;
+  font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas,
+    monospace;
+}
+
+/* Markdown preview */
+.preview {
+  flex: 1;
+  padding: 20px 22px;
+  overflow-y: auto;
+  line-height: 1.7;
+  font-size: 15px;
+}
+
+.preview.hidden,
+.ai-toolbar.hidden,
+.toast.hidden {
+  display: none;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin: 0.6em 0 0.3em;
+}
+
+.markdown p {
+  margin: 0.4em 0;
+}
+
+.markdown code {
+  background: var(--panel-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.markdown pre {
+  background: var(--panel-2);
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.4em;
+}
+
+/* Embedded objects */
+.embeds {
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.embeds-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.embed-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.embed-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 140px;
+}
+
+.embed-card .embed-class {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.embed-card .embed-id {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+
+/* Floating AI toolbar */
+.ai-toolbar {
+  position: absolute;
+  z-index: 10;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+}
+
+.ai-toolbar button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 7px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.ai-toolbar button:hover {
+  background: var(--accent-soft);
+}
+
+/* Toast */
+.toast {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}

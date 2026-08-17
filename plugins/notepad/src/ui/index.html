@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Smart Note</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <span class="brand">AI Smart Note</span>
+          <button id="new-note" class="btn btn-primary" title="New note">+ New</button>
+        </div>
+        <ul id="note-list" class="note-list"></ul>
+        <div id="bridge-status" class="bridge-status">mode: local demo</div>
+      </aside>
+
+      <main class="editor">
+        <div class="editor-toolbar">
+          <input
+            id="note-title"
+            class="title-input"
+            placeholder="Untitled note"
+            autocomplete="off"
+          />
+          <div class="toolbar-actions">
+            <button id="embed-btn" class="btn" title="Embed an object (OLE)">Embed</button>
+            <button id="toggle-preview" class="btn" title="Toggle preview">Preview</button>
+          </div>
+        </div>
+
+        <textarea
+          id="note-content"
+          class="content-input"
+          placeholder="Start writing…"
+          spellcheck="false"
+        ></textarea>
+
+        <div id="preview" class="preview markdown hidden"></div>
+
+        <div id="embeds" class="embeds">
+          <div class="embeds-title">Embedded objects</div>
+          <div id="embed-list" class="embed-list"></div>
+        </div>
+
+        <div id="ai-toolbar" class="ai-toolbar hidden">
+          <button data-instruction="Summarize this text into 2-3 concise sentences.">Summarize</button>
+          <button data-instruction="Fix the grammar and spelling while preserving the meaning.">Fix Grammar</button>
+          <button data-instruction="Translate this text into English.">Translate</button>
+          <button data-instruction="Expand this text with more detail and examples.">Expand</button>
+        </div>
+
+        <div id="toast" class="toast hidden"></div>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
