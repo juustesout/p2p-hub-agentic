@@ -101,6 +101,33 @@ test("loadManifest rejects a manifest with missing required fields", async () =>
   await assert.rejects(() => loadManifest(dir), /"id"/);
 });
 
+test("loadManifest rejects a plugin id containing path characters", async () => {
+  const root = await makeTmpRoot();
+  const dir = await writePlugin(
+    root,
+    "evil",
+    { id: "../../other-plugin", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate() {}`,
+  );
+
+  await assert.rejects(() => loadManifest(dir), /"id"/);
+});
+
+test("loadPlugin rejects an entry that escapes the plugin directory", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginD = await writePlugin(
+    root,
+    "d",
+    { id: "d", version: "1.0.0", kind: "generic", permissions: [], entry: "../../escape.mjs" },
+    `export default function activate() {}`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(() => loadPlugin(pluginD, storageManager), /escapes/);
+});
+
 test("storage keys are not interpreted as filesystem paths", async () => {
   const root = await makeTmpRoot();
   const dataDir = path.join(root, "data");

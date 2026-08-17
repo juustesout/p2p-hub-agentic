@@ -42,6 +42,15 @@ function validateManifest(
   if (typeof manifest.id !== "string" || manifest.id.length === 0) {
     throw new Error(`invalid plugin manifest at ${manifestPath}: missing or empty "id"`);
   }
+  // The id is used to build `<dataDir>/<pluginId>.json` and as the permission
+  // string `storage:read:<id>`. Restrict it to a safe identifier so a
+  // plugin-authored id can never inject path separators or traversal.
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.id)) {
+    throw new Error(
+      `invalid plugin manifest at ${manifestPath}: "id" must start with an ` +
+        `alphanumeric and contain only alphanumerics, ".", "_" or "-"`,
+    );
+  }
   if (typeof manifest.version !== "string" || manifest.version.length === 0) {
     throw new Error(
       `invalid plugin manifest at ${manifestPath}: missing or empty "version"`,
@@ -103,7 +112,16 @@ export async function loadPlugin(
     },
   };
 
-  const entryPath = path.resolve(pluginDir, manifest.entry);
+  const pluginDirResolved = path.resolve(pluginDir);
+  const entryPath = path.resolve(pluginDirResolved, manifest.entry);
+  if (
+    entryPath !== pluginDirResolved &&
+    !entryPath.startsWith(pluginDirResolved + path.sep)
+  ) {
+    throw new Error(
+      `plugin "${manifest.id}" entry "${manifest.entry}" escapes its directory`,
+    );
+  }
   const module = await importEntry(pathToFileURL(entryPath).href);
   const activate = resolveActivate(module);
 
