@@ -1,0 +1,22 @@
+{
+  "name": "@p2p-hub/core-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HTTP + WebSocket bridge exposing @p2p-hub/core capabilities to the desktop shell",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/network-light": "0.1.0",
+    "@p2p-hub/sdk": "0.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12"
+  },
+  "license": "MIT"
+}

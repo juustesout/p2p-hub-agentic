@@ -6,7 +6,9 @@
   "workspaces": [
     "sdk",
     "core",
-    "plugins/*"
+    "plugins/*",
+    "apps/core-server",
+    "apps/desktop-shell"
   ],
   "scripts": {
     "build": "tsc -b",
