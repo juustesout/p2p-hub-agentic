@@ -7,6 +7,7 @@ import { loadManifest, loadPlugin } from "./plugin-loader";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
+import { VaultManager } from "../storage/vault-manager";
 
 async function makeTmpRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "plugin-loader-"));
@@ -281,4 +282,34 @@ test("skills are registered under the plugin's own prefix", async () => {
   assert.equal(taskBroker.hasSkill("e.x"), true);
   assert.equal(taskBroker.hasSkill("x"), false);
 });
+
+test("plugins receive ctx.ai and get a VaultError when no key is configured", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginF = await writePlugin(
+    root,
+    "f",
+    { id: "f", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      return { generate: () => ctx.ai.generateText({ prompt: "hi" }) };
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const vaultManager = new VaultManager({
+    dataDir: path.join(root, "vault"),
+    masterKey: "test-master",
+  });
+  const result = (await loadPlugin(
+    pluginF,
+    storageManager,
+    new HookRegistry(),
+    new TaskBroker(),
+    vaultManager,
+  )) as { generate(): Promise<string> };
+
+  await assert.rejects(result.generate(), /VaultError/);
+});
+
 

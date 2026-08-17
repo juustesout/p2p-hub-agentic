@@ -16,4 +16,12 @@ export interface PluginManifest {
   permissions: string[];
   /** Module path, relative to the plugin root. */
   entry: string;
+  /** Optional human-readable name. */
+  name?: string;
+  /**
+   * Hook events this plugin opts in to exposing to remote peers. Empty by
+   * default — internal hooks are never bridged to the network unless a plugin
+   * explicitly lists them here.
+   */
+  exposedEvents?: string[];
 }

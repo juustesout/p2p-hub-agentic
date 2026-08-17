@@ -4,11 +4,14 @@ import * as path from "node:path";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
+import { VaultManager } from "../storage/vault-manager";
 import { loadManifest, loadPlugin } from "../plugin-loader/plugin-loader";
 
 export interface PluginHostOptions {
   pluginsDir: string;
   dataDir: string;
+  /** Master passphrase for the encrypted vault. Falls back to env/DEV. */
+  masterKey?: string;
 }
 
 /**
@@ -26,12 +29,17 @@ export class PluginHost {
   private readonly storages: StorageManager;
   private readonly hooks: HookRegistry;
   private readonly broker: TaskBroker;
+  private readonly vault: VaultManager;
   private readonly activated = new Map<string, unknown>();
 
   constructor(private readonly options: PluginHostOptions) {
     this.storages = new StorageManager(options.dataDir);
     this.hooks = new HookRegistry();
     this.broker = new TaskBroker();
+    this.vault = new VaultManager({
+      dataDir: options.dataDir,
+      masterKey: options.masterKey,
+    });
   }
 
   /**
@@ -75,6 +83,7 @@ export class PluginHost {
           this.storages,
           this.hooks,
           this.broker,
+          this.vault,
         );
         this.activated.set(manifestId, instance);
       } catch (err) {
@@ -101,5 +110,9 @@ export class PluginHost {
 
   taskBroker(): TaskBroker {
     return this.broker;
+  }
+
+  vaultManager(): VaultManager {
+    return this.vault;
   }
 }

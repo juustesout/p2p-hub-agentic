@@ -1,0 +1,9 @@
+{
+  "id": "vault",
+  "version": "0.0.1",
+  "kind": "generic",
+  "permissions": [],
+  "entry": "./dist/index.js",
+  "name": "Secret Vault",
+  "exposedEvents": []
+}

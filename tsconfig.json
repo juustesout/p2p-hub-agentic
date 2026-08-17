@@ -6,6 +6,7 @@
     { "path": "./plugins/network-light" },
     { "path": "./plugins/network-agentanycast" },
     { "path": "./plugins/calendar" },
-    { "path": "./plugins/birthday-cards" }
+    { "path": "./plugins/birthday-cards" },
+    { "path": "./plugins/vault" }
   ]
 }

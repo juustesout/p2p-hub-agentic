@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 import type { PluginManifest } from "@p2p-hub/sdk";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
+import { CoreAIProvider } from "../ai/core-ai-provider";
+import { VaultManager } from "../storage/vault-manager";
 import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext } from "./plugin-context";
 
@@ -81,6 +83,20 @@ function validateManifest(
       `invalid plugin manifest at ${manifestPath}: missing or empty "entry"`,
     );
   }
+  if (manifest.name !== undefined && typeof manifest.name !== "string") {
+    throw new Error(
+      `invalid plugin manifest at ${manifestPath}: "name" must be a string`,
+    );
+  }
+  if (
+    manifest.exposedEvents !== undefined &&
+    (!Array.isArray(manifest.exposedEvents) ||
+      !manifest.exposedEvents.every((e) => typeof e === "string"))
+  ) {
+    throw new Error(
+      `invalid plugin manifest at ${manifestPath}: "exposedEvents" must be an array of strings`,
+    );
+  }
 }
 
 /**
@@ -93,9 +109,11 @@ export async function loadPlugin(
   storageManager: StorageManager,
   hookRegistry: HookRegistry,
   taskBroker: TaskBroker = new TaskBroker(),
+  vaultManager: VaultManager = new VaultManager(),
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   const own = storageManager.getOrCreate(manifest.id);
+  const aiProvider = new CoreAIProvider({ vault: vaultManager });
 
   const context: PluginContext = {
     storage: {
@@ -150,6 +168,15 @@ export async function loadPlugin(
       unregister: (skillName) => {
         taskBroker.unregisterSkill(`${manifest.id}.${skillName}`);
       },
+    },
+    ai: {
+      generateText: (options) => aiProvider.generateText(options),
+      generateImage: (options) => aiProvider.generateImage(options),
+    },
+    vault: {
+      setSecret: (key, value) => vaultManager.setSecret(key, value),
+      listSecretKeys: () => vaultManager.listSecretKeys(),
+      deleteSecret: (key) => vaultManager.deleteSecret(key),
     },
   };
 

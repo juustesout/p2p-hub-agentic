@@ -1,3 +1,4 @@
+import type { AIContext } from "@p2p-hub/sdk";
 import type { ActionHandler, FilterFn } from "../hooks/hook-registry";
 import type { SkillHandler } from "../task-broker/task-broker";
 
@@ -24,6 +25,17 @@ export interface SkillContext {
 }
 
 /**
+ * Restricted vault surface exposed to plugins. There is deliberately no
+ * `getSecret` here — plugins can set, list and delete secrets, but can never
+ * read a raw secret value. Only the core AI provider reads raw keys.
+ */
+export interface VaultContext {
+  setSecret(key: string, value: string): Promise<void>;
+  listSecretKeys(): Promise<string[]>;
+  deleteSecret(key: string): Promise<boolean>;
+}
+
+/**
  * The object handed to a plugin at activation time. This is the enforcement
  * point for permissions: a plugin can only touch its own storage directly,
  * and can only reach another plugin's storage via {@link readStorageOf}, which
@@ -47,4 +59,6 @@ export interface PluginContext {
   } | null;
   hooks: HookContext;
   skills: SkillContext;
+  ai: AIContext;
+  vault: VaultContext;
 }
