@@ -1,3 +1,17 @@
+import type { ActionHandler, FilterFn } from "../hooks/hook-registry";
+
+/**
+ * Namespace-aware view over the shared {@link HookRegistry}. `emit` and
+ * `applyFilters` are restricted to the plugin's own namespace, and
+ * cross-namespace `registerFilter` requires a permission.
+ */
+export interface HookContext {
+  on(event: string, handler: ActionHandler, priority?: number): void;
+  emit(event: string, payload: unknown): Promise<void>;
+  registerFilter(event: string, fn: FilterFn, priority?: number): void;
+  applyFilters(event: string, value: unknown): Promise<unknown>;
+}
+
 /**
  * The object handed to a plugin at activation time. This is the enforcement
  * point for permissions: a plugin can only touch its own storage directly,
@@ -20,4 +34,5 @@ export interface PluginContext {
     get(key: string): Promise<unknown>;
     list(prefix?: string): Promise<string[]>;
   } | null;
+  hooks: HookContext;
 }

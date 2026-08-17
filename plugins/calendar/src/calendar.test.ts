@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadPlugin, StorageManager } from "@p2p-hub/core";
+import { loadPlugin, StorageManager, HookRegistry } from "@p2p-hub/core";
 
 const pluginDir = path.resolve(__dirname, "..");
 
@@ -23,7 +23,11 @@ test("calendar plugin stores, lists and removes events via ctx.storage only", as
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "calendar-data-"));
   const storageManager = new StorageManager(dataDir);
 
-  const calendar = (await loadPlugin(pluginDir, storageManager)) as CalendarApi;
+  const calendar = (await loadPlugin(
+    pluginDir,
+    storageManager,
+    new HookRegistry(),
+  )) as CalendarApi;
 
   const standup = await calendar.addEvent({ title: "Standup", date: "2026-08-17" });
   const review = await calendar.addEvent({ title: "Review", date: "2026-08-18" });
@@ -56,7 +60,11 @@ test("addEvent rejects empty title or date", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "calendar-data-"));
   const storageManager = new StorageManager(dataDir);
 
-  const calendar = (await loadPlugin(pluginDir, storageManager)) as CalendarApi;
+  const calendar = (await loadPlugin(
+    pluginDir,
+    storageManager,
+    new HookRegistry(),
+  )) as CalendarApi;
 
   await assert.rejects(
     calendar.addEvent({ title: "   ", date: "2026-08-17" }),

@@ -31,8 +31,13 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
         throw new Error("title and date must not be empty");
       }
       const id = `event-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const stored: CalendarEvent = { id, title, date };
+      let stored: CalendarEvent = { id, title, date };
+      stored = (await ctx.hooks.applyFilters(
+        "calendar:beforeSave",
+        stored,
+      )) as CalendarEvent;
       await ctx.storage.set(id, stored);
+      await ctx.hooks.emit("calendar:eventAdded", stored);
       return stored;
     },
 

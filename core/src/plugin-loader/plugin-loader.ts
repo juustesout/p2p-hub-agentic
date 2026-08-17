@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { PluginManifest } from "@p2p-hub/sdk";
+import { HookRegistry } from "../hooks/hook-registry";
 import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext } from "./plugin-context";
 
@@ -89,6 +90,7 @@ function validateManifest(
 export async function loadPlugin(
   pluginDir: string,
   storageManager: StorageManager,
+  hookRegistry: HookRegistry,
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   const own = storageManager.getOrCreate(manifest.id);
@@ -109,6 +111,31 @@ export async function loadPlugin(
         get: (key) => other.get(key),
         list: (prefix) => other.list(prefix),
       };
+    },
+    hooks: {
+      on: (event, handler, priority = 10) => {
+        hookRegistry.on(event, handler, priority);
+      },
+      emit: async (event, payload) => {
+        assertOwnNamespace(manifest.id, event, "emit");
+        await hookRegistry.emit(event, payload);
+      },
+      registerFilter: (event, fn, priority = 10) => {
+        if (
+          !event.startsWith(`${manifest.id}:`) &&
+          !manifest.permissions.includes(`hooks:filter:${event}`)
+        ) {
+          throw new Error(
+            `plugin "${manifest.id}" lacks permission ` +
+              `"hooks:filter:${event}" to register a cross-namespace filter`,
+          );
+        }
+        hookRegistry.registerFilter(event, fn, priority);
+      },
+      applyFilters: async (event, value) => {
+        assertOwnNamespace(manifest.id, event, "applyFilters");
+        return hookRegistry.applyFilters(event, value);
+      },
     },
   };
 
@@ -140,6 +167,16 @@ const importEntry = new Function(
   "specifier",
   "return import(specifier)",
 ) as (specifier: string) => Promise<Record<string, unknown>>;
+
+function assertOwnNamespace(pluginId: string, event: string, verb: string): void {
+  if (!event.startsWith(`${pluginId}:`)) {
+    const idx = event.indexOf(":");
+    const namespace = idx === -1 ? event : event.slice(0, idx);
+    throw new Error(
+      `plugin "${pluginId}" cannot ${verb} on namespace "${namespace}"`,
+    );
+  }
+}
 
 function resolveActivate(module: Record<string, unknown>): unknown {
   let candidate: unknown = module.default ?? module;

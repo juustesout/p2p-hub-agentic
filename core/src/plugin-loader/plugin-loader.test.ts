@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { loadManifest, loadPlugin } from "./plugin-loader";
 import { StorageManager } from "../storage/storage-manager";
+import { HookRegistry } from "../hooks/hook-registry";
 
 async function makeTmpRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "plugin-loader-"));
@@ -29,6 +30,7 @@ async function writePlugin(
 test("plugin without storage:read permission cannot read another plugin's storage", async () => {
   const root = await makeTmpRoot();
   const dataDir = path.join(root, "data");
+  const hookRegistry = new HookRegistry();
 
   const pluginA = await writePlugin(
     root,
@@ -49,8 +51,8 @@ test("plugin without storage:read permission cannot read another plugin's storag
   );
 
   const storageManager = new StorageManager(dataDir);
-  await loadPlugin(pluginA, storageManager);
-  const result = (await loadPlugin(pluginB, storageManager)) as {
+  await loadPlugin(pluginA, storageManager, hookRegistry);
+  const result = (await loadPlugin(pluginB, storageManager, hookRegistry)) as {
     readStorageOf: unknown;
   };
 
@@ -60,6 +62,7 @@ test("plugin without storage:read permission cannot read another plugin's storag
 test("plugin with storage:read permission can read another plugin's storage", async () => {
   const root = await makeTmpRoot();
   const dataDir = path.join(root, "data");
+  const hookRegistry = new HookRegistry();
 
   const pluginA = await writePlugin(
     root,
@@ -80,8 +83,8 @@ test("plugin with storage:read permission can read another plugin's storage", as
   );
 
   const storageManager = new StorageManager(dataDir);
-  await loadPlugin(pluginA, storageManager);
-  const result = (await loadPlugin(pluginB, storageManager)) as {
+  await loadPlugin(pluginA, storageManager, hookRegistry);
+  const result = (await loadPlugin(pluginB, storageManager, hookRegistry)) as {
     readStorageOf: { get(key: string): Promise<unknown> } | null;
   };
 
@@ -125,7 +128,10 @@ test("loadPlugin rejects an entry that escapes the plugin directory", async () =
   );
 
   const storageManager = new StorageManager(dataDir);
-  await assert.rejects(() => loadPlugin(pluginD, storageManager), /escapes/);
+  await assert.rejects(
+    () => loadPlugin(pluginD, storageManager, new HookRegistry()),
+    /escapes/,
+  );
 });
 
 test("storage keys are not interpreted as filesystem paths", async () => {
@@ -143,7 +149,11 @@ test("storage keys are not interpreted as filesystem paths", async () => {
   );
 
   const storageManager = new StorageManager(dataDir);
-  const result = (await loadPlugin(pluginC, storageManager)) as { keys: string[] };
+  const result = (await loadPlugin(
+    pluginC,
+    storageManager,
+    new HookRegistry(),
+  )) as { keys: string[] };
 
   assert.deepEqual(result.keys, ["../other-plugin/secret"]);
 
@@ -154,4 +164,97 @@ test("storage keys are not interpreted as filesystem paths", async () => {
 
   const escaped = path.join(dataDir, "..", "other-plugin", "secret");
   await assert.rejects(() => fs.access(escaped));
+});
+
+test("plugin cannot emit on another plugin's namespace", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginB = await writePlugin(
+    root,
+    "b",
+    { id: "b", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      return { emit: () => ctx.hooks.emit("calendar:fake", {}) };
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const result = (await loadPlugin(
+    pluginB,
+    storageManager,
+    new HookRegistry(),
+  )) as { emit(): Promise<void> };
+
+  await assert.rejects(result.emit(), /cannot emit/);
+});
+
+test("plugin cannot applyFilters on another plugin's namespace", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginB = await writePlugin(
+    root,
+    "b",
+    { id: "b", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      return { applyFilters: () => ctx.hooks.applyFilters("calendar:beforeSave", {}) };
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const result = (await loadPlugin(
+    pluginB,
+    storageManager,
+    new HookRegistry(),
+  )) as { applyFilters(): Promise<unknown> };
+
+  await assert.rejects(result.applyFilters(), /cannot applyFilters/);
+});
+
+test("cross-namespace filter requires permission and enriches calendar save", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const hookRegistry = new HookRegistry();
+  const storageManager = new StorageManager(dataDir);
+
+  const bNoPerm = await writePlugin(
+    root,
+    "b-noperm",
+    { id: "b-noperm", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.hooks.registerFilter("calendar:beforeSave", (event) => event);
+      return {};
+    }`,
+  );
+  await assert.rejects(
+    () => loadPlugin(bNoPerm, storageManager, hookRegistry),
+    /hooks:filter:calendar:beforeSave/,
+  );
+
+  const bWithPerm = await writePlugin(
+    root,
+    "b-perm",
+    { id: "b-perm", version: "1.0.0", kind: "generic", permissions: ["hooks:filter:calendar:beforeSave"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.hooks.registerFilter("calendar:beforeSave", (event) => {
+        if (!event.location) return { ...event, location: "unknown" };
+        return event;
+      });
+      return {};
+    }`,
+  );
+  await loadPlugin(bWithPerm, storageManager, hookRegistry);
+
+  const calendarDir = path.resolve(__dirname, "../../../plugins/calendar");
+  const calendar = (await loadPlugin(
+    calendarDir,
+    storageManager,
+    hookRegistry,
+  )) as {
+    addEvent(event: { title: string; date: string }): Promise<Record<string, unknown>>;
+  };
+
+  const saved = await calendar.addEvent({ title: "Lunch", date: "2026-08-19" });
+  assert.equal(saved.location, "unknown");
 });
