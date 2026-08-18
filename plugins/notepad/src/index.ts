@@ -198,13 +198,13 @@ export default function activate(ctx: PluginContext): NotepadPlugin {
       }
       return createNote({ title, content });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
     "listNotes",
     async () => listNotes(),
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
@@ -216,7 +216,7 @@ export default function activate(ctx: PluginContext): NotepadPlugin {
       }
       return getNote(noteId);
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
@@ -238,7 +238,7 @@ export default function activate(ctx: PluginContext): NotepadPlugin {
       }
       return aiTransformBlock({ noteId, blockId, instruction });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
@@ -260,7 +260,7 @@ export default function activate(ctx: PluginContext): NotepadPlugin {
       }
       return embedObject({ noteId, targetObjectId, targetClass });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   return {

@@ -61,6 +61,7 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
 
   ctx.skills.register("listEvents", async () => listEvents(), {
     localOnly: false,
+    httpExposed: true,
   });
 
   ctx.skills.register(
@@ -75,7 +76,7 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
       }
       return addEvent({ title, date });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
@@ -88,7 +89,7 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
       await removeEvent(id);
       return { ok: true };
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   return {

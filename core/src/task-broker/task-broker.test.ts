@@ -78,3 +78,26 @@ test("a local-only skill is still reachable via handle (local callers)", async (
   assert.equal(result.status, "ok");
   assert.equal(result.result, "x");
 });
+
+test("skills are NOT HTTP-exposed by default and rejected by handleHttp", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("vault.setSecret", async () => ({ ok: true }));
+
+  const result = await broker.handleHttp(task({ skill: "vault.setSecret" }));
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /not exposed over the HTTP bridge/);
+});
+
+test("handleHttp allows skills explicitly opted in to HTTP exposure", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("calc.recalc", async () => ({ ok: true }), {
+    localOnly: true,
+    httpExposed: true,
+  });
+
+  const result = await broker.handleHttp(task({ skill: "calc.recalc" }));
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.result, { ok: true });
+});

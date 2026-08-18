@@ -69,8 +69,8 @@ export interface VaultKeyMeta {
 }
 
 export interface VaultModelInfo {
-  model: string | null;
-  baseUrl: string | null;
+  hasModel: boolean;
+  hasBaseUrl: boolean;
   hasApiKey: boolean;
 }
 

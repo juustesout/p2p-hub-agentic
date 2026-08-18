@@ -10,11 +10,21 @@ export interface SkillRegistrationOptions {
    * skill in to remote invocation via `wireNetworkToBroker`.
    */
   localOnly?: boolean;
+  /**
+   * When true, the skill may be invoked through the local HTTP bridge
+   * ({@link TaskBroker.handleHttp}), e.g. by the desktop shell. Defaults to
+   * false: a skill is NOT reachable over HTTP unless it explicitly opts in,
+   * independent of its `localOnly` network flag. This is deny-by-default so
+   * an arbitrary HTTP client can never reach a skill the author did not
+   * deliberately expose.
+   */
+  httpExposed?: boolean;
 }
 
 interface SkillRecord {
   handler: SkillHandler;
   localOnly: boolean;
+  httpExposed: boolean;
 }
 
 /**
@@ -38,6 +48,7 @@ export class TaskBroker {
     this.skills.set(skill, {
       handler,
       localOnly: options.localOnly ?? true,
+      httpExposed: options.httpExposed ?? false,
     });
   }
 
@@ -49,11 +60,16 @@ export class TaskBroker {
     return this.skills.has(skill);
   }
 
-  /** List every registered skill with its local-only flag. */
-  listSkills(): Array<{ skill: string; localOnly: boolean }> {
+  /** List every registered skill with its local-only and HTTP-exposure flags. */
+  listSkills(): Array<{
+    skill: string;
+    localOnly: boolean;
+    httpExposed: boolean;
+  }> {
     return [...this.skills.entries()].map(([skill, record]) => ({
       skill,
       localOnly: record.localOnly,
+      httpExposed: record.httpExposed,
     }));
   }
 
@@ -63,7 +79,7 @@ export class TaskBroker {
    * throwing handler both resolve to a `status: "error"` {@link TaskResult}.
    */
   async handle(task: TaskRequest): Promise<TaskResult> {
-    return this.execute(task, false);
+    return this.execute(task, "local");
   }
 
   /**
@@ -72,12 +88,23 @@ export class TaskBroker {
    * hand to `provider.onTask(...)`.
    */
   async handleRemote(task: TaskRequest): Promise<TaskResult> {
-    return this.execute(task, true);
+    return this.execute(task, "network");
+  }
+
+  /**
+   * Execute an incoming {@link TaskRequest} received over the local HTTP
+   * bridge. Rejects skills unless they are explicitly registered with
+   * `httpExposed: true`. Never throws. This is the function to call from the
+   * HTTP `/api/execute` endpoint so the HTTP client is not treated as a
+   * trusted in-process caller.
+   */
+  async handleHttp(task: TaskRequest): Promise<TaskResult> {
+    return this.execute(task, "http");
   }
 
   private async execute(
     task: TaskRequest,
-    remote: boolean,
+    gate: "local" | "network" | "http",
   ): Promise<TaskResult> {
     const record = this.skills.get(task.skill);
     if (!record) {
@@ -87,11 +114,18 @@ export class TaskBroker {
         error: `no skill registered for "${task.skill}"`,
       };
     }
-    if (remote && record.localOnly) {
+    if (gate === "network" && record.localOnly) {
       return {
         taskId: task.id,
         status: "error",
         error: `skill "${task.skill}" is local-only and not network-accessible`,
+      };
+    }
+    if (gate === "http" && !record.httpExposed) {
+      return {
+        taskId: task.id,
+        status: "error",
+        error: `skill "${task.skill}" is not exposed over the HTTP bridge`,
       };
     }
     try {

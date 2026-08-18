@@ -43,7 +43,7 @@ interface AppState {
 
 const emptyVault: VaultState = {
   keys: [],
-  model: { model: null, baseUrl: null, hasApiKey: false },
+  model: { hasModel: false, hasBaseUrl: false, hasApiKey: false },
   masterKeyConfigured: false,
 };
 

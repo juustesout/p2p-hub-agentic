@@ -129,7 +129,7 @@ export class CoreServer {
     this.broker.registerSkill(
       "core.echo",
       async (payload) => payload,
-      { localOnly: false },
+      { localOnly: false, httpExposed: true },
     );
 
     const aiProvider = new CoreAIProvider({ vault: this.host.vaultManager() });
@@ -150,7 +150,7 @@ export class CoreServer {
           model: typeof model === "string" ? model : undefined,
         });
       },
-      { localOnly: true },
+      { localOnly: true, httpExposed: true },
     );
   }
 
@@ -263,10 +263,10 @@ export class CoreServer {
       }
       if (req.method === "GET" && path === "/api/vault/model") {
         const vault = this.host.vaultManager();
-        const model = await vault.getSecret("ai.model");
-        const baseUrl = await vault.getSecret("ai.baseUrl");
+        const hasModel = await vault.hasSecret("ai.model");
+        const hasBaseUrl = await vault.hasSecret("ai.baseUrl");
         const hasApiKey = await vault.hasSecret("ai.apiKey");
-        return this.sendJson(res, 200, { model, baseUrl, hasApiKey });
+        return this.sendJson(res, 200, { hasModel, hasBaseUrl, hasApiKey });
       }
       if (req.method === "POST" && path === "/api/vault/set") {
         const body = (await readJson(req)) as { key?: unknown; value?: unknown };
@@ -276,12 +276,26 @@ export class CoreServer {
             error: "set expects { key: string, value: string }",
           });
         }
+        const reserved = this.reservedPrefixFor(body.key);
+        if (reserved) {
+          return this.sendJson(res, 403, {
+            ok: false,
+            error: `vault key "${body.key}" is in the reserved namespace "${reserved}" and cannot be modified over HTTP`,
+          });
+        }
         await this.host.vaultManager().setSecret(body.key, body.value);
         this.broadcast("vault:updated", { key: body.key, action: "set" });
         return this.sendJson(res, 200, { ok: true, key: body.key });
       }
       if (req.method === "DELETE" && path.startsWith("/api/vault/")) {
         const key = decodeURIComponent(path.slice("/api/vault/".length));
+        const reserved = this.reservedPrefixFor(key);
+        if (reserved) {
+          return this.sendJson(res, 403, {
+            ok: false,
+            error: `vault key "${key}" is in the reserved namespace "${reserved}" and cannot be modified over HTTP`,
+          });
+        }
         const deleted = await this.host.vaultManager().deleteSecret(key);
         this.broadcast("vault:updated", { key, action: "delete" });
         return this.sendJson(res, 200, { ok: true, deleted });
@@ -306,6 +320,7 @@ export class CoreServer {
     const skills = this.broker.listSkills().map((s) => ({
       skill: s.skill,
       localOnly: s.localOnly,
+      httpExposed: s.httpExposed,
       pluginId: s.skill.split(".")[0] ?? "",
     }));
 
@@ -362,7 +377,7 @@ export class CoreServer {
 
     const result = body.peerId
       ? await this.executeRemote(body.peerId, skill, id, body.arguments)
-      : await this.broker.handle({ id, skill, payload: body.arguments });
+      : await this.broker.handleHttp({ id, skill, payload: body.arguments });
 
     this.broadcast("task:completed", {
       requestId: id,
@@ -389,6 +404,17 @@ export class CoreServer {
       return { taskId: id, status: "error", error: `unknown peer "${peerId}"` };
     }
     return this.provider.sendTask(peer, { id, skill, payload: args });
+  }
+
+  /**
+   * Return the reserved namespace a key falls into (e.g. `ai.`), or null when
+   * the key is writable. This mirrors the `assertWritable` guard the plugin
+   * loader enforces on the plugin-facing {@link VaultContext}; the HTTP client
+   * must not be able to rewrite the AI key/endpoint that core later uses.
+   */
+  private reservedPrefixFor(key: string): string | null {
+    const reserved = this.host.vaultManager().reservedPrefixes;
+    return reserved.find((p) => key.startsWith(p)) ?? null;
   }
 
   private sendJson(

@@ -115,11 +115,23 @@ export function VaultModal({ open, onClose }: VaultModalProps) {
             <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm">
               <div className="flex items-center justify-between">
                 <span className="text-slate-400">Model</span>
-                <span className="text-slate-200">{model.model ?? "not set"}</span>
+                <span
+                  className={
+                    model.hasModel ? "text-emerald-300" : "text-slate-500"
+                  }
+                >
+                  {model.hasModel ? "configured" : "missing"}
+                </span>
               </div>
               <div className="mt-1 flex items-center justify-between">
                 <span className="text-slate-400">Endpoint</span>
-                <span className="text-slate-200">{model.baseUrl ?? "not set"}</span>
+                <span
+                  className={
+                    model.hasBaseUrl ? "text-emerald-300" : "text-slate-500"
+                  }
+                >
+                  {model.hasBaseUrl ? "configured" : "missing"}
+                </span>
               </div>
               <div className="mt-1 flex items-center justify-between">
                 <span className="text-slate-400">API key</span>
