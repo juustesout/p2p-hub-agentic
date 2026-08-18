@@ -1,0 +1,12 @@
+{
+  "id": "chat",
+  "name": "P2P Chat",
+  "version": "0.1.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": [
+    "network:skill:chat.receiveMessage",
+    "storage:read:contacts"
+  ],
+  "exposedEvents": ["chat:messageReceived"]
+}

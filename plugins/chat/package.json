@@ -1,0 +1,19 @@
+{
+  "name": "@p2p-hub/chat",
+  "version": "0.1.0",
+  "description": "P2P signed 1-op-1 messaging over the network capability",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/sdk": "0.1.0"
+  },
+  "license": "MIT"
+}
