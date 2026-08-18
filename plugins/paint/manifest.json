@@ -1,0 +1,14 @@
+{
+  "id": "paint",
+  "name": "AI Canvas",
+  "version": "1.0.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": ["storage:read:paint"],
+  "exposedEvents": ["paint:canvasCreated", "paint:layerAdded"],
+  "ui": {
+    "entry": "dist/index.html",
+    "defaultWidth": 1000,
+    "defaultHeight": 700
+  }
+}

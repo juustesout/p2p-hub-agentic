@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <title>AI Canvas</title>
+    <link rel="stylesheet" href="styles.css?v=1" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="toolbar">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span>AI Canvas</span>
+          <span id="bridge-status" class="bridge-status">mode: local demo</span>
+        </div>
+
+        <div class="tool-group">
+          <button id="tool-pen" class="tool active" data-tool="pen" title="Pen">Pen</button>
+          <button id="tool-fill" class="tool" data-tool="fill" title="Fill">Fill</button>
+          <input id="color" type="color" value="#4f8cff" title="Color" />
+          <input id="size" type="range" min="1" max="32" value="4" title="Brush size" />
+        </div>
+
+        <div class="tool-group">
+          <button id="save-layer" title="Commit current drawing as a layer">Save layer</button>
+          <button id="clear" title="Clear drawing">Clear</button>
+          <button id="export" title="Export flattened image">Export</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section class="canvas-wrap">
+          <canvas id="board" width="800" height="600"></canvas>
+          <div id="empty-hint" class="empty-hint">Draw with the pen, or generate an image below.</div>
+        </section>
+
+        <aside class="side">
+          <div class="panel">
+            <p class="panel-title">AI generate</p>
+            <textarea id="prompt" rows="3" placeholder="e.g. a calm mountain lake at dusk"></textarea>
+            <button id="generate" class="primary">Generate image</button>
+          </div>
+
+          <div class="panel">
+            <p class="panel-title">Layers</p>
+            <ul id="layers" class="layers"></ul>
+          </div>
+
+          <div class="panel">
+            <p class="panel-title">Embed object (OLE)</p>
+            <button id="embed">Embed PBX object…</button>
+          </div>
+        </aside>
+      </main>
+
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <script src="app.js?v=1"></script>
+  </body>
+</html>
