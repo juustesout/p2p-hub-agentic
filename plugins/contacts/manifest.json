@@ -1,0 +1,8 @@
+{
+  "id": "contacts",
+  "name": "P2P Contacts",
+  "version": "0.1.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": ["network:skill:contacts.signChallenge"]
+}

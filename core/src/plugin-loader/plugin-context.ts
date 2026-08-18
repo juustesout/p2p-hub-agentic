@@ -1,4 +1,9 @@
 import type { AIContext } from "@p2p-hub/sdk";
+import type {
+  NetworkPeer,
+  TaskRequest,
+  TaskResult,
+} from "@p2p-hub/sdk";
 import type { ActionHandler, FilterFn } from "../hooks/hook-registry";
 import type {
   SkillHandler,
@@ -50,6 +55,38 @@ export interface VaultContext {
 }
 
 /**
+ * Capability-scoped identity surface for plugins. Deliberately NOT the
+ * {@link IdentityManager} instance: a plugin can ask the local node to sign
+ * bytes with its persistent identity key and can verify a peer's signature,
+ * but can never read or extract the private key. This mirrors `ctx.ai` (a
+ * capability over `CoreAIProvider`) and `ctx.vault` (no `getSecret`).
+ */
+export interface IdentityCapability {
+  /** Sign arbitrary bytes with the local persistent identity key. */
+  sign(data: Buffer): Promise<Buffer>;
+  /** Verify a signature against a peer's public key. Never throws. */
+  verify(publicKeyHex: string, data: Buffer, signature: Buffer): boolean;
+}
+
+/**
+ * Capability-scoped network surface for plugins. Not the raw provider: a
+ * plugin can discover peers and send a task to a peer *by persistent peerId*,
+ * but cannot start/stop the transport or reach outside the task abstraction.
+ * Each method resolves the currently-active provider at call time, so the
+ * result reflects live state rather than a boot-time snapshot.
+ */
+export interface NetworkCapability {
+  /** Peers that claim `skill`, including their persistent `peerId` when known. */
+  discover(skill: string): Promise<NetworkPeer[]>;
+  /**
+   * Send `task` to the peer whose persistent `peerId` matches. Resolves to an
+   * error {@link TaskResult} (never throws) when no active provider exists or
+   * the peer is not currently reachable.
+   */
+  sendTask(peerId: string, task: TaskRequest): Promise<TaskResult>;
+}
+
+/**
  * The object handed to a plugin at activation time. This is the enforcement
  * point for permissions: a plugin can only touch its own storage directly,
  * and can only reach another plugin's storage via {@link readStorageOf}, which
@@ -75,4 +112,12 @@ export interface PluginContext {
   skills: SkillContext;
   ai: AIContext;
   vault: VaultContext;
+  /** Persistent identity capability (sign + verify). Never the raw key. */
+  identity: IdentityCapability;
+  /**
+   * Network capability, or `null` when this host was booted without a network
+   * registry (networking unavailable). Callers must handle `null` gracefully —
+   * it is not a thrown error.
+   */
+  network: NetworkCapability | null;
 }

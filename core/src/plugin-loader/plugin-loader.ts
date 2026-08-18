@@ -1,13 +1,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { PluginManifest } from "@p2p-hub/sdk";
+import type { PluginManifest, NetworkPeer, TaskRequest, TaskResult } from "@p2p-hub/sdk";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
 import { CoreAIProvider } from "../ai/core-ai-provider";
 import { VaultManager } from "../storage/vault-manager";
+import { IdentityManager } from "../identity/identity-manager";
+import { NetworkRegistry } from "../network-registry";
 import type { StorageManager } from "../storage/storage-manager";
-import type { PluginContext } from "./plugin-context";
+import type { PluginContext, NetworkCapability } from "./plugin-context";
 
 /**
  * Read and validate `manifest.json` from a plugin directory.
@@ -110,6 +112,8 @@ export async function loadPlugin(
   hookRegistry: HookRegistry,
   taskBroker: TaskBroker = new TaskBroker(),
   vaultManager: VaultManager = new VaultManager(),
+  identityManager: IdentityManager = new IdentityManager({ vault: vaultManager }),
+  networkRegistry: NetworkRegistry | null = null,
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   const own = storageManager.getOrCreate(manifest.id);
@@ -194,6 +198,12 @@ export async function loadPlugin(
         return vaultManager.deleteSecret(key);
       },
     },
+    identity: {
+      sign: (data) => identityManager.sign(data),
+      verify: (publicKeyHex, data, signature) =>
+        IdentityManager.verify(publicKeyHex, data, signature),
+    },
+    network: buildNetworkCapability(networkRegistry),
   };
 
   const pluginDirResolved = path.resolve(pluginDir);
@@ -256,6 +266,44 @@ function assertNetworkSkillPermission(
         `but lacks permission "${permission}"`,
     );
   }
+}
+
+function buildNetworkCapability(
+  registry: NetworkRegistry | null,
+): NetworkCapability | null {
+  if (!registry) {
+    return null;
+  }
+  return {
+    async discover(skill: string): Promise<NetworkPeer[]> {
+      const active = registry.selectActive();
+      if (!active) {
+        return [];
+      }
+      const peers = active.listPeers ? active.listPeers() : [];
+      return peers.filter((peer) => peer.skills.includes(skill));
+    },
+    async sendTask(peerId: string, task: TaskRequest): Promise<TaskResult> {
+      const active = registry.selectActive();
+      if (!active) {
+        return {
+          taskId: task.id,
+          status: "error",
+          error: "no active network provider",
+        };
+      }
+      const peers = active.listPeers ? active.listPeers() : [];
+      const target = peers.find((peer) => peer.peerId === peerId);
+      if (!target) {
+        return {
+          taskId: task.id,
+          status: "error",
+          error: `peer "${peerId}" is not currently reachable`,
+        };
+      }
+      return active.sendTask(target, task);
+    },
+  };
 }
 
 function resolveActivate(module: Record<string, unknown>): unknown {

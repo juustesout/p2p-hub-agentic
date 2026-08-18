@@ -1,0 +1,19 @@
+{
+  "name": "@p2p-hub/contacts",
+  "version": "0.1.0",
+  "description": "P2P identity registry: proof-of-possession contacts via challenge-response",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/sdk": "0.1.0"
+  },
+  "license": "MIT"
+}

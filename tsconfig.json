@@ -10,6 +10,8 @@
     { "path": "./plugins/vault" },
     { "path": "./plugins/notepad" },
     { "path": "./plugins/calc" },
+    { "path": "./plugins/paint" },
+    { "path": "./plugins/contacts" },
     { "path": "./apps/core-server" }
   ]
 }

@@ -10,6 +10,13 @@ export interface NetworkPeer {
   skills: string[];
   /** Human-readable name (optional). */
   name?: string;
+  /**
+   * Persistent peer identity (hex Ed25519 public key) when the peer
+   * advertises one. Optional: a transport may not carry identity, and a peer
+   * may simply not have one. Do not confuse this with {@link NetworkPeer.id},
+   * which is a per-session instance id.
+   */
+  peerId?: string;
 }
 
 /**
@@ -61,6 +68,15 @@ export interface NetworkProvider {
 
   /** Return peers on the same network that claim the given skill. */
   discover(skill: string): Promise<NetworkPeer[]>;
+
+  /**
+   * Return every currently discovered peer, regardless of skill. Optional:
+   * a transport that only answers targeted skill queries may omit this. When
+   * present, peers should carry their persistent {@link NetworkPeer.peerId}
+   * where known, so callers can address a peer by identity rather than by
+   * session id.
+   */
+  listPeers?(): NetworkPeer[];
 
   /** Send a task to a peer and wait for its result. */
   sendTask(peer: NetworkPeer, task: TaskRequest): Promise<TaskResult>;
