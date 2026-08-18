@@ -1,0 +1,8 @@
+{
+  "id": "tasks",
+  "name": "SmartTasks",
+  "version": "0.1.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": ["storage:read:contacts"]
+}

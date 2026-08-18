@@ -13,6 +13,7 @@
     { "path": "./plugins/paint" },
     { "path": "./plugins/contacts" },
     { "path": "./plugins/chat" },
+    { "path": "./plugins/tasks" },
     { "path": "./apps/core-server" }
   ]
 }
