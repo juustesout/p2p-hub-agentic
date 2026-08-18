@@ -129,3 +129,26 @@ test("a payload exceeding MAX_PAYLOAD_BYTES is rejected, not thrown", async () =
   assert.equal(result.status, "error");
   assert.match(result.error ?? "", /exceeding/);
 });
+
+test("a task arriving while the broker is at capacity is rejected, not queued", async () => {
+  const broker = new TaskBroker({ maxConcurrentTasks: 1 });
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  broker.registerSkill("demo.slow", async () => {
+    await gate;
+    return "done";
+  });
+
+  const first = broker.handle(task({ id: "first", skill: "demo.slow" }));
+  const second = await broker.handle(task({ id: "second", skill: "demo.slow" }));
+
+  assert.equal(second.status, "error");
+  assert.match(second.error ?? "", /at capacity/);
+
+  release();
+  const firstResult = await first;
+  assert.equal(firstResult.status, "ok");
+  assert.equal(firstResult.result, "done");
+});

@@ -25,12 +25,16 @@ export class NetworkRegistry {
 
   /**
    * Returns the ready provider with the highest priority, or `null` when no
-   * provider is ready.
+   * provider is ready. A provider that cannot transport tasks (stage-1
+   * status-only providers) is never selected, regardless of priority.
    */
   selectActive(): NetworkProvider | null {
     let active: NetworkProvider | null = null;
     for (const provider of this.providers.values()) {
       if (!provider.isReady()) {
+        continue;
+      }
+      if (provider.canTransportTasks === false) {
         continue;
       }
       if (active === null || provider.priority > active.priority) {

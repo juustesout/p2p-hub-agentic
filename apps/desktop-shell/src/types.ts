@@ -19,6 +19,8 @@ export interface CapabilitySkill {
 
 export interface RemotePeer {
   id: string;
+  /** Persistent peer identity (Ed25519 hex) when the peer advertises one. */
+  peerId?: string | null;
   name: string;
   address: string;
   skills: string[];
@@ -47,7 +49,6 @@ export interface ExecuteRequest {
   method: string;
   requestId?: string;
   arguments?: unknown;
-  timeout?: number;
 }
 
 export interface TaskResult {

@@ -379,14 +379,24 @@ function buildNetworkCapability(
       }
       // Bound the remote call and retry transient connection drops so a silent
       // peer fails with NetworkTimeoutError instead of hanging the caller.
-      return withRetry(
-        () =>
-          withTimeout(
-            active.sendTask(target, task),
-            DEFAULT_REQUEST_TIMEOUT_MS,
-          ),
-        { maxRetries: 3, initialDelayMs: 200, factor: 2 },
-      );
+      try {
+        return await withRetry(
+          () =>
+            withTimeout(
+              active.sendTask(target, task),
+              DEFAULT_REQUEST_TIMEOUT_MS,
+            ),
+          { maxRetries: 3, initialDelayMs: 200, factor: 2 },
+        );
+      } catch (err) {
+        // Uphold the "never throws" contract: surface a non-transient
+        // transport failure as an error result, not a rejected promise.
+        return {
+          taskId: task.id,
+          status: "error",
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
     },
   };
 }

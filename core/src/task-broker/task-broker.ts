@@ -32,6 +32,18 @@ interface SkillRecord {
   httpExposed: boolean;
 }
 
+export interface TaskBrokerOptions {
+  /**
+   * Maximum number of skill handlers that may be running concurrently. A task
+   * that arrives while the broker is at capacity is rejected with an error
+   * result rather than queued, so a flood of network/HTTP tasks cannot exhaust
+   * memory or CPU. Defaults to 100.
+   */
+  maxConcurrentTasks?: number;
+}
+
+const DEFAULT_MAX_CONCURRENT_TASKS = 100;
+
 /**
  * Maps skill names to handlers. Skills are free-form strings; by convention
  * they are `<pluginId>.<skillName>`, but the broker itself does not enforce
@@ -44,6 +56,13 @@ interface SkillRecord {
  */
 export class TaskBroker {
   private readonly skills = new Map<string, SkillRecord>();
+  private readonly maxConcurrentTasks: number;
+  private activeTasks = 0;
+
+  constructor(options: TaskBrokerOptions = {}) {
+    const max = options.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_TASKS;
+    this.maxConcurrentTasks = Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_CONCURRENT_TASKS;
+  }
 
   registerSkill(
     skill: string,
@@ -133,6 +152,14 @@ export class TaskBroker {
         error: `skill "${task.skill}" is not exposed over the HTTP bridge`,
       };
     }
+    if (this.activeTasks >= this.maxConcurrentTasks) {
+      return {
+        taskId: task.id,
+        status: "error",
+        error: `broker at capacity (${this.maxConcurrentTasks} concurrent tasks)`,
+      };
+    }
+    this.activeTasks += 1;
     try {
       validateObjectDepth(task.payload);
       const serialized = JSON.stringify(task.payload ?? null) ?? "null";
@@ -145,6 +172,8 @@ export class TaskBroker {
         status: "error",
         error: err instanceof Error ? err.message : String(err),
       };
+    } finally {
+      this.activeTasks -= 1;
     }
   }
 }

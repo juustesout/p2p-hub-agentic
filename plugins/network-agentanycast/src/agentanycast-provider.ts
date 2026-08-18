@@ -31,6 +31,12 @@ const DEFAULT_ADDRESS = process.env.AGENTANYCAST_ADDRESS ?? "localhost:50051";
 export class AgentAnycastProvider implements NetworkProvider {
   readonly id = "network-agentanycast";
   readonly priority = 100;
+  /**
+   * Stage 1 only probes the daemon; it cannot exchange tasks yet. Marking this
+   * false keeps the registry from ever selecting this provider as the active
+   * transport (which would throw on every `discover`/`sendTask`/`onTask`).
+   */
+  readonly canTransportTasks = false;
 
   private status: AgentAnycastStatus = "not-installed";
   private started = false;

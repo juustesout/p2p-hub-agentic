@@ -7,11 +7,13 @@ the repo from scratch. Keep it updated at the end of every task.
 
 - Branch `main`, remote `origin` = `https://github.com/juustesout/p2p-hub-agentic`.
 - Recent commits on `origin/main`:
+  - `366c733` feat(security): wire boundary guards and sanitizers across trust boundaries (P0)
   - `3c23801` feat(hardening): defensive parsing for manifests, PBX and formulas
   - `35a91cd` feat(core): network resilience, peer TTL expiry and plugin disposal
   - `7baf54c` feat(core): security boundary guard, AST sanitizer and action validator
-- Test suite: **246 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is clean (everything committed/pushed).
+- Test suite: **250 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: P1 items 5–10 are implemented and tested but NOT
+  yet committed/pushed (see "P1" sections below for the exact changes).
 
 ## What exists / is done
 
@@ -64,30 +66,51 @@ imports `isPlainObject`/`MAX_*`/`containsUnsafeContent` from `@p2p-hub/sdk`.
 
 ### P1 — input validation & DoS hardening
 
-5. **`app.ts` `execute()`**: validate `body.serviceId` / `body.method` against a
-   safe identifier pattern before building `${serviceId}.${method}`; `timeout`
-   field is unused (either enforce or drop); `peerId` remote-execution path
-   needs format validation.
-6. **WebSocket `maxPayload`**: `new WebSocketServer(...)` has no `maxPayload` →
-   `ws` defaults to 100MB. Set to `MAX_PAYLOAD_BYTES`.
-7. **TaskBroker rate limiting / concurrency caps**: no per-peer or global
-   concurrency limit — a malicious peer/token-holder can flood tasks. Add a
-   bounded queue / per-peer budget.
-8. **`app.ts` returns `err.message` on 500** — potential info leak (mirrors
-   security principle #7: don't leak *why*). Return a generic message, log the
-   detail server-side.
+~~DONE~~ (wired in this pass, tested):
+
+5. **`app.ts` `execute()`**: `serviceId` / `method` validated against
+   `IDENTIFIER_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/`, `peerId` against
+   `PEER_ID_RE = /^[a-zA-Z0-9-]{1,128}$/` before building
+   `${serviceId}.${method}` or addressing a peer. `ExecuteBody.timeout` was
+   dropped from the backend, and the desktop shell's `ExecuteRequest.timeout`
+   field has now been removed too (no consumer used it).
+6. **WebSocket `maxPayload`**: `new WebSocketServer(...)` now sets
+   `maxPayload: MAX_PAYLOAD_BYTES`.
+7. **TaskBroker concurrency cap**: `maxConcurrentTasks` (default 100); new
+   tasks are rejected when at capacity instead of being queued.
+8. **`app.ts` 500 responses are generic** (no `err.message` leak); details are
+   logged server-side via `console.error`. 413 for oversized bodies, 400 for
+   `SyntaxError` / `ObjectDepthExceededError`.
 
 ### P1 — identity & addressing consistency
 
-9. **`app.ts` remote execute uses `peer.id` (per-boot instance id) while
-   `ctx.network.sendTask` uses `peer.peerId` (persistent Ed25519).** Two
-   different "peer id" concepts with the same name. Decide on one and
-   reconcile (likely: HTTP accepts persistent `peerId` and the provider maps
-   it to a reachable instance).
-10. **`NetworkRegistry.selectActive()`** — `agentanycast` has `priority: 100`
-    (vs `network-light` 10) but its `discover`/`sendTask`/`onTask` throw
-    "not implemented". Verify `selectActive()` never selects a provider that
-    cannot actually transport, and that `buildNetworkCapability` handles it.
+~~DONE~~ (wired in this pass, tested):
+
+9. **Remote execute now resolves peers by persistent `peerId` first, falling
+   back to per-boot `id`.** `app.ts` `executeRemote` matches
+   `p.peerId === peerId ?? p.id === peerId` (mirroring `ctx.network.sendTask`,
+   which addresses by `peerId`). The `/api/peers` payload now also exposes
+   `peerId` so HTTP clients can address peers by identity, and the desktop
+   shell sends `peer.peerId ?? peer.id` for remote runs.
+10. **`selectActive()` can no longer select a non-transporting provider.**
+    `NetworkProvider` gained an optional `canTransportTasks` flag (default
+    `true`); `AgentAnycastProvider` sets it `false` (stage-1 status probe), and
+    `NetworkRegistry.selectActive()` skips providers where it is `false` even
+    at higher priority. `buildNetworkCapability.sendTask` now wraps the
+    retried/timeout-bounded call in a try/catch and returns an error
+    `TaskResult` instead of rejecting, upholding the "never throws" contract.
+    New tests in `core/src/network-registry.test.ts` cover both cases.
+
+## Tests added in this pass
+
+- `core/src/network-registry.test.ts`: 2 tests — `selectActive` skips a
+  higher-priority provider with `canTransportTasks: false`, and returns `null`
+  when the only ready provider cannot transport.
+- `core/src/task-broker/task-broker.test.ts`: 1 test — a task arriving while
+  the broker is at capacity is rejected, not queued (locks in P1-7).
+- `apps/core-server/src/token.test.ts`: 1 test — `/api/execute` rejects unsafe
+  `serviceId`/`method`/`peerId` identifiers with a `safe identifier` error
+  result (locks in P1-5).
 
 ### P2 — follow-ups (from CLAUDE.md, still open)
 

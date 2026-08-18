@@ -147,6 +147,29 @@ test("HTTP /api/vault/set refuses reserved namespaces over the bridge", async ()
   }
 });
 
+test("HTTP /api/execute rejects unsafe serviceId/method/peerId identifiers", async () => {
+  const { server, port } = await startServer();
+  try {
+    for (const body of [
+      { serviceId: "core", method: "echo../etc/passwd", arguments: "x" },
+      { serviceId: "core; rm -rf", method: "echo", arguments: "x" },
+      { serviceId: "core", method: "echo", peerId: "peer<bad>", arguments: "x" },
+    ]) {
+      const res = await request(port, "/api/execute", {
+        method: "POST",
+        headers: authorizedHeaders(),
+        body: JSON.stringify(body),
+      });
+      assert.equal(res.status, 200);
+      const result = (await res.json()) as { status: string; error: string };
+      assert.equal(result.status, "error");
+      assert.match(result.error, /safe identifier/);
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
 function wsConnect(port: number, token?: string): Promise<"accepted" | "rejected"> {
   return new Promise((resolve, reject) => {
     const url = token

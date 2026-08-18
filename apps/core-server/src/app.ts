@@ -10,6 +10,7 @@ import {
 } from "./auth";
 import {
   MAX_PAYLOAD_BYTES,
+  ObjectDepthExceededError,
   PayloadTooLargeError,
   validateObjectDepth,
   validatePayloadSize,
@@ -39,13 +40,17 @@ export interface CoreServerOptions {
 
 const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
 
+/** Safe identifier for a skill's `<serviceId>` / `<method>` segments. */
+const IDENTIFIER_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+/** Safe identifier for a peer reference (per-boot instance id or persistent peerId). */
+const PEER_ID_RE = /^[a-zA-Z0-9-]{1,128}$/;
+
 interface ExecuteBody {
   peerId?: string;
   serviceId: string;
   method: string;
   requestId?: string;
   arguments?: unknown;
-  timeout?: number;
 }
 
 /**
@@ -105,7 +110,11 @@ export class CoreServer {
       void this.handleHttp(req, res);
     });
 
-    this.wss = new WebSocketServer({ server: this.httpServer, path: "/ws" });
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      path: "/ws",
+      maxPayload: MAX_PAYLOAD_BYTES,
+    });
     this.wss.on("connection", (socket, request) =>
       this.handleSocket(socket, request),
     );
@@ -345,9 +354,14 @@ export class CoreServer {
 
       return this.sendJson(res, 404, { error: "not found" });
     } catch (err) {
-      return this.sendJson(res, 500, {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      if (err instanceof PayloadTooLargeError) {
+        return this.sendJson(res, 413, { error: "request body too large" });
+      }
+      if (err instanceof ObjectDepthExceededError || err instanceof SyntaxError) {
+        return this.sendJson(res, 400, { error: "invalid request body" });
+      }
+      console.error("[core-server] request failed:", err);
+      return this.sendJson(res, 500, { error: "internal error" });
     }
   }
 
@@ -381,6 +395,7 @@ export class CoreServer {
     const peers = this.provider
       ? this.provider.listPeers().map((peer) => ({
           id: peer.id,
+          peerId: peer.peerId ?? null,
           name: peer.name ?? peer.id,
           address: peer.address,
           skills: peer.skills,
@@ -404,16 +419,41 @@ export class CoreServer {
   }
 
   private async execute(body: ExecuteBody): Promise<TaskResult> {
-    const skill = `${body.serviceId}.${body.method}`;
     const id =
       typeof body.requestId === "string" && body.requestId.length > 0
         ? body.requestId
         : randomUUID();
 
+    const { serviceId, method } = body;
+    if (
+      typeof serviceId !== "string" ||
+      typeof method !== "string" ||
+      !IDENTIFIER_RE.test(serviceId) ||
+      !IDENTIFIER_RE.test(method)
+    ) {
+      return {
+        taskId: id,
+        status: "error",
+        error: "execute expects serviceId and method as safe identifier strings",
+      };
+    }
+    if (
+      body.peerId !== undefined &&
+      (typeof body.peerId !== "string" || !PEER_ID_RE.test(body.peerId))
+    ) {
+      return {
+        taskId: id,
+        status: "error",
+        error: "execute expects peerId as a safe identifier string",
+      };
+    }
+
+    const skill = `${serviceId}.${method}`;
+
     this.broadcast("task:started", {
       requestId: id,
-      serviceId: body.serviceId,
-      method: body.method,
+      serviceId,
+      method,
       peerId: body.peerId ?? null,
     });
 
@@ -423,8 +463,8 @@ export class CoreServer {
 
     this.broadcast("task:completed", {
       requestId: id,
-      serviceId: body.serviceId,
-      method: body.method,
+      serviceId,
+      method,
       peerId: body.peerId ?? null,
       status: result.status,
     });
@@ -441,7 +481,13 @@ export class CoreServer {
     if (!this.provider) {
       return { taskId: id, status: "error", error: "no active network provider" };
     }
-    const peer = this.provider.listPeers().find((p) => p.id === peerId);
+    const peers = this.provider.listPeers();
+    // Resolve by the persistent `peerId` (identity) first — the same concept
+    // `ctx.network.sendTask` uses — and fall back to the per-boot instance
+    // `id` for clients that still address peers by session id.
+    const peer =
+      peers.find((p) => p.peerId === peerId) ??
+      peers.find((p) => p.id === peerId);
     if (!peer) {
       return { taskId: id, status: "error", error: `unknown peer "${peerId}"` };
     }

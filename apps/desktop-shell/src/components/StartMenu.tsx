@@ -37,7 +37,7 @@ export function StartMenu({ onClose, onOpenVault, onOpenInspector }: StartMenuPr
   const runRemote = (peer: RemotePeer, skill: string) => {
     const [serviceId, ...rest] = skill.split(".");
     void execute({
-      peerId: peer.id,
+      peerId: peer.peerId ?? peer.id,
       serviceId,
       method: rest.join("."),
       arguments: null,

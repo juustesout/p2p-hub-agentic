@@ -58,6 +58,14 @@ export interface NetworkProvider {
   readonly id: string;
   /** Higher priority wins when several providers are ready. */
   readonly priority: number;
+  /**
+   * Whether this provider can actually exchange tasks. Defaults to `true`.
+   * A provider that only reports status (e.g. a daemon probe whose
+   * `discover`/`sendTask`/`onTask` are not implemented yet) must set this to
+   * `false` so {@link selectActive} never hands callers a transport that
+   * throws on every request.
+   */
+  readonly canTransportTasks?: boolean;
 
   /** Bring up discovery and the listening socket. */
   start(): Promise<void>;

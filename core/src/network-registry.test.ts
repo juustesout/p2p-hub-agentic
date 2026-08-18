@@ -60,3 +60,32 @@ test("selectActive returns network-agentanycast when both are ready", () => {
 
   assert.equal(registry.selectActive()?.id, "network-agentanycast");
 });
+
+test("selectActive skips a higher-priority provider that cannot transport", () => {
+  const registry = new NetworkRegistry();
+  const light = fakeProvider("network-light", 10);
+  const anycast: FakeProvider = {
+    ...fakeProvider("network-agentanycast", 100),
+    canTransportTasks: false,
+  };
+  registry.register(light);
+  registry.register(anycast);
+
+  light.setReady(true);
+  anycast.setReady(true);
+
+  assert.equal(registry.selectActive()?.id, "network-light");
+});
+
+test("selectActive returns null when the only ready provider cannot transport", () => {
+  const registry = new NetworkRegistry();
+  const anycast: FakeProvider = {
+    ...fakeProvider("network-agentanycast", 100),
+    canTransportTasks: false,
+  };
+  registry.register(anycast);
+
+  anycast.setReady(true);
+
+  assert.equal(registry.selectActive(), null);
+});
