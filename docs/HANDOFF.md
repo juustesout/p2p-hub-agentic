@@ -7,13 +7,13 @@ the repo from scratch. Keep it updated at the end of every task.
 
 - Branch `main`, remote `origin` = `https://github.com/juustesout/p2p-hub-agentic`.
 - Recent commits on `origin/main`:
+  - `34671e7` feat(security): P1 hardening — identifier validation, task concurrency cap, provider selection
   - `366c733` feat(security): wire boundary guards and sanitizers across trust boundaries (P0)
   - `3c23801` feat(hardening): defensive parsing for manifests, PBX and formulas
   - `35a91cd` feat(core): network resilience, peer TTL expiry and plugin disposal
   - `7baf54c` feat(core): security boundary guard, AST sanitizer and action validator
 - Test suite: **250 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **dirty**: P1 items 5–10 are implemented and tested but NOT
-  yet committed/pushed (see "P1" sections below for the exact changes).
+- Working tree is clean (P0 and P1 items 5–10 committed and pushed).
 
 ## What exists / is done
 
