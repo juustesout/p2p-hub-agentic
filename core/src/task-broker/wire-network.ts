@@ -3,9 +3,10 @@ import { TaskBroker } from "./task-broker";
 
 /**
  * Connect a running {@link NetworkProvider} to a {@link TaskBroker} so that
- * incoming tasks are routed through the broker. Deliberately not called
- * automatically from `PluginHost` or the providers themselves — the caller
- * (a test, or later the real application entrypoint) wires them explicitly.
+ * incoming tasks are routed through the broker. The caller wires them
+ * explicitly — `PluginHost` does so when networking is enabled, and the real
+ * application entrypoint (or a test) wires a provider it constructs itself.
+ * Providers never wire themselves.
  *
  * Network tasks go through {@link TaskBroker.handleRemote}, which rejects
  * skills registered as `localOnly`, so sensitive skills (e.g. `vault.*`) are

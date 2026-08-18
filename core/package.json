@@ -12,6 +12,7 @@
     "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
+    "@p2p-hub/network-light": "0.1.0",
     "@p2p-hub/sdk": "0.1.0"
   },
   "license": "MIT"
