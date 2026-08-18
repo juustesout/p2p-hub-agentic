@@ -5,6 +5,7 @@ import type {
   TaskResult,
 } from "@p2p-hub/sdk";
 import type { ActionHandler, FilterFn } from "../hooks/hook-registry";
+import type { Disposable } from "../disposable";
 import type {
   SkillHandler,
   SkillRegistrationOptions,
@@ -13,12 +14,14 @@ import type {
 /**
  * Namespace-aware view over the shared {@link HookRegistry}. `emit` and
  * `applyFilters` are restricted to the plugin's own namespace, and
- * cross-namespace `registerFilter` requires a permission.
+ * cross-namespace `registerFilter` requires a permission. Both `on` and
+ * `registerFilter` return a {@link Disposable} that the loader tracks so a
+ * plugin's listeners are all released on deactivation.
  */
 export interface HookContext {
-  on(event: string, handler: ActionHandler, priority?: number): void;
+  on(event: string, handler: ActionHandler, priority?: number): Disposable;
   emit(event: string, payload: unknown): Promise<void>;
-  registerFilter(event: string, fn: FilterFn, priority?: number): void;
+  registerFilter(event: string, fn: FilterFn, priority?: number): Disposable;
   applyFilters(event: string, value: unknown): Promise<unknown>;
 }
 
@@ -129,4 +132,18 @@ export interface PluginContext {
    * it is not a thrown error.
    */
   network: NetworkCapability | null;
+  /**
+   * Plugin-scoped timers. The returned handles are tracked by the host and
+   * cleared automatically when the plugin is deactivated, so a plugin that
+   * schedules periodic work never leaks an interval after unload.
+   */
+  timers: {
+    setTimeout(handler: () => void, ms: number): Disposable;
+    setInterval(handler: () => void, ms: number): Disposable;
+  };
+  /**
+   * Register an arbitrary cleanup callback that the host runs when this plugin
+   * is deactivated. Use it for resources the framework cannot track for you.
+   */
+  onDispose(disposer: () => void): void;
 }

@@ -8,6 +8,12 @@ import { CoreAIProvider } from "../ai/core-ai-provider";
 import { VaultManager } from "../storage/vault-manager";
 import { IdentityManager } from "../identity/identity-manager";
 import { NetworkRegistry } from "../network-registry";
+import { DisposerBag } from "../disposable";
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  withRetry,
+  withTimeout,
+} from "../network/retry";
 import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext, NetworkCapability } from "./plugin-context";
 
@@ -159,6 +165,7 @@ export async function loadPlugin(
   vaultManager: VaultManager = new VaultManager(),
   identityManager: IdentityManager = new IdentityManager({ vault: vaultManager }),
   networkRegistry: NetworkRegistry | null = null,
+  disposers: DisposerBag = new DisposerBag(),
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   const own = storageManager.getOrCreate(manifest.id);
@@ -183,7 +190,9 @@ export async function loadPlugin(
     },
     hooks: {
       on: (event, handler, priority = 10) => {
-        hookRegistry.on(event, handler, priority);
+        const subscription = hookRegistry.on(event, handler, priority);
+        disposers.add(subscription);
+        return subscription;
       },
       emit: async (event, payload) => {
         assertOwnNamespace(manifest.id, event, "emit");
@@ -199,7 +208,9 @@ export async function loadPlugin(
               `"hooks:filter:${event}" to register a cross-namespace filter`,
           );
         }
-        hookRegistry.registerFilter(event, fn, priority);
+        const subscription = hookRegistry.registerFilter(event, fn, priority);
+        disposers.add(subscription);
+        return subscription;
       },
       applyFilters: async (event, value) => {
         assertOwnNamespace(manifest.id, event, "applyFilters");
@@ -217,7 +228,9 @@ export async function loadPlugin(
         if (options?.localOnly === false) {
           assertNetworkSkillPermission(manifest, skillName);
         }
-        taskBroker.registerSkill(`${manifest.id}.${skillName}`, handler, options);
+        const fullName = `${manifest.id}.${skillName}`;
+        taskBroker.registerSkill(fullName, handler, options);
+        disposers.add(() => taskBroker.unregisterSkill(fullName));
       },
       unregister: (skillName) => {
         taskBroker.unregisterSkill(`${manifest.id}.${skillName}`);
@@ -250,6 +263,23 @@ export async function loadPlugin(
       peerId: async () => (await identityManager.getOrCreateIdentity()).peerId,
     },
     network: buildNetworkCapability(networkRegistry),
+    timers: {
+      setTimeout: (handler, ms) => {
+        const timer = globalThis.setTimeout(() => handler(), ms);
+        const disposable = { dispose: () => clearTimeout(timer) };
+        disposers.add(disposable);
+        return disposable;
+      },
+      setInterval: (handler, ms) => {
+        const timer = globalThis.setInterval(() => handler(), ms);
+        const disposable = { dispose: () => clearInterval(timer) };
+        disposers.add(disposable);
+        return disposable;
+      },
+    },
+    onDispose: (disposer) => {
+      disposers.add(disposer);
+    },
   };
 
   const pluginDirResolved = path.resolve(pluginDir);
@@ -347,7 +377,16 @@ function buildNetworkCapability(
           error: `peer "${peerId}" is not currently reachable`,
         };
       }
-      return active.sendTask(target, task);
+      // Bound the remote call and retry transient connection drops so a silent
+      // peer fails with NetworkTimeoutError instead of hanging the caller.
+      return withRetry(
+        () =>
+          withTimeout(
+            active.sendTask(target, task),
+            DEFAULT_REQUEST_TIMEOUT_MS,
+          ),
+        { maxRetries: 3, initialDelayMs: 200, factor: 2 },
+      );
     },
   };
 }

@@ -1,3 +1,5 @@
+import type { Disposable } from "../disposable";
+
 export type ActionHandler = (payload: unknown) => void | Promise<void>;
 export type FilterFn = (value: unknown) => unknown | Promise<unknown>;
 
@@ -25,10 +27,43 @@ export class HookRegistry {
   private readonly actions = new Map<string, PrioritizedAction[]>();
   private readonly filters = new Map<string, PrioritizedFilter[]>();
 
-  on(event: string, handler: ActionHandler, priority = 10): void {
+  /**
+   * Subscribe to an action. Returns a {@link Disposable} that removes this
+   * exact handler when disposed, so a plugin (or the host) can release its
+   * listener without leaving a dangling reference behind.
+   */
+  on(event: string, handler: ActionHandler, priority = 10): Disposable {
+    const entry: PrioritizedAction = { handler, priority };
     const list = this.actions.get(event) ?? [];
-    list.push({ handler, priority });
+    list.push(entry);
     this.actions.set(event, list);
+    return {
+      dispose: () => {
+        const current = this.actions.get(event);
+        if (!current) {
+          return;
+        }
+        const idx = current.indexOf(entry);
+        if (idx !== -1) {
+          current.splice(idx, 1);
+        }
+        if (current.length === 0) {
+          this.actions.delete(event);
+        }
+      },
+    };
+  }
+
+  /** Number of currently-registered action handlers (optionally per event). */
+  listenerCount(event?: string): number {
+    if (event !== undefined) {
+      return this.actions.get(event)?.length ?? 0;
+    }
+    let total = 0;
+    for (const list of this.actions.values()) {
+      total += list.length;
+    }
+    return total;
   }
 
   async emit(event: string, payload: unknown): Promise<void> {
@@ -44,10 +79,26 @@ export class HookRegistry {
     }
   }
 
-  registerFilter(event: string, fn: FilterFn, priority = 10): void {
+  registerFilter(event: string, fn: FilterFn, priority = 10): Disposable {
+    const entry: PrioritizedFilter = { fn, priority };
     const list = this.filters.get(event) ?? [];
-    list.push({ fn, priority });
+    list.push(entry);
     this.filters.set(event, list);
+    return {
+      dispose: () => {
+        const current = this.filters.get(event);
+        if (!current) {
+          return;
+        }
+        const idx = current.indexOf(entry);
+        if (idx !== -1) {
+          current.splice(idx, 1);
+        }
+        if (current.length === 0) {
+          this.filters.delete(event);
+        }
+      },
+    };
   }
 
   async applyFilters(event: string, initialValue: unknown): Promise<unknown> {

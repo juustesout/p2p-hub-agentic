@@ -8,6 +8,7 @@ import { TaskBroker } from "../task-broker/task-broker";
 import { VaultManager } from "../storage/vault-manager";
 import { IdentityManager } from "../identity/identity-manager";
 import { NetworkRegistry } from "../network-registry";
+import { DisposerBag } from "../disposable";
 import { NetworkLightProvider } from "@p2p-hub/network-light";
 import { loadManifest, loadPlugin } from "../plugin-loader/plugin-loader";
 import { wireNetworkToBroker } from "../task-broker/wire-network";
@@ -75,6 +76,7 @@ export class PluginHost {
   private readonly networks: NetworkRegistry;
   private provider: NetworkLightProvider | null = null;
   private readonly activated = new Map<string, unknown>();
+  private readonly disposers = new Map<string, DisposerBag>();
   private readonly plugins: PluginManifest[] = [];
   private readonly states = new Map<string, PluginState>();
   private readonly activationTimeoutMs: number;
@@ -134,6 +136,7 @@ export class PluginHost {
         continue;
       }
 
+      const disposers = new DisposerBag();
       try {
         const instance = await withTimeout(
           loadPlugin(
@@ -144,6 +147,7 @@ export class PluginHost {
             this.vault,
             this.identity,
             this.networks,
+            disposers,
           ),
           this.activationTimeoutMs,
           () =>
@@ -153,9 +157,13 @@ export class PluginHost {
             ),
         );
         this.activated.set(manifest.id, instance);
+        this.disposers.set(manifest.id, disposers);
         this.plugins.push(manifest);
         this.states.set(manifest.id, "ACTIVE");
       } catch (err) {
+        // Release anything the plugin registered before it failed, so a broken
+        // activation never leaves dangling listeners or timers behind.
+        disposers.dispose();
         this.states.set(
           manifest.id,
           err instanceof PluginActivationTimeoutError
@@ -194,6 +202,9 @@ export class PluginHost {
         port: this.options.networkPort ?? 0,
         skills: remoteSkills,
         identity,
+        onPeerDisconnected: (peer) => {
+          this.hooks.emit("peer:disconnected", peer);
+        },
       });
       wireNetworkToBroker(provider, this.broker);
       await provider.start();
@@ -213,6 +224,26 @@ export class PluginHost {
       this.networks.unregister(this.provider.id);
       await this.provider.stop();
       this.provider = null;
+    }
+  }
+
+  /**
+   * Tear a plugin down: release every hook/filter subscription, timer and
+   * disposer it registered, unregister its skills, and drop it from the
+   * host's active set. After this returns, the plugin leaves no dangling
+   * event listener in the shared {@link HookRegistry}.
+   */
+  async deactivate(pluginId: string): Promise<void> {
+    const disposers = this.disposers.get(pluginId);
+    if (disposers) {
+      disposers.dispose();
+      this.disposers.delete(pluginId);
+    }
+    this.activated.delete(pluginId);
+    this.states.delete(pluginId);
+    const idx = this.plugins.findIndex((p) => p.id === pluginId);
+    if (idx !== -1) {
+      this.plugins.splice(idx, 1);
     }
   }
 

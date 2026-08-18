@@ -15,6 +15,9 @@ import type {
 const SERVICE_TYPE = "p2p-hub";
 const FRAME_MAX = 16 * 1024 * 1024;
 const RESPONSE_TIMEOUT_MS = 10_000;
+/** Peers silent this long are treated as gone even without an mDNS "down". */
+const HEARTBEAT_TTL_MS = 30_000;
+const SWEEP_INTERVAL_MS = 15_000;
 
 export interface NetworkLightOptions {
   /** Port to listen on. Defaults to 0 (ephemeral). */
@@ -31,6 +34,12 @@ export interface NetworkLightOptions {
    * `certFingerprint`. Informational in this stage — no logic depends on it.
    */
   identity?: PeerIdentity;
+  /** Time in ms a peer may stay silent before it is pruned. Defaults to 30s. */
+  heartbeatTtlMs?: number;
+  /** How often to sweep stale peers. Defaults to half the TTL. */
+  sweepIntervalMs?: number;
+  /** Invoked whenever a peer is removed because it went silent. */
+  onPeerDisconnected?: (peer: DiscoveredPeer) => void;
 }
 
 interface WireMessage {
@@ -45,6 +54,8 @@ export interface DiscoveredPeer extends NetworkPeer {
   certFingerprint?: string;
   /** Persistent peer identity, announced via mDNS (optional). */
   peerId?: string;
+  /** Last time this peer was heard from (epoch ms). Internal only. */
+  lastSeen?: number;
 }
 
 function encodeFrame(payload: string | Buffer): Buffer {
@@ -93,6 +104,9 @@ export class NetworkLightProvider implements NetworkProvider {
   private readonly skills: string[];
   private readonly instanceId: string;
   private readonly identity: PeerIdentity | null;
+  private readonly heartbeatTtlMs: number;
+  private readonly sweepIntervalMs: number;
+  private readonly onPeerDisconnected: ((peer: DiscoveredPeer) => void) | null;
 
   private server: tls.Server | null = null;
   private bonjour: Bonjour | null = null;
@@ -102,6 +116,7 @@ export class NetworkLightProvider implements NetworkProvider {
   private certFingerprint = "";
   private taskHandler: TaskHandler | null = null;
   private readonly discovered = new Map<string, DiscoveredPeer>();
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: NetworkLightOptions = {}) {
     this.host = options.host ?? "0.0.0.0";
@@ -111,6 +126,11 @@ export class NetworkLightProvider implements NetworkProvider {
     this.skills = [...(options.skills ?? [])];
     this.instanceId = crypto.randomUUID();
     this.identity = options.identity ?? null;
+    this.heartbeatTtlMs = options.heartbeatTtlMs ?? HEARTBEAT_TTL_MS;
+    this.sweepIntervalMs =
+      options.sweepIntervalMs ??
+      Math.max(1, Math.floor(this.heartbeatTtlMs / 2));
+    this.onPeerDisconnected = options.onPeerDisconnected ?? null;
   }
 
   isReady(): boolean {
@@ -163,11 +183,19 @@ export class NetworkLightProvider implements NetworkProvider {
       this.onServiceDown(service);
     });
 
+    this.sweepTimer = setInterval(() => this.pruneStalePeers(), this.sweepIntervalMs);
+    this.sweepTimer.unref?.();
+
     this.ready = true;
   }
 
   async stop(): Promise<void> {
     this.ready = false;
+
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
 
     try {
       this.browser?.stop();
@@ -375,6 +403,7 @@ export class NetworkLightProvider implements NetworkProvider {
       name: service.name,
       certFingerprint,
       peerId,
+      lastSeen: Date.now(),
     });
   }
 
@@ -383,6 +412,26 @@ export class NetworkLightProvider implements NetworkProvider {
     if (id) {
       this.discovered.delete(id);
     }
+  }
+
+  /**
+   * Remove peers that have not announced themselves within the TTL window.
+   * Called on a timer by {@link start}, but exposed (with an injectable
+   * `now`) so tests can advance time deterministically.
+   */
+  pruneStalePeers(now: number = Date.now()): DiscoveredPeer[] {
+    const pruned: DiscoveredPeer[] = [];
+    for (const [id, peer] of this.discovered) {
+      const lastSeen = peer.lastSeen ?? now;
+      if (now - lastSeen > this.heartbeatTtlMs) {
+        this.discovered.delete(id);
+        pruned.push(peer);
+      }
+    }
+    for (const peer of pruned) {
+      this.onPeerDisconnected?.(peer);
+    }
+    return pruned;
   }
 
   private serviceAddress(service: Service): string | null {
