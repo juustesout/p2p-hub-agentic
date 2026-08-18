@@ -1,7 +1,10 @@
 import * as crypto from "node:crypto";
-import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { writeAtomicFile } from "./atomic";
+import { safeReadJson } from "./backup";
+import type { StorageWarningHandler } from "./backup";
+import { sharedWriteQueue } from "./queue";
 
 export interface VaultManagerOptions {
   /**
@@ -23,6 +26,12 @@ export interface VaultManagerOptions {
    * `ai.*`). Defaults to {@link DEFAULT_RESERVED_PREFIXES}.
    */
   reservedPrefixes?: string[];
+  /**
+   * Called with `system:storageCorrupted` when the vault file is corrupted and
+   * had to be recovered or quarantined. Wired by the host to the shared
+   * {@link HookRegistry} so plugins can observe the event.
+   */
+  emitSystemWarning?: StorageWarningHandler;
 }
 
 interface EncryptedEntry {
@@ -81,14 +90,18 @@ export class VaultManager {
   readonly reservedPrefixes: string[];
   /** True when the master key fell back to the insecure dev-only key. */
   readonly usesFallbackKey: boolean;
+  private readonly emitSystemWarning: StorageWarningHandler | undefined;
   private salt: Buffer | null = null;
   private entries: Record<string, EncryptedEntry> = {};
+  private derivedKey: Buffer | null = null;
+  private derivedKeySaltHex: string | null = null;
 
   constructor(options: VaultManagerOptions = {}) {
     this.dataDir =
       options.dataDir ?? path.join(os.homedir(), ".p2p-hub", "vault");
     this.reservedPrefixes =
       options.reservedPrefixes ?? DEFAULT_RESERVED_PREFIXES;
+    this.emitSystemWarning = options.emitSystemWarning;
 
     const { masterKey, usedFallback } = resolveMasterKey(options.masterKey);
     this.masterKey = masterKey;
@@ -118,52 +131,64 @@ export class VaultManager {
     if (!this.salt) {
       throw new Error("vault not loaded");
     }
-    return crypto.scryptSync(this.masterKey, this.salt, KEY_LENGTH);
+    // scrypt is expensive; cache the derived key per salt value. The salt is
+    // stable (persisted in the vault file), so re-deriving on every read/write
+    // is pure waste. Keyed by the salt hex so a changed salt still re-derives.
+    const saltHex = this.salt.toString("hex");
+    if (this.derivedKey && this.derivedKeySaltHex === saltHex) {
+      return this.derivedKey;
+    }
+    this.derivedKey = crypto.scryptSync(this.masterKey, this.salt, KEY_LENGTH);
+    this.derivedKeySaltHex = saltHex;
+    return this.derivedKey;
   }
 
   private async load(): Promise<void> {
-    try {
-      const raw = await fs.readFile(this.filePath(), "utf8");
-      const parsed = JSON.parse(raw) as VaultFile;
-      this.salt = Buffer.from(parsed.salt, "hex");
-      this.entries = parsed.entries ?? {};
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        this.salt = crypto.randomBytes(SALT_LENGTH);
-        this.entries = {};
-        return;
-      }
-      throw err;
+    const parsed = await safeReadJson<VaultFile | null>(
+      this.filePath(),
+      null,
+      this.emitSystemWarning,
+    );
+    if (parsed === null) {
+      // Missing, corrupt and unrecoverable, or quarantined — start empty.
+      this.salt = crypto.randomBytes(SALT_LENGTH);
+      this.entries = {};
+      return;
     }
+    this.salt = Buffer.from(parsed.salt, "hex");
+    this.entries = parsed.entries ?? {};
   }
 
   private async save(): Promise<void> {
     if (!this.salt) {
       throw new Error("vault not loaded");
     }
-    await fs.mkdir(this.dataDir, { recursive: true });
     const file: VaultFile = {
       salt: this.salt.toString("hex"),
       entries: this.entries,
     };
-    await fs.writeFile(this.filePath(), JSON.stringify(file, null, 2), "utf8");
+    await writeAtomicFile(this.filePath(), file);
   }
 
   async setSecret(key: string, value: string): Promise<void> {
-    await this.load();
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv("aes-256-gcm", this.deriveKey(), iv);
-    const encrypted = Buffer.concat([
-      cipher.update(value, "utf8"),
-      cipher.final(),
-    ]);
-    this.entries[key] = {
-      iv: iv.toString("hex"),
-      tag: cipher.getAuthTag().toString("hex"),
-      data: encrypted.toString("hex"),
-      updatedAt: new Date().toISOString(),
-    };
-    await this.save();
+    // Serialize the whole read-modify-write per vault file so concurrent
+    // setSecret calls cannot load the same snapshot and drop each other's keys.
+    await sharedWriteQueue.enqueue(this.filePath(), async () => {
+      await this.load();
+      const iv = crypto.randomBytes(IV_LENGTH);
+      const cipher = crypto.createCipheriv("aes-256-gcm", this.deriveKey(), iv);
+      const encrypted = Buffer.concat([
+        cipher.update(value, "utf8"),
+        cipher.final(),
+      ]);
+      this.entries[key] = {
+        iv: iv.toString("hex"),
+        tag: cipher.getAuthTag().toString("hex"),
+        data: encrypted.toString("hex"),
+        updatedAt: new Date().toISOString(),
+      };
+      await this.save();
+    });
   }
 
   /** Core-only: reads a raw secret. Plugins must not call this directly. */
@@ -226,12 +251,14 @@ export class VaultManager {
   }
 
   async deleteSecret(key: string): Promise<boolean> {
-    await this.load();
-    if (!(key in this.entries)) {
-      return false;
-    }
-    delete this.entries[key];
-    await this.save();
-    return true;
+    return sharedWriteQueue.enqueue(this.filePath(), async () => {
+      await this.load();
+      if (!(key in this.entries)) {
+        return false;
+      }
+      delete this.entries[key];
+      await this.save();
+      return true;
+    });
   }
 }

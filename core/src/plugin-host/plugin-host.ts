@@ -12,6 +12,28 @@ import { NetworkLightProvider } from "@p2p-hub/network-light";
 import { loadManifest, loadPlugin } from "../plugin-loader/plugin-loader";
 import { wireNetworkToBroker } from "../task-broker/wire-network";
 
+/** Strict ceiling for a single plugin's `activate()` during boot. */
+export const DEFAULT_ACTIVATION_TIMEOUT_MS = 5000;
+
+/** Lifecycle state of a plugin, tracked through {@link PluginHost.boot}. */
+export type PluginState =
+  | "ACTIVE"
+  | "FAILED_ACTIVATION"
+  | "FAILED_ACTIVATION_TIMEOUT";
+
+/** Thrown when a plugin's `activate()` exceeds the boot timeout. */
+export class PluginActivationTimeoutError extends Error {
+  readonly pluginId: string;
+  readonly timeoutMs: number;
+
+  constructor(pluginId: string, timeoutMs: number) {
+    super(`plugin "${pluginId}" failed to activate within ${timeoutMs}ms`);
+    this.name = "PluginActivationTimeoutError";
+    this.pluginId = pluginId;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export interface PluginHostOptions {
   pluginsDir: string;
   dataDir: string;
@@ -25,6 +47,12 @@ export interface PluginHostOptions {
   enableNetworking?: boolean;
   /** Port for the network-light transport. Defaults to 0 (ephemeral). */
   networkPort?: number;
+  /**
+   * Maximum time to wait for a plugin's `activate()` before marking it
+   * `FAILED_ACTIVATION_TIMEOUT` and continuing. Defaults to
+   * {@link DEFAULT_ACTIVATION_TIMEOUT_MS}.
+   */
+  activationTimeoutMs?: number;
 }
 
 /**
@@ -48,17 +76,25 @@ export class PluginHost {
   private provider: NetworkLightProvider | null = null;
   private readonly activated = new Map<string, unknown>();
   private readonly plugins: PluginManifest[] = [];
+  private readonly states = new Map<string, PluginState>();
+  private readonly activationTimeoutMs: number;
 
   constructor(private readonly options: PluginHostOptions) {
-    this.storages = new StorageManager(options.dataDir);
-    this.hooks = new HookRegistry();
+    const hooks = new HookRegistry();
+    this.hooks = hooks;
+    this.storages = new StorageManager(options.dataDir, (event, payload) =>
+      hooks.emit(event, payload),
+    );
     this.broker = new TaskBroker();
     this.vault = new VaultManager({
       dataDir: options.dataDir,
       masterKey: options.masterKey,
+      emitSystemWarning: (event, payload) => hooks.emit(event, payload),
     });
     this.identity = new IdentityManager({ vault: this.vault });
     this.networks = new NetworkRegistry();
+    this.activationTimeoutMs =
+      options.activationTimeoutMs ?? DEFAULT_ACTIVATION_TIMEOUT_MS;
   }
 
   /**
@@ -99,18 +135,33 @@ export class PluginHost {
       }
 
       try {
-        const instance = await loadPlugin(
-          pluginDir,
-          this.storages,
-          this.hooks,
-          this.broker,
-          this.vault,
-          this.identity,
-          this.networks,
+        const instance = await withTimeout(
+          loadPlugin(
+            pluginDir,
+            this.storages,
+            this.hooks,
+            this.broker,
+            this.vault,
+            this.identity,
+            this.networks,
+          ),
+          this.activationTimeoutMs,
+          () =>
+            new PluginActivationTimeoutError(
+              manifest.id,
+              this.activationTimeoutMs,
+            ),
         );
         this.activated.set(manifest.id, instance);
         this.plugins.push(manifest);
+        this.states.set(manifest.id, "ACTIVE");
       } catch (err) {
+        this.states.set(
+          manifest.id,
+          err instanceof PluginActivationTimeoutError
+            ? "FAILED_ACTIVATION_TIMEOUT"
+            : "FAILED_ACTIVATION",
+        );
         console.error(
           `[plugin-host] failed to activate "${manifest.id}": ${(err as Error).message}`,
         );
@@ -169,6 +220,11 @@ export class PluginHost {
     return this.activated.get(pluginId);
   }
 
+  /** Lifecycle state of a plugin (`ACTIVE`, `FAILED_ACTIVATION`, or timeout). */
+  pluginState(pluginId: string): PluginState | undefined {
+    return this.states.get(pluginId);
+  }
+
   hookRegistry(): HookRegistry {
     return this.hooks;
   }
@@ -199,4 +255,29 @@ export class PluginHost {
   listPlugins(): PluginManifest[] {
     return [...this.plugins];
   }
+}
+
+/**
+ * Resolve with `promise`'s result, or reject with `makeError()` if it has not
+ * settled within `timeoutMs`. The timer is always cleared on settlement, so a
+ * fast plugin leaves no dangling handle behind.
+ */
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  makeError: () => Error,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(makeError()), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
