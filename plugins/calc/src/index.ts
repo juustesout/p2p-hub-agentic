@@ -13,6 +13,7 @@ import {
   AI_ERROR,
   ERROR_ERROR,
   REF_ERROR,
+  SYNTAX_ERROR,
   coordToLabel,
   evaluateExpression,
   isAIFormula,
@@ -276,7 +277,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
       try {
         ast = parseExpression(cell.formula);
       } catch {
-        cell.value = ERROR_ERROR;
+        cell.value = SYNTAX_ERROR;
         continue;
       }
       if (!ast || isAIFormula(ast)) {

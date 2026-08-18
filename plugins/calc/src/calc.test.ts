@@ -20,6 +20,7 @@ import {
 import {
   AI_ERROR,
   REF_ERROR,
+  SYNTAX_ERROR,
   coordToLabel,
   evaluateMath,
   parseCoord,
@@ -514,4 +515,13 @@ test("circular references degrade to #CYCLE! instead of hanging", async () => {
   const sheet = resolveRef(stored!, (rootObject(stored!)!.sheets as PBXReference[])[0])!;
   const a1 = resolveRef(stored!, (sheet.cells as Record<string, PBXReference>).A1)!;
   assert.equal(a1.value, "#CYCLE!");
+});
+
+test("a malformed formula degrades to #SYNTAX! instead of crashing", async () => {
+  const { calc } = await loadCalc();
+  const doc = await calc.createSheet({ title: "Syntax" });
+  const sheetId = (rootObject(doc)!.sheets as PBXReference[])[0].$ref;
+
+  const cell = await calc.updateCell({ sheetId, coord: "A1", formula: "=1+" });
+  assert.equal(cell.value, SYNTAX_ERROR);
 });

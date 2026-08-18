@@ -12,6 +12,18 @@ import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext, NetworkCapability } from "./plugin-context";
 
 /**
+ * Raised when a plugin `manifest.json` cannot be read, parsed or validated.
+ * All malformed-input paths surface as this typed error rather than a bare
+ * `Error` or an uncaught parse/regex failure.
+ */
+export class InvalidManifestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidManifestError";
+  }
+}
+
+/**
  * Read and validate `manifest.json` from a plugin directory.
  */
 export async function loadManifest(pluginDir: string): Promise<PluginManifest> {
@@ -20,7 +32,7 @@ export async function loadManifest(pluginDir: string): Promise<PluginManifest> {
   try {
     raw = await fs.readFile(manifestPath, "utf8");
   } catch (err) {
-    throw new Error(
+    throw new InvalidManifestError(
       `cannot read plugin manifest at ${manifestPath}: ${(err as Error).message}`,
     );
   }
@@ -29,7 +41,9 @@ export async function loadManifest(pluginDir: string): Promise<PluginManifest> {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error(`invalid plugin manifest at ${manifestPath}: not valid JSON`);
+    throw new InvalidManifestError(
+      `invalid plugin manifest at ${manifestPath}: not valid JSON`,
+    );
   }
 
   validateManifest(parsed, manifestPath);
@@ -41,24 +55,28 @@ function validateManifest(
   manifestPath: string,
 ): asserts value is PluginManifest {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`invalid plugin manifest at ${manifestPath}: expected an object`);
+    throw new InvalidManifestError(
+      `invalid plugin manifest at ${manifestPath}: expected an object`,
+    );
   }
   const manifest = value as Record<string, unknown>;
 
   if (typeof manifest.id !== "string" || manifest.id.length === 0) {
-    throw new Error(`invalid plugin manifest at ${manifestPath}: missing or empty "id"`);
+    throw new InvalidManifestError(
+      `invalid plugin manifest at ${manifestPath}: missing or empty "id"`,
+    );
   }
   // The id is used to build `<dataDir>/<pluginId>.json` and as the permission
   // string `storage:read:<id>`. Restrict it to a safe identifier so a
   // plugin-authored id can never inject path separators or traversal.
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.id)) {
-    throw new Error(
+    throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: "id" must start with an ` +
         `alphanumeric and contain only alphanumerics, ".", "_" or "-"`,
     );
   }
   if (typeof manifest.version !== "string" || manifest.version.length === 0) {
-    throw new Error(
+    throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: missing or empty "version"`,
     );
   }
@@ -67,7 +85,7 @@ function validateManifest(
     manifest.kind !== "storage-plugin" &&
     manifest.kind !== "generic"
   ) {
-    throw new Error(
+    throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: "kind" must be one of ` +
         `"network-provider", "storage-plugin", "generic"`,
     );
@@ -76,17 +94,17 @@ function validateManifest(
     !Array.isArray(manifest.permissions) ||
     !manifest.permissions.every((p) => typeof p === "string")
   ) {
-    throw new Error(
+    throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: "permissions" must be an array of strings`,
     );
   }
   if (typeof manifest.entry !== "string" || manifest.entry.length === 0) {
-    throw new Error(
+    throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: missing or empty "entry"`,
     );
   }
   if (manifest.name !== undefined && typeof manifest.name !== "string") {
-    throw new Error(
+    throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: "name" must be a string`,
     );
   }
@@ -95,9 +113,36 @@ function validateManifest(
     (!Array.isArray(manifest.exposedEvents) ||
       !manifest.exposedEvents.every((e) => typeof e === "string"))
   ) {
-    throw new Error(
+    throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: "exposedEvents" must be an array of strings`,
     );
+  }
+  if (manifest.ui !== undefined) {
+    if (
+      typeof manifest.ui !== "object" ||
+      manifest.ui === null ||
+      Array.isArray(manifest.ui)
+    ) {
+      throw new InvalidManifestError(
+        `invalid plugin manifest at ${manifestPath}: "ui" must be an object`,
+      );
+    }
+    const ui = manifest.ui as Record<string, unknown>;
+    if (typeof ui.entry !== "string" || ui.entry.length === 0) {
+      throw new InvalidManifestError(
+        `invalid plugin manifest at ${manifestPath}: "ui.entry" must be a non-empty string`,
+      );
+    }
+    if (ui.defaultWidth !== undefined && typeof ui.defaultWidth !== "number") {
+      throw new InvalidManifestError(
+        `invalid plugin manifest at ${manifestPath}: "ui.defaultWidth" must be a number`,
+      );
+    }
+    if (ui.defaultHeight !== undefined && typeof ui.defaultHeight !== "number") {
+      throw new InvalidManifestError(
+        `invalid plugin manifest at ${manifestPath}: "ui.defaultHeight" must be a number`,
+      );
+    }
   }
 }
 

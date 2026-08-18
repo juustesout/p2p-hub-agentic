@@ -42,6 +42,52 @@ export interface PBXDocument {
   $objects: Record<string, PBXObject>;
 }
 
+/**
+ * Maximum traversal depth for recursive PBX graph walks. A malicious payload
+ * can build a chain of `$ref` pointers longer than the call stack; any walker
+ * that follows those links must stop at this depth rather than overflow.
+ */
+export const MAX_PBX_DEPTH = 100;
+
+/** Base class for every PBX-specific error. */
+export class PBXError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+/** Raised when a PBX payload fails to parse or validate. */
+export class PBXDeserializationError extends PBXError {}
+
+/** Raised when recursive PBX graph traversal exceeds {@link MAX_PBX_DEPTH}. */
+export class PBXRecursionDepthExceededError extends PBXError {
+  readonly maxDepth: number;
+
+  constructor(maxDepth: number) {
+    super(`PBX graph traversal exceeded the maximum depth of ${maxDepth}`);
+    this.maxDepth = maxDepth;
+  }
+}
+
+/**
+ * Callback invoked when a `$ref` points at a missing or malformed object.
+ * Consumers wire this to a global activity/hook bus (e.g. `pbx:brokenRef`); by
+ * default it is a no-op so the SDK stays dependency-free and silent in tests.
+ */
+export type BrokenRefReporter = (ref: string) => void;
+
+let brokenRefReporter: BrokenRefReporter | null = null;
+
+/** Install (or clear) the process-wide broken-ref reporter. */
+export function setBrokenRefReporter(reporter: BrokenRefReporter | null): void {
+  brokenRefReporter = reporter;
+}
+
+function reportBrokenRef(ref: string): void {
+  brokenRefReporter?.(ref);
+}
+
 /** Reserved structural keys that callers may not set via `data`. */
 const RESERVED_KEYS = new Set(["$id", "$class", "$version"]);
 
@@ -167,18 +213,38 @@ export function linkObject(doc: PBXDocument, targetId: string): PBXReference {
   return { $ref: targetId };
 }
 
+function resolveRefInternal(
+  doc: PBXDocument,
+  ref: PBXReference | null | undefined,
+  report: BrokenRefReporter | null,
+): PBXObject | null {
+  if (!isPBXReference(ref)) {
+    return null;
+  }
+  const objects = doc?.$objects as Record<string, unknown> | undefined;
+  if (typeof objects !== "object" || objects === null || Array.isArray(objects)) {
+    report?.(ref.$ref);
+    return null;
+  }
+  const target = objects[ref.$ref];
+  if (!isPBXObject(target)) {
+    report?.(ref.$ref);
+    return null;
+  }
+  return target;
+}
+
 /**
  * Resolve an OLE pointer to its object. Returns `null` for a missing or
- * dangling reference rather than throwing.
+ * dangling reference rather than throwing, so a caller can never hit a
+ * `TypeError: Cannot read property of null`. A dangling `$ref` is reported via
+ * {@link setBrokenRefReporter} (default: no-op).
  */
 export function resolveRef(
   doc: PBXDocument,
   ref: PBXReference | null | undefined,
 ): PBXObject | null {
-  if (!isPBXReference(ref)) {
-    return null;
-  }
-  return doc.$objects[ref.$ref] ?? null;
+  return resolveRefInternal(doc, ref, brokenRefReporter);
 }
 
 /** Resolve the root object of a document (never null for a valid document). */
@@ -197,12 +263,79 @@ export function deserialize(raw: string): PBXDocument {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error("deserialize: input is not valid JSON");
+    throw new PBXDeserializationError("deserialize: input is not valid JSON");
   }
   if (!isPBXDocument(parsed)) {
-    throw new Error("deserialize: input is not a valid PBX document");
+    throw new PBXDeserializationError(
+      "deserialize: input is not a valid PBX document",
+    );
+  }
+  // `isPBXDocument` only checks that `$objects` is a plain object; verify every
+  // entry is a well-formed PBX object so `resolveRef` can never hand a caller
+  // a number/string/array that would crash on `.$class` access.
+  for (const [key, value] of Object.entries(parsed.$objects)) {
+    if (!isPBXObject(value)) {
+      throw new PBXDeserializationError(
+        `deserialize: $objects entry "${key}" is not a valid PBX object`,
+      );
+    }
   }
   return parsed;
+}
+
+export interface PBXWalkOptions {
+  /** Override {@link MAX_PBX_DEPTH}. Defaults to `MAX_PBX_DEPTH`. */
+  maxDepth?: number;
+  /** Broken-ref reporter for this walk. Defaults to the global reporter. */
+  onBrokenRef?: BrokenRefReporter;
+}
+
+/**
+ * Depth-limited walk over the `$ref` graph of a document, starting at the
+ * root. Each reachable object is visited once (cycles are skipped via a
+ * `$id`-based seen set). Following a `$ref` chain deeper than
+ * `options.maxDepth` throws {@link PBXRecursionDepthExceededError} instead of
+ * overflowing the call stack. Iterative by design so a deep but acyclic graph
+ * cannot overflow the stack either.
+ */
+export function walkPBXObjects(
+  doc: PBXDocument,
+  visit: (obj: PBXObject, depth: number) => void,
+  options: PBXWalkOptions = {},
+): void {
+  const maxDepth = options.maxDepth ?? MAX_PBX_DEPTH;
+  const report = options.onBrokenRef ?? brokenRefReporter;
+
+  const root = resolveRefInternal(doc, doc.$top?.root, report);
+  if (!root) {
+    return;
+  }
+
+  const seen = new Set<string>();
+  const stack: Array<{ obj: PBXObject; depth: number }> = [
+    { obj: root, depth: 0 },
+  ];
+
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.depth > maxDepth) {
+      throw new PBXRecursionDepthExceededError(maxDepth);
+    }
+    if (seen.has(frame.obj.$id)) {
+      continue;
+    }
+    seen.add(frame.obj.$id);
+    visit(frame.obj, frame.depth);
+
+    for (const value of Object.values(frame.obj)) {
+      if (isPBXReference(value)) {
+        const target = resolveRefInternal(doc, value, report);
+        if (target) {
+          stack.push({ obj: target, depth: frame.depth + 1 });
+        }
+      }
+    }
+  }
 }
 
 /**

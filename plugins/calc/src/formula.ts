@@ -29,6 +29,18 @@ export const NAME_ERROR = "#NAME?";
 export const CYCLE_ERROR = "#CYCLE!";
 export const NUM_ERROR = "#NUM!";
 export const ERROR_ERROR = "#ERROR!";
+export const SYNTAX_ERROR = "#SYNTAX!";
+
+/**
+ * Defensive bounds for untrusted input. `MAX_FORMULA_DEPTH` caps the parser's
+ * recursion (nested parens, unary, `^`, nested function calls) so a crafted
+ * formula cannot overflow the call stack; `MAX_FORMULA_TOKENS` caps the lexer
+ * so a pathological operator chain cannot build an AST too deep for the
+ * evaluator to walk; `MAX_RANGE_CELLS` caps range materialization.
+ */
+export const MAX_FORMULA_DEPTH = 100;
+export const MAX_FORMULA_TOKENS = 1000;
+export const MAX_RANGE_CELLS = 1_000_000;
 
 export function isErrorValue(value: CellValue): boolean {
   return typeof value === "string" && value.startsWith("#") && value.endsWith("!");
@@ -122,6 +134,13 @@ export function rangeCells(range: CellRange): string[] {
   const maxCol = Math.max(start.col, end.col);
   const minRow = Math.min(start.row, end.row);
   const maxRow = Math.max(start.row, end.row);
+  const colCount = maxCol - minCol + 1;
+  const rowCount = maxRow - minRow + 1;
+  // Refuse to materialize a range that would exhaust memory (e.g. a forged
+  // `A1:ZZZZZZ999999`); degrade to an empty range instead of crashing.
+  if (colCount <= 0 || rowCount <= 0 || colCount * rowCount > MAX_RANGE_CELLS) {
+    return [];
+  }
   const cells: string[] = [];
   for (let row = minRow; row <= maxRow; row++) {
     for (let col = minCol; col <= maxCol; col++) {
@@ -237,6 +256,11 @@ function tokenize(src: string): Token[] {
   let i = 0;
   const n = src.length;
   while (i < n) {
+    if (tokens.length >= MAX_FORMULA_TOKENS) {
+      throw new FormulaSyntaxError(
+        `Formula exceeds ${MAX_FORMULA_TOKENS} tokens`,
+      );
+    }
     const ch = src[i];
 
     if (/\s/.test(ch)) {
@@ -341,6 +365,7 @@ function tokenize(src: string): Token[] {
 class Parser {
   private tokens: Token[];
   private pos = 0;
+  private depth = 0;
 
   constructor(tokens: Token[]) {
     this.tokens = tokens;
@@ -352,6 +377,22 @@ class Parser {
 
   private next(): Token {
     return this.tokens[this.pos++];
+  }
+
+  /** Run a recursive descent step under the nesting depth guard. */
+  private nest<T>(fn: () => T): T {
+    this.depth++;
+    if (this.depth > MAX_FORMULA_DEPTH) {
+      this.depth--;
+      throw new FormulaSyntaxError(
+        `Expression is too deeply nested (max ${MAX_FORMULA_DEPTH})`,
+      );
+    }
+    try {
+      return fn();
+    } finally {
+      this.depth--;
+    }
   }
 
   parse(): Expr {
@@ -418,7 +459,8 @@ class Parser {
     const base = this.parseUnary();
     if (this.peek().type === "op" && this.peek().value === "^") {
       this.next();
-      return { type: "binary", op: "^", left: base, right: this.parsePower() };
+      const right = this.nest(() => this.parsePower());
+      return { type: "binary", op: "^", left: base, right };
     }
     return base;
   }
@@ -429,7 +471,8 @@ class Parser {
       (this.peek().value === "-" || this.peek().value === "+")
     ) {
       const op = this.next().value;
-      return { type: "unary", op, expr: this.parseUnary() };
+      const expr = this.nest(() => this.parseUnary());
+      return { type: "unary", op, expr };
     }
     return this.parsePostfix();
   }
@@ -466,10 +509,10 @@ class Parser {
       this.expect("lparen");
       const args: Expr[] = [];
       if (this.peek().type !== "rparen") {
-        args.push(this.parseComparison());
+        args.push(this.nest(() => this.parseComparison()));
         while (this.peek().type === "comma") {
           this.next();
-          args.push(this.parseComparison());
+          args.push(this.nest(() => this.parseComparison()));
         }
       }
       this.expect("rparen");
@@ -481,7 +524,7 @@ class Parser {
     }
     if (t.type === "lparen") {
       this.next();
-      const expr = this.parseComparison();
+      const expr = this.nest(() => this.parseComparison());
       this.expect("rparen");
       return expr;
     }
@@ -631,12 +674,16 @@ function evalFunction(node: Expr, resolve: CellResolver): CellValue {
       return flattenArgs(args, resolve).map(toText).join("");
     }
     case "UPPER":
+      if (args.length !== 1) return VALUE_ERROR;
       return toText(evaluate(args[0], resolve)).toUpperCase();
     case "LOWER":
+      if (args.length !== 1) return VALUE_ERROR;
       return toText(evaluate(args[0], resolve)).toLowerCase();
     case "TRIM":
+      if (args.length !== 1) return VALUE_ERROR;
       return toText(evaluate(args[0], resolve)).replace(/\s+/g, " ").trim();
     case "LEN":
+      if (args.length !== 1) return VALUE_ERROR;
       return toText(evaluate(args[0], resolve)).length;
 
     case "SUM":
