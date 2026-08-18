@@ -202,6 +202,7 @@ export async function loadPlugin(
       sign: (data) => identityManager.sign(data),
       verify: (publicKeyHex, data, signature) =>
         IdentityManager.verify(publicKeyHex, data, signature),
+      peerId: async () => (await identityManager.getOrCreateIdentity()).peerId,
     },
     network: buildNetworkCapability(networkRegistry),
   };

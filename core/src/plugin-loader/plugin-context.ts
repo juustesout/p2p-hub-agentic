@@ -66,6 +66,15 @@ export interface IdentityCapability {
   sign(data: Buffer): Promise<Buffer>;
   /** Verify a signature against a peer's public key. Never throws. */
   verify(publicKeyHex: string, data: Buffer, signature: Buffer): boolean;
+  /**
+   * The local node's persistent `peerId` (hex Ed25519 public key). The
+   * narrowest possible "who am I" accessor — deliberately not `getIdentity()`,
+   * so a plugin cannot read anything beyond the id it needs to address itself.
+   * Same value as `publicKeyHex` today; if `peerId` later gains a
+   * `did:key:`-style encoding, a separate `publicKeyHex()` accessor will be
+   * added at that point, not now.
+   */
+  peerId(): Promise<string>;
 }
 
 /**
