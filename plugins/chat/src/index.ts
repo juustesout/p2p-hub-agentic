@@ -32,6 +32,7 @@ const INDEX_CLASS = "P2P.ChatIndex";
 const THREAD_CLASS = "P2P.ChatThread";
 const MESSAGE_CLASS = "P2P.ChatMessage";
 const INDEX_KEY = "chatIndex";
+const AUTO_NOTIFY_KEY = "autoNotifyAssignments";
 
 /**
  * Domain-separation context. A chat signature is computed over exactly this
@@ -71,6 +72,20 @@ export interface SendMessageInput {
   action?: PBXReference;
 }
 
+/**
+ * A cross-document action reference emitted by the assignment notification.
+ * `$ref` is the target object's id *within its own* PBX document; `projectId`
+ * names that document (the tasks plugin files projects under
+ * `project:<projectId>`), and `targetClass` names the object's class. Consumers
+ * resolve it by looking the object up in the owning plugin's storage — never
+ * through a shared-document `resolveRef`, since the two objects live in
+ * different documents.
+ */
+export interface TaskAssignmentAction extends PBXReference {
+  targetClass: string;
+  projectId: string;
+}
+
 export interface ThreadSummary {
   peerId: string;
   lastMessageAt: string;
@@ -81,6 +96,9 @@ export interface ChatPlugin {
   sendMessage(input: SendMessageInput): Promise<ChatMessageRecord>;
   listThreads(): Promise<ThreadSummary[]>;
   getThread(peerId: string): Promise<ChatMessageRecord[]>;
+  setAutoNotifyAssignments(input: {
+    enabled: boolean;
+  }): Promise<{ enabled: boolean }>;
 }
 
 /**
@@ -418,6 +436,56 @@ export default function activate(ctx: PluginContext): ChatPlugin {
     return out;
   }
 
+  async function setAutoNotifyAssignments(input: {
+    enabled?: unknown;
+  }): Promise<{ enabled: boolean }> {
+    const { enabled } = (input ?? {}) as { enabled?: unknown };
+    if (typeof enabled !== "boolean") {
+      throw new Error("setAutoNotifyAssignments expects { enabled: boolean }");
+    }
+    await ctx.storage.set(AUTO_NOTIFY_KEY, enabled);
+    return { enabled };
+  }
+
+  /**
+   * Opt-in assignment notification: when enabled, an `assignResource` event on
+   * the tasks plugin sends the assigned contact a chat message. The preference
+   * is stored in our own storage and defaults to `false` — nothing is ever
+   * sent without an explicit `setAutoNotifyAssignments(true)`.
+   */
+  async function onTaskUpdated(payload: unknown): Promise<void> {
+    const enabled = (await ctx.storage.get(AUTO_NOTIFY_KEY)) === true;
+    if (!enabled) {
+      return;
+    }
+    const event = (payload ?? {}) as Record<string, unknown>;
+    if (event.action !== "assignResource") {
+      return;
+    }
+    const { projectId, taskId, taskName, contactPeerId } = event;
+    if (
+      typeof projectId !== "string" ||
+      typeof taskId !== "string" ||
+      typeof taskName !== "string" ||
+      typeof contactPeerId !== "string"
+    ) {
+      return;
+    }
+    if (!ctx.network) {
+      return;
+    }
+    const action: TaskAssignmentAction = {
+      $ref: taskId,
+      targetClass: "P2P.Task",
+      projectId,
+    };
+    await sendMessage({
+      toPeerId: contactPeerId,
+      text: `Je bent toegewezen aan taak: ${taskName}`,
+      action,
+    });
+  }
+
   ctx.skills.register(
     "sendMessage",
     async (payload) => sendMessage(payload as SendMessageInput),
@@ -440,9 +508,19 @@ export default function activate(ctx: PluginContext): ChatPlugin {
     { localOnly: true },
   );
 
+  ctx.skills.register(
+    "setAutoNotifyAssignments",
+    async (payload) => setAutoNotifyAssignments(payload as { enabled?: unknown }),
+    { localOnly: true },
+  );
+
   // The only network-reachable skill: a peer delivers a signed message here.
   // Requires the manifest permission `network:skill:chat.receiveMessage`.
   ctx.skills.register("receiveMessage", receiveMessage, { localOnly: false });
 
-  return { sendMessage, listThreads, getThread };
+  // Cross-namespace hook subscription. `on` is always allowed; the handler
+  // still gates on the stored opt-in and on the event being an assignment.
+  ctx.hooks.on("tasks:taskUpdated", onTaskUpdated);
+
+  return { sendMessage, listThreads, getThread, setAutoNotifyAssignments };
 }
