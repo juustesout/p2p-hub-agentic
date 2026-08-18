@@ -12,8 +12,9 @@ the repo from scratch. Keep it updated at the end of every task.
   - `3c23801` feat(hardening): defensive parsing for manifests, PBX and formulas
   - `35a91cd` feat(core): network resilience, peer TTL expiry and plugin disposal
   - `7baf54c` feat(core): security boundary guard, AST sanitizer and action validator
-- Test suite: **250 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is clean (P0 and P1 items 5–10 committed and pushed).
+- Test suite: **256 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: P2 items 11–13 implemented and tested, not yet
+  committed/pushed.
 
 ## What exists / is done
 
@@ -114,11 +115,23 @@ imports `isPlainObject`/`MAX_*`/`containsUnsafeContent` from `@p2p-hub/sdk`.
 
 ### P2 — follow-ups (from CLAUDE.md, still open)
 
-11. `P2P_HUB_HOST=0.0.0.0` widens the HTTP bridge with no warning/gate.
-12. `network-light` advertises ALL local skill names via mDNS regardless of
-    `localOnly`/`httpExposed` (rejected correctly at broker, but leaks
-    which skills exist to the LAN).
-13. `birthday-cards` title regex `/verjaardag|birthday/i` lacks word boundaries.
+~~DONE~~ (items 11–13) / still open (14–16):
+
+11. ~~DONE~~ `P2P_HUB_HOST=0.0.0.0` no longer silently widens the bridge.
+    `apps/core-server/src/host.ts` exports `isLoopbackHost` + `decideBindHost`;
+    `index.ts` refuses to start on a non-loopback host unless
+    `P2P_HUB_EXPOSE=1` is set, and warns loudly when it is. Tests in
+    `apps/core-server/src/host.test.ts`.
+12. ~~DONE~~ `network-light` already filtered `localOnly` skills before
+    advertising (in `plugin-host.ts` and `app.ts`); the leak was already closed.
+    Added a read-only `advertisedSkills` getter and a regression test
+    (`plugin-host-networking.test.ts`) asserting a local-only skill is never in
+    the advertised set.
+13. ~~DONE~~ `birthday-cards` title regex now uses word boundaries
+    (`/\b(verjaardag|birthday)\b/i`), so substring titles like "unbirthday
+    party" no longer create a card. Note: this does NOT exclude titles where
+    "birthday" is a standalone word (e.g. "Birthday Films"); that would need a
+    stronger heuristic and was left out of scope.
 14. Plugin dotted-id collision: `"a.b"` + `"a"` registering `"b.x"` → same
     broker skill key (theoretical until third-party plugin ids exist).
 15. Chat canonical message = `JSON.stringify` over fixed-key-order object —
@@ -129,17 +142,31 @@ imports `isPlainObject`/`MAX_*`/`containsUnsafeContent` from `@p2p-hub/sdk`.
 
 ### P2 — hygiene / verification
 
-17. **Audit `CoreAIProvider`** (`core/src/ai/core-ai-provider.ts`): confirm the
-    `ai.apiKey` raw secret is never logged/returned and prompts are handled
-    safely. (Not read this session.)
-18. **`npm audit` + dependency review**: `node-forge` is dated; review
-    `bonjour-service`, `ws` and pin. Add to CI if none exists.
-19. **desktop-shell** (`apps/desktop-shell`): review how it renders chat/peer
-    text (should be text-only or sanitized) and confirm it uses the boot token
-    correctly. (Not read this session.)
-20. **notepad `miniMarkdown`** (already escapes `&<>` before building tags —
-    verified safe) — keep an eye on any new plugin UI that renders content via
-    `innerHTML`; they must escape first or use `sanitizeMarkdown`.
+~~DONE~~ (items 17, 19, 20) / follow-up (item 18):
+
+17. ~~DONE (audit, no change)~~ `CoreAIProvider` is the only reader of
+    `ai.apiKey` (`vault.getSecret`); the key is injected solely into the
+    outbound `Authorization` header and never logged or returned. Errors carry
+    only HTTP status/statusText. `ctx.ai` exposes only
+    `generateText`/`generateImage`; `fetchFn` is constructor-injectable for
+    tests only, so a plugin cannot intercept the key. Matches principle #6.
+18. ~~FOLLOW-UP~~ `npm audit` reports 2 vulns (1 moderate, 1 high), both via
+    `esbuild` <=0.24.2 (GHSA-67mh-4wv8-2f99: dev-server request leak) pulled in
+    by `vite` <=6.4.2. Dev-server only (not a runtime path). `npm audit fix
+    --force` would jump to vite@8 (breaking). Decide whether to upgrade vite or
+    accept for now; `node-forge`/`bonjour-service`/`ws` had no reported
+    advisories.
+19. ~~DONE (audit, no change)~~ desktop-shell renders all peer/plugin/skill
+    text through React JSX (auto-escaped); no `dangerouslySetInnerHTML` or
+    `innerHTML` anywhere in `apps/desktop-shell`. Boot token is read via Tauri
+    `get_boot_token` (or `VITE_P2P_HUB_TOKEN` in dev) and sent as
+    `Authorization: Bearer` on HTTP and `?token=` on the WS upgrade (the
+    documented accepted risk). Minor note: `plugin-bridge.ts` uses
+    `postMessage(..., "*")` for plugin iframe panels — same-origin local
+    content today, but worth tightening to a specific origin if plugin panels
+    ever load remote content.
+20. ~~DONE (prior verification)~~ notepad `miniMarkdown` escapes `&<>` before
+    building tags. Watch any new plugin UI rendering via `innerHTML`.
 
 ## Conventions (for any task)
 

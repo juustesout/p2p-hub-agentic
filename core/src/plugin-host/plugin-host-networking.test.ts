@@ -48,6 +48,30 @@ async function writeTestNodePlugin(root: string): Promise<void> {
   await fs.writeFile(path.join(dir, "index.mjs"), ECHO_SOURCE);
 }
 
+const MIXED_MANIFEST = {
+  id: "mixed",
+  version: "1.0.0",
+  kind: "generic",
+  permissions: ["network:skill:mixed.public"],
+  entry: "./index.mjs",
+};
+
+const MIXED_SOURCE = `export default function activate(ctx) {
+  ctx.skills.register("public", async () => "ok", { localOnly: false });
+  ctx.skills.register("secret", async () => "shh");
+  return {};
+}`;
+
+async function writeMixedPlugin(root: string): Promise<void> {
+  const dir = path.join(root, "plugins", "mixed");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "manifest.json"),
+    JSON.stringify(MIXED_MANIFEST, null, 2),
+  );
+  await fs.writeFile(path.join(dir, "index.mjs"), MIXED_SOURCE);
+}
+
 async function waitFor<T>(
   check: () => T | null | undefined,
   timeoutMs = 10_000,
@@ -121,6 +145,37 @@ test("two hosts reach each other's network-exposed skill via ctx.network", async
   } finally {
     await hostA.stop();
     await hostB.stop();
+  }
+});
+
+test("network-light advertises only network-exposed skills, never local-only ones", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "host-net-adv-"));
+  await writeMixedPlugin(root);
+
+  const host = new PluginHost({
+    pluginsDir: path.join(root, "plugins"),
+    dataDir: path.join(root, "data"),
+    enableNetworking: true,
+  });
+
+  try {
+    await host.boot();
+
+    const provider = host.networkRegistry().selectActive();
+    assert.ok(provider, "network provider should be active after boot");
+    const advertised = (provider as { advertisedSkills?: string[] })
+      .advertisedSkills;
+    assert.ok(advertised, "provider should expose advertisedSkills");
+    assert.ok(
+      advertised.includes("mixed.public"),
+      "network-exposed skill should be advertised",
+    );
+    assert.ok(
+      !advertised.includes("mixed.secret"),
+      "local-only skill must never be advertised over mDNS",
+    );
+  } finally {
+    await host.stop();
   }
 });
 

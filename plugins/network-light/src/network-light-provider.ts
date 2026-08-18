@@ -141,6 +141,16 @@ export class NetworkLightProvider implements NetworkProvider {
     return this.ready;
   }
 
+  /**
+   * The skills this instance advertises over mDNS. This is exactly the
+   * constructor-provided set (already filtered by the caller to exclude
+   * local-only skills); exposed read-only so tests can assert the transport
+   * never leaks a local-only skill name onto the LAN.
+   */
+  get advertisedSkills(): string[] {
+    return [...this.skills];
+  }
+
   async start(): Promise<void> {
     if (this.ready) {
       return;

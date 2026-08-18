@@ -68,3 +68,14 @@ test("an event without 'verjaardag'/'birthday' creates no card", async () => {
   const pending = await cards.listPendingCards();
   assert.equal(pending.length, 0);
 });
+
+test("a title containing 'birthday' only as a substring creates no card", async () => {
+  const { calendar, cards } = await bootBoth();
+
+  await calendar.addEvent({ title: "unbirthday party", date: "2026-08-21" });
+  await calendar.addEvent({ title: "Mama's birthday", date: "2026-09-01" });
+
+  const pending = await cards.listPendingCards();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].title, "Mama's birthday");
+});

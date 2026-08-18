@@ -13,7 +13,7 @@ export interface BirthdayCardsApi {
 }
 
 function isBirthdayTitle(value: unknown): value is string {
-  return typeof value === "string" && /(verjaardag|birthday)/i.test(value);
+  return typeof value === "string" && /\b(verjaardag|birthday)\b/i.test(value);
 }
 
 function isBirthdayCard(value: unknown): value is BirthdayCard {
