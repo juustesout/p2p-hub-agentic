@@ -158,6 +158,35 @@ When asked to review or verify security-relevant work in this repo:
   can produce the same broker skill key. Theoretical today (single
   developer, no external plugin registration yet); revisit if/when plugin
   ids are ever assigned by a third party (marketplace).
+- Chat's canonical message form is `JSON.stringify` over a fixed-key-order
+  object (NFC-normalized text). That is only sound while sender and receiver
+  reuse the same `canonicalMessage` constructor. Trigger to revisit: the
+  moment a second, independent implementation of the chat protocol appears
+  that cannot share that function — switch to an explicit byte-template
+  canonicalization. Not needed until then.
+
+## Spec-gaps: when an acceptance criterion hides a dependency
+
+Acceptance criteria have repeatedly turned out to depend on a capability that
+does not exist yet — a "spec-gap" (the `PluginContext` scope in the contacts
+brief, and the identity `peerId` accessor in the chat brief are two of them).
+The recurring failure mode is treating the criterion as if it *authorized*
+filling that gap, which silently widens scope.
+
+- When a criterion blocks on a missing capability, **stop and surface the
+  dependency** — do not work around it. Propose the *minimal* extension and
+  wait for explicit authorization. The extension should follow the
+  capability-scoped shape of `ctx.ai`/`ctx.vault`: the plugin gets exactly
+  what it needs, nothing wider.
+- Keep capability additions present-tense and narrow. `peerId` and
+  `publicKeyHex` are identical today, so `ctx.identity` exposes only
+  `peerId()`; a separate `publicKeyHex()` is added **only if** `peerId` later
+  gains a `did:key:`-style encoding. Do not pre-build a divergence that has
+  not happened.
+- When a scope expansion is authorized, record it explicitly — "acceptance
+  criterion N expanded to include X" — in the task state and commit message,
+  so the drift is visible in review (same spirit as "prefer `git diff` over a
+  summary" above).
 
 ## Conventions
 
