@@ -64,11 +64,31 @@ test("the ai.* namespace is reserved and cannot be written by plugins", async ()
   await assert.rejects(vault.deleteSecret("ai.apiKey"), /reserved/);
 });
 
+test("the identity.* namespace is reserved and cannot be written by plugins", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-data-"));
+  const { vault } = await bootVault(dataDir, "test-master");
+
+  await assert.rejects(vault.setSecret("identity.privateKey", "pem"), /reserved/);
+  await assert.rejects(vault.deleteSecret("identity.publicKey"), /reserved/);
+});
+
 test("listKeys hides ai.* keys written by core", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-data-"));
   const { vault, host } = await bootVault(dataDir, "test-master");
 
   await host.vaultManager().setSecret("ai.apiKey", "sk-core-only");
+  await vault.setSecret("openai.key", "sk-visible");
+
+  const keys = await vault.listKeys();
+  assert.deepEqual(keys.sort(), ["openai.key"]);
+});
+
+test("listKeys hides identity.* keys written by core", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-data-"));
+  const { vault, host } = await bootVault(dataDir, "test-master");
+
+  // boot() already persisted the identity keypair via the core-only
+  // VaultManager; those keys must never surface through the plugin-facing list.
   await vault.setSecret("openai.key", "sk-visible");
 
   const keys = await vault.listKeys();

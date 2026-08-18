@@ -4,7 +4,8 @@ import * as tls from "node:tls";
 import * as net from "node:net";
 import * as forge from "node-forge";
 import { NetworkLightProvider } from "./network-light-provider";
-import type { NetworkPeer } from "@p2p-hub/sdk";
+import type { DiscoveredPeer } from "./network-light-provider";
+import type { NetworkPeer, PeerIdentity } from "@p2p-hub/sdk";
 
 async function waitFor<T>(
   check: () => Promise<T | null | undefined>,
@@ -52,6 +53,31 @@ function close(server: tls.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
+// A stable identity: peerId = 64 hex chars (32-byte Ed25519 public key).
+const STABLE_IDENTITY: PeerIdentity = {
+  peerId: "a".repeat(64),
+  publicKeyHex: "a".repeat(64),
+};
+
+async function waitForPeerWithId(
+  provider: NetworkLightProvider,
+  peerId: string,
+  excludeId?: string,
+  timeoutMs = 10_000,
+): Promise<DiscoveredPeer> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = provider
+      .listPeers()
+      .find((peer) => peer.peerId === peerId && peer.id !== excludeId);
+    if (found) {
+      return found;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`peer with id ${peerId} not discovered within ${timeoutMs}ms`);
+}
+
 test("two local instances discover each other and exchange a task", async () => {
   const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({ port: 0, skills: ["echo"] });
@@ -88,6 +114,74 @@ test("two local instances discover each other and exchange a task", async () => 
   } finally {
     await alice.stop();
     await bob.stop();
+  }
+});
+
+test("a peer with an identity advertises both certFingerprint and peerId", async () => {
+  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: STABLE_IDENTITY,
+  });
+
+  await alice.start();
+  await bob.start();
+
+  try {
+    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+
+    assert.equal(bobPeer.peerId, STABLE_IDENTITY.peerId);
+    // The per-boot certificate fingerprint is still announced alongside the
+    // persistent identity — neither replaces the other.
+    assert.ok(bobPeer.certFingerprint);
+  } finally {
+    await alice.stop();
+    await bob.stop();
+  }
+});
+
+test("peerId is stable across restarts while certFingerprint changes", async () => {
+  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bob1 = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: STABLE_IDENTITY,
+  });
+
+  await alice.start();
+  await bob1.start();
+
+  try {
+    const bob1Peer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    assert.ok(bob1Peer.certFingerprint);
+
+    // Stop the first instance and bring up a second one with the *same*
+    // identity. The peerId must remain identical; the certificate is a new
+    // per-boot self-signed cert and therefore must differ.
+    await bob1.stop();
+
+    const bob2 = new NetworkLightProvider({
+      port: 0,
+      skills: ["echo"],
+      identity: STABLE_IDENTITY,
+    });
+    await bob2.start();
+    try {
+      // Exclude bob1's instance id so we wait specifically for the new
+      // instance (bob1's "down" event may not have been processed yet).
+      const bob2Peer = await waitForPeerWithId(
+        alice,
+        STABLE_IDENTITY.peerId,
+        bob1Peer.id,
+      );
+      assert.equal(bob2Peer.peerId, bob1Peer.peerId);
+      assert.notEqual(bob2Peer.certFingerprint, bob1Peer.certFingerprint);
+    } finally {
+      await bob2.stop();
+    }
+  } finally {
+    await alice.stop();
   }
 });
 

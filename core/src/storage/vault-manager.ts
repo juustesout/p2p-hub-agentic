@@ -50,8 +50,8 @@ const IV_LENGTH = 12;
 const SALT_LENGTH = 16;
 const DEV_MASTER_KEY = "p2p-hub-insecure-dev-key";
 
-/** Key-name prefixes reserved for core configuration (e.g. `ai.*`). */
-export const DEFAULT_RESERVED_PREFIXES = ["ai."];
+/** Key-name prefixes reserved for core configuration (e.g. `ai.*`, `identity.*`). */
+export const DEFAULT_RESERVED_PREFIXES = ["ai.", "identity."];
 
 function resolveMasterKey(explicit?: string): {
   masterKey: string;

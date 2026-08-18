@@ -6,6 +6,7 @@ import * as forge from "node-forge";
 import type {
   NetworkPeer,
   NetworkProvider,
+  PeerIdentity,
   TaskHandler,
   TaskRequest,
   TaskResult,
@@ -24,6 +25,12 @@ export interface NetworkLightOptions {
   name?: string;
   /** Skills this instance can serve. */
   skills?: string[];
+  /**
+   * Optional persistent identity. When present, its `peerId` is advertised in
+   * the mDNS TXT record alongside (not instead of) the session
+   * `certFingerprint`. Informational in this stage — no logic depends on it.
+   */
+  identity?: PeerIdentity;
 }
 
 interface WireMessage {
@@ -32,10 +39,12 @@ interface WireMessage {
   result?: TaskResult;
 }
 
-interface DiscoveredPeer extends NetworkPeer {
+export interface DiscoveredPeer extends NetworkPeer {
   name?: string;
   /** SHA-256 fingerprint of the peer's self-signed cert, announced via mDNS. */
   certFingerprint?: string;
+  /** Persistent peer identity, announced via mDNS (optional). */
+  peerId?: string;
 }
 
 function encodeFrame(payload: string | Buffer): Buffer {
@@ -83,6 +92,7 @@ export class NetworkLightProvider implements NetworkProvider {
   private readonly name: string;
   private readonly skills: string[];
   private readonly instanceId: string;
+  private readonly identity: PeerIdentity | null;
 
   private server: tls.Server | null = null;
   private bonjour: Bonjour | null = null;
@@ -100,6 +110,7 @@ export class NetworkLightProvider implements NetworkProvider {
       options.name ?? `p2p-hub-${crypto.randomBytes(4).toString("hex")}`;
     this.skills = [...(options.skills ?? [])];
     this.instanceId = crypto.randomUUID();
+    this.identity = options.identity ?? null;
   }
 
   isReady(): boolean {
@@ -141,6 +152,7 @@ export class NetworkLightProvider implements NetworkProvider {
         id: this.instanceId,
         skills: JSON.stringify(this.skills),
         certFingerprint: this.certFingerprint,
+        ...(this.identity ? { peerId: this.identity.peerId } : {}),
       },
     });
 
@@ -209,14 +221,16 @@ export class NetworkLightProvider implements NetworkProvider {
    * advertises. Useful for capability/inspector UIs that need the full peer
    * set, not just the peers that serve one specific skill.
    */
-  listPeers(): NetworkPeer[] {
-    const peers: NetworkPeer[] = [];
+  listPeers(): DiscoveredPeer[] {
+    const peers: DiscoveredPeer[] = [];
     for (const peer of this.discovered.values()) {
       peers.push({
         id: peer.id,
         address: peer.address,
         skills: peer.skills,
         name: peer.name,
+        certFingerprint: peer.certFingerprint,
+        peerId: peer.peerId,
       });
     }
     return peers;
@@ -353,12 +367,14 @@ export class NetworkLightProvider implements NetworkProvider {
       skills = [];
     }
     const certFingerprint = service.txt?.certFingerprint as string | undefined;
+    const peerId = service.txt?.peerId as string | undefined;
     this.discovered.set(id, {
       id,
       address,
       skills,
       name: service.name,
       certFingerprint,
+      peerId,
     });
   }
 
