@@ -254,3 +254,25 @@ test("sendMessage reports a missing network provider gracefully", async () => {
     /no network provider available/,
   );
 });
+
+test("sendMessage rejects text longer than MAX_CHAT_TEXT_LENGTH", async () => {
+  const target = hex64();
+  const { chat } = await loadChat(target);
+
+  await assert.rejects(
+    chat.sendMessage({ toPeerId: target, text: "x".repeat(10_001) }),
+    /exceeding/,
+  );
+});
+
+test("message text is HTML-sanitized on read, not executed", async () => {
+  const target = hex64();
+  const { chat } = await loadChat(target);
+
+  const raw = "a<script>alert(1)</script>b";
+  await chat.sendMessage({ toPeerId: target, text: raw });
+
+  const thread = await chat.getThread(target);
+  assert.equal(thread.length, 1);
+  assert.equal(thread[0].text, "ab");
+});

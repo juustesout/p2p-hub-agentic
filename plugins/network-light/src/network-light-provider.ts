@@ -11,9 +11,13 @@ import type {
   TaskRequest,
   TaskResult,
 } from "@p2p-hub/sdk";
+import {
+  MAX_PAYLOAD_BYTES,
+  PayloadTooLargeError,
+  validateObjectDepth,
+} from "@p2p-hub/sdk";
 
 const SERVICE_TYPE = "p2p-hub";
-const FRAME_MAX = 16 * 1024 * 1024;
 const RESPONSE_TIMEOUT_MS = 10_000;
 /** Peers silent this long are treated as gone even without an mDNS "down". */
 const HEARTBEAT_TTL_MS = 30_000;
@@ -316,7 +320,18 @@ export class NetworkLightProvider implements NetworkProvider {
 
       socket.on("data", (chunk: Buffer) => {
         buffer = Buffer.concat([buffer, chunk]);
-        const message = tryDecodeFrame(buffer);
+        let message: DecodedFrame | null;
+        try {
+          message = tryDecodeFrame(buffer);
+        } catch {
+          socket.destroy();
+          finish({
+            taskId: task.id,
+            status: "error",
+            error: "frame exceeds maximum allowed size",
+          });
+          return;
+        }
         if (message === null) {
           return;
         }
@@ -337,11 +352,15 @@ export class NetworkLightProvider implements NetworkProvider {
     let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     socket.on("data", (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
-      let message = tryDecodeFrame(buffer);
-      while (message !== null) {
-        buffer = message.rest;
-        void this.handleMessage(socket, message.value);
-        message = tryDecodeFrame(buffer);
+      try {
+        let message = tryDecodeFrame(buffer);
+        while (message !== null) {
+          buffer = message.rest;
+          void this.handleMessage(socket, message.value);
+          message = tryDecodeFrame(buffer);
+        }
+      } catch {
+        socket.destroy();
       }
     });
     socket.on("error", () => {
@@ -458,8 +477,8 @@ function tryDecodeFrame(buffer: Buffer): DecodedFrame | null {
     return null;
   }
   const length = buffer.readUInt32BE(0);
-  if (length > FRAME_MAX) {
-    throw new Error("frame exceeds maximum allowed size");
+  if (length > MAX_PAYLOAD_BYTES) {
+    throw new PayloadTooLargeError(length, MAX_PAYLOAD_BYTES);
   }
   if (buffer.length < 4 + length) {
     return null;
@@ -468,6 +487,7 @@ function tryDecodeFrame(buffer: Buffer): DecodedFrame | null {
   const rest = buffer.subarray(4 + length);
   try {
     const value = JSON.parse(body.toString("utf8")) as WireMessage;
+    validateObjectDepth(value);
     return { value, rest };
   } catch {
     return { value: { type: "result" }, rest };

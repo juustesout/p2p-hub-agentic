@@ -2,8 +2,8 @@ import {
   MAX_KEY_COUNT,
   MAX_OBJECT_DEPTH,
   isPlainObject,
-} from "./boundary-guard";
-import { containsUnsafeContent } from "./sanitizer";
+} from "@p2p-hub/sdk";
+import { containsUnsafeContent } from "@p2p-hub/sdk";
 
 /**
  * A validated, renderable action card. Pure data — no executable strings,

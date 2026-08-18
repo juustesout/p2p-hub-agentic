@@ -101,3 +101,31 @@ test("handleHttp allows skills explicitly opted in to HTTP exposure", async () =
   assert.equal(result.status, "ok");
   assert.deepEqual(result.result, { ok: true });
 });
+
+test("a payload nested deeper than MAX_OBJECT_DEPTH is rejected, not thrown", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("demo.echo", async (payload) => payload);
+
+  let deep: unknown = "leaf";
+  for (let i = 0; i < 11; i++) {
+    deep = { child: deep };
+  }
+
+  const result = await broker.handle(task({ skill: "demo.echo", payload: deep }));
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /nesting depth/);
+});
+
+test("a payload exceeding MAX_PAYLOAD_BYTES is rejected, not thrown", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("demo.echo", async (payload) => payload);
+
+  const oversized = "x".repeat(256 * 1024 + 1);
+  const result = await broker.handle(
+    task({ skill: "demo.echo", payload: oversized }),
+  );
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /exceeding/);
+});

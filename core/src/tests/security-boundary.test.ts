@@ -8,18 +8,16 @@ import {
   ObjectDepthExceededError,
   PayloadTooLargeError,
   KeyCountExceededError,
-  validateKeyCount,
-  validateObjectDepth,
-  validatePayloadSize,
-  validateTextLength,
-} from "../security/boundary-guard";
-import {
   containsUnsafeContent,
   sanitizeMarkdown,
   sanitizeText,
   sanitizeUrl,
   stripHtml,
-} from "../security/sanitizer";
+  validateKeyCount,
+  validateObjectDepth,
+  validatePayloadSize,
+  validateTextLength,
+} from "@p2p-hub/sdk";
 import {
   InvalidActionPayloadError,
   validateActionPayload,

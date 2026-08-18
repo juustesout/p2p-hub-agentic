@@ -8,6 +8,8 @@ import {
   linkObject,
   resolveRef,
   rootObject,
+  sanitizeText,
+  validateTextLength,
   type PBXDocument,
   type PBXObject,
   type PBXReference,
@@ -186,7 +188,7 @@ export default function activate(ctx: PluginContext): ChatPlugin {
     const record: ChatMessageRecord = {
       fromPeerId: String(obj.fromPeerId),
       toPeerId: String(obj.toPeerId),
-      text: String(obj.text),
+      text: sanitizeText(String(obj.text)),
       sentAt: String(obj.sentAt),
       signature: String(obj.signature),
       verified: obj.verified === true,
@@ -249,6 +251,7 @@ export default function activate(ctx: PluginContext): ChatPlugin {
     if (typeof text !== "string" || text.length === 0) {
       throw new Error("sendMessage expects a non-empty text string");
     }
+    validateTextLength(text);
     if (action !== undefined && !isPBXReference(action)) {
       throw new Error("sendMessage: action must be a PBX { $ref } reference");
     }
@@ -304,6 +307,7 @@ export default function activate(ctx: PluginContext): ChatPlugin {
     ) {
       throw new Error("receiveMessage: malformed message");
     }
+    validateTextLength(m.text);
     if (m.action !== undefined && !isPBXReference(m.action)) {
       throw new Error("receiveMessage: action must be a PBX reference");
     }

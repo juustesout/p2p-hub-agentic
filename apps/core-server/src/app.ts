@@ -8,6 +8,12 @@ import {
   tokenFromQuery,
   writeBootToken,
 } from "./auth";
+import {
+  MAX_PAYLOAD_BYTES,
+  PayloadTooLargeError,
+  validateObjectDepth,
+  validatePayloadSize,
+} from "@p2p-hub/sdk";
 import type { TaskResult } from "@p2p-hub/sdk";
 import {
   CoreAIProvider,
@@ -488,12 +494,21 @@ export class CoreServer {
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let received = 0;
   for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    received += buf.length;
+    if (received > MAX_PAYLOAD_BYTES) {
+      throw new PayloadTooLargeError(received, MAX_PAYLOAD_BYTES);
+    }
+    chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) {
     return {};
   }
-  return JSON.parse(raw);
+  validatePayloadSize(raw, MAX_PAYLOAD_BYTES);
+  const parsed: unknown = JSON.parse(raw);
+  validateObjectDepth(parsed);
+  return parsed;
 }

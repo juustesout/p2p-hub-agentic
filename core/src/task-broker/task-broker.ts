@@ -1,4 +1,9 @@
 import type { TaskRequest, TaskResult } from "@p2p-hub/sdk";
+import {
+  MAX_PAYLOAD_BYTES,
+  validateObjectDepth,
+  validatePayloadSize,
+} from "@p2p-hub/sdk";
 
 export type SkillHandler = (payload: unknown) => Promise<unknown>;
 
@@ -129,6 +134,9 @@ export class TaskBroker {
       };
     }
     try {
+      validateObjectDepth(task.payload);
+      const serialized = JSON.stringify(task.payload ?? null) ?? "null";
+      validatePayloadSize(serialized, MAX_PAYLOAD_BYTES);
       const result = await record.handler(task.payload);
       return { taskId: task.id, status: "ok", result };
     } catch (err) {
