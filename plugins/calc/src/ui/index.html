@@ -3,38 +3,99 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Grid & Sheet</title>
-    <link rel="stylesheet" href="styles.css" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <title>dreamsheet — quick calc sheet</title>
+    <link rel="stylesheet" href="styles.css?v=4" />
   </head>
   <body>
     <div class="app">
-      <header class="topbar">
-        <span class="brand">AI Grid &amp; Sheet</span>
-        <div class="assist">
-          <button id="ai-fill" class="btn">AI Fill Column</button>
-          <button id="embed" class="btn">Embed Object</button>
+      <header class="toolbar">
+        <span class="brand">dreamsheet</span>
+
+        <div class="tb-group">
+          <button id="btn-bold" class="btn" title="Bold (Ctrl+B)">B</button>
+          <button id="btn-italic" class="btn" title="Italic (Ctrl+I)"><i>I</i></button>
+          <button id="btn-underline" class="btn" title="Underline (Ctrl+U)"><u>U</u></button>
         </div>
+
+        <div class="tb-group">
+          <button id="btn-align-left" class="btn" title="Align left">&#8676;</button>
+          <button id="btn-align-center" class="btn" title="Align center">&#8596;</button>
+          <button id="btn-align-right" class="btn" title="Align right">&#8677;</button>
+        </div>
+
+        <div class="tb-group">
+          <select id="num-format" class="btn select" title="Number format">
+            <option value="general">General</option>
+            <option value="number">1,234.56</option>
+            <option value="currency">$1,234.56</option>
+            <option value="percent">12.3%</option>
+          </select>
+        </div>
+
+        <div class="tb-group">
+          <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)">&#8630;</button>
+          <button id="btn-redo" class="btn" title="Redo (Ctrl+Shift+Z)">&#8631;</button>
+        </div>
+
+        <div class="tb-group">
+          <button id="btn-insert-row" class="btn" title="Insert row above">+Row</button>
+          <button id="btn-delete-row" class="btn" title="Delete rows">&#8722;Row</button>
+          <button id="btn-insert-col" class="btn" title="Insert column left">+Col</button>
+          <button id="btn-delete-col" class="btn" title="Delete columns">&#8722;Col</button>
+        </div>
+
+        <div class="tb-group">
+          <button id="btn-ai-fill" class="btn" title="AI fill selection">AI Fill</button>
+          <button id="btn-embed" class="btn" title="Embed PBX object">Embed</button>
+        </div>
+
+        <div class="spacer"></div>
+
+        <div class="tb-group">
+          <button id="btn-import" class="btn" title="Import CSV">Import</button>
+          <button id="btn-export-csv" class="btn" title="Export CSV">CSV</button>
+          <button id="btn-export-json" class="btn" title="Export JSON">JSON</button>
+          <button id="btn-theme" class="btn" title="Toggle theme">&#9788;</button>
+        </div>
+
         <span id="bridge-status" class="bridge-status">mode: local demo</span>
+        <input id="file-input" type="file" accept=".csv,text/csv" style="display:none" />
       </header>
 
       <div class="formula-bar">
-        <span id="cell-ref" class="cell-ref">A1</span>
+        <span id="name-box" class="name-box">A1</span>
+        <span class="fx">fx</span>
         <input
           id="formula-input"
           class="formula-input"
-          placeholder="Enter a value or formula (e.g. =SUM(A1:A3), =AI('Summarize', A1))"
+          placeholder="Type a value or formula (=SUM(A1:A3), =A1*B1)"
           autocomplete="off"
           spellcheck="false"
         />
       </div>
 
-      <div id="grid-scroll" class="grid-scroll">
-        <table id="grid" class="grid"></table>
+      <div class="grid-area">
+        <div id="corner" class="corner"></div>
+        <div id="col-headers" class="col-headers"></div>
+        <div id="row-headers" class="row-headers"></div>
+        <div id="viewport" class="viewport">
+          <div id="cell-layer" class="cell-layer"></div>
+          <div id="selection" class="selection"></div>
+          <div id="fill-handle" class="fill-handle"></div>
+        </div>
       </div>
+
+      <footer class="statusbar">
+        <span id="status-left">Ready</span>
+        <span class="spacer"></span>
+        <span id="status-stats"></span>
+      </footer>
 
       <div id="toast" class="toast hidden"></div>
     </div>
 
-    <script src="app.js"></script>
+    <script type="module" src="app.js?v=4"></script>
   </body>
 </html>

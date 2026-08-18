@@ -8,7 +8,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-ui.cjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.web.json && node scripts/copy-ui.cjs",
     "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {

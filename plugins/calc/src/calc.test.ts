@@ -111,6 +111,12 @@ interface CalcApi {
     value?: unknown;
     formula?: string;
   }): Promise<PBXObject>;
+  updateCells(input: {
+    sheetId: string;
+    updates: Array<{ coord: string; value?: unknown; formula?: string }>;
+  }): Promise<PBXObject[]>;
+  insertRows(input: { sheetId: string; at: number; count: number }): Promise<PBXDocument>;
+  deleteRows(input: { sheetId: string; at: number; count: number }): Promise<PBXDocument>;
   evaluateAIFormula(input: {
     sheetId: string;
     coord: string;
@@ -366,13 +372,146 @@ test("skills are registered in the calc namespace and local-only", async () => {
   assert.deepEqual(names, [
     "calc.aiFillColumn",
     "calc.createSheet",
+    "calc.deleteCols",
+    "calc.deleteRows",
     "calc.embedObject",
     "calc.evaluateAIFormula",
     "calc.getSheet",
+    "calc.insertCols",
+    "calc.insertRows",
     "calc.listSheets",
     "calc.updateCell",
+    "calc.updateCells",
   ]);
   for (const entry of broker.listSkills()) {
     assert.equal(entry.localOnly, true);
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* Recalculation & structural edits                                     */
+/* ------------------------------------------------------------------ */
+
+test("changing a source cell propagates to dependent formulas", async () => {
+  const { calc } = await loadCalc();
+  const doc = await calc.createSheet({ title: "Dep" });
+  const sheetId = (rootObject(doc)!.sheets as PBXReference[])[0].$ref;
+
+  await calc.updateCell({ sheetId, coord: "A1", value: 10 });
+  await calc.updateCell({ sheetId, coord: "A2", value: 5 });
+  await calc.updateCell({ sheetId, coord: "A3", formula: "=A1+A2" });
+
+  // Change A1 -> A3 must reflect the new sum.
+  await calc.updateCell({ sheetId, coord: "A1", value: 20 });
+  const stored = await calc.getSheet(sheetId);
+  const sheet = resolveRef(stored!, (rootObject(stored!)!.sheets as PBXReference[])[0])!;
+  const a3 = resolveRef(stored!, (sheet.cells as Record<string, PBXReference>).A3)!;
+  assert.equal(a3.value, 25);
+});
+
+test("arithmetic and function formulas evaluate through the engine", async () => {
+  const { calc } = await loadCalc();
+  const doc = await calc.createSheet({ title: "Eng" });
+  const sheetId = (rootObject(doc)!.sheets as PBXReference[])[0].$ref;
+
+  await calc.updateCell({ sheetId, coord: "A1", value: 1 });
+  await calc.updateCell({ sheetId, coord: "A2", value: 2 });
+  await calc.updateCell({ sheetId, coord: "A3", value: 3 });
+  const total = await calc.updateCell({ sheetId, coord: "B1", formula: "=SUM(A1:A3)*2" });
+  assert.equal(total.value, 12);
+
+  const avg = await calc.updateCell({ sheetId, coord: "B2", formula: "=AVERAGE(A1:A3)" });
+  assert.equal(avg.value, 2);
+
+  const cond = await calc.updateCell({ sheetId, coord: "B3", formula: '=IF(B1>10,"big","small")' });
+  assert.equal(cond.value, "big");
+});
+
+test("insertRows shifts cells and rewrites relative references", async () => {
+  const { calc } = await loadCalc();
+  const doc = await calc.createSheet({ title: "Rows" });
+  const sheetId = (rootObject(doc)!.sheets as PBXReference[])[0].$ref;
+
+  await calc.updateCell({ sheetId, coord: "A1", value: 1 });
+  await calc.updateCell({ sheetId, coord: "A2", value: 2 });
+  await calc.updateCell({ sheetId, coord: "B1", formula: "=SUM(A1:A2)" });
+
+  await calc.insertRows({ sheetId, at: 0, count: 1 });
+
+  const stored = await calc.getSheet(sheetId);
+  const sheet = resolveRef(stored!, (rootObject(stored!)!.sheets as PBXReference[])[0])!;
+  const cells = sheet.cells as Record<string, PBXReference>;
+
+  // Values shifted down: A1 -> A2, A2 -> A3.
+  const a2 = resolveRef(stored!, cells.A2)!;
+  assert.equal(a2.value, 1);
+  const a3 = resolveRef(stored!, cells.A3)!;
+  assert.equal(a3.value, 2);
+
+  // Formula moved B1 -> B1 (row 0 is above the inserted row at index 0? no:
+  // B1 is at row 0, insertion at index 0 shifts it to B2) and reference
+  // rewrites SUM(A1:A2) -> SUM(A2:A3).
+  const b2 = resolveRef(stored!, cells.B2)!;
+  assert.equal(b2.formula, "=SUM(A2:A3)");
+  assert.equal(b2.value, 3);
+});
+
+test("deleteRows removes shifted cells and shortens references", async () => {
+  const { calc } = await loadCalc();
+  const doc = await calc.createSheet({ title: "Del" });
+  const sheetId = (rootObject(doc)!.sheets as PBXReference[])[0].$ref;
+
+  await calc.updateCell({ sheetId, coord: "A1", value: 1 });
+  await calc.updateCell({ sheetId, coord: "A2", value: 2 });
+  await calc.updateCell({ sheetId, coord: "A3", value: 3 });
+  await calc.updateCell({ sheetId, coord: "B1", formula: "=SUM(A1:A3)" });
+
+  // Delete row index 1 (row 2): A2 is removed, A3 shifts up to A2.
+  await calc.deleteRows({ sheetId, at: 1, count: 1 });
+
+  const stored = await calc.getSheet(sheetId);
+  const sheet = resolveRef(stored!, (rootObject(stored!)!.sheets as PBXReference[])[0])!;
+  const cells = sheet.cells as Record<string, PBXReference>;
+
+  const a1 = resolveRef(stored!, cells.A1)!;
+  assert.equal(a1.value, 1);
+  const a2 = resolveRef(stored!, cells.A2)!;
+  assert.equal(a2.value, 3); // A3 shifted up into A2
+
+  const b1 = resolveRef(stored!, cells.B1)!;
+  assert.equal(b1.formula, "=SUM(A1:A2)");
+  assert.equal(b1.value, 4);
+});
+
+test("updateCells applies a batch and recalculates once", async () => {
+  const { calc } = await loadCalc();
+  const doc = await calc.createSheet({ title: "Batch" });
+  const sheetId = (rootObject(doc)!.sheets as PBXReference[])[0].$ref;
+
+  const cells = await calc.updateCells({
+    sheetId,
+    updates: [
+      { coord: "A1", value: 4 },
+      { coord: "A2", value: 6 },
+      { coord: "A3", formula: "=SUM(A1:A2)" },
+    ],
+  });
+
+  assert.equal(cells.length, 3);
+  const stored = await calc.getSheet(sheetId);
+  const sheet = resolveRef(stored!, (rootObject(stored!)!.sheets as PBXReference[])[0])!;
+  const a3 = resolveRef(stored!, (sheet.cells as Record<string, PBXReference>).A3)!;
+  assert.equal(a3.value, 10);
+});
+
+test("circular references degrade to #CYCLE! instead of hanging", async () => {
+  const { calc } = await loadCalc();
+  const doc = await calc.createSheet({ title: "Cycle" });
+  const sheetId = (rootObject(doc)!.sheets as PBXReference[])[0].$ref;
+
+  await calc.updateCell({ sheetId, coord: "A1", formula: "=A1+1" });
+  const stored = await calc.getSheet(sheetId);
+  const sheet = resolveRef(stored!, (rootObject(stored!)!.sheets as PBXReference[])[0])!;
+  const a1 = resolveRef(stored!, (sheet.cells as Record<string, PBXReference>).A1)!;
+  assert.equal(a1.value, "#CYCLE!");
 });

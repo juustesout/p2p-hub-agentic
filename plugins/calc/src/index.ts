@@ -11,24 +11,37 @@ import {
 } from "@p2p-hub/sdk";
 import {
   AI_ERROR,
+  ERROR_ERROR,
   REF_ERROR,
-  evaluateMath,
+  coordToLabel,
+  evaluateExpression,
+  isAIFormula,
+  isErrorValue,
+  makeRefMutator,
+  makeShifts,
   parseCoord,
-  parseFormula,
+  parseExpression,
   parseRange,
   rangeCells,
+  rewriteRefs,
+  shiftCoord,
+  stringifyExpression,
   type CellValue,
-  type Formula,
+  type Expr,
 } from "./formula";
 
 /**
- * AI Grid & Sheet — a generative spreadsheet on the PBX/OLE standard.
+ * dreamsheet (AI Grid & Sheet) — a generative spreadsheet on the PBX/OLE
+ * standard.
  *
  * A workbook is a `P2P.Spreadsheet` root linking to `P2P.Sheet` children;
  * each sheet maps A1-style coordinates to `P2P.Cell` objects via `$ref`
- * pointers. Cells hold a raw `value`, an optional `formula` (`=SUM(...)`,
- * `=AVERAGE(...)` or `=AI(...)`), and an optional OLE `embeddedObject` link to
- * any other PBX object (a Smart Note, a Canvas image, …).
+ * pointers. Cells hold a raw `value`, an optional `formula`, an optional
+ * `format`, and an optional OLE `embeddedObject` link.
+ *
+ * Formulae are evaluated eagerly and recursively (with cycle detection), so a
+ * change to one cell propagates to every dependent formula before the sheet is
+ * persisted.
  */
 
 export interface CreateSheetInput {
@@ -43,6 +56,24 @@ export interface UpdateCellInput {
   value?: CellValue;
   formula?: string;
   format?: Record<string, unknown>;
+}
+
+export interface BulkUpdate {
+  coord: string;
+  value?: CellValue;
+  formula?: string;
+  format?: Record<string, unknown>;
+}
+
+export interface UpdateCellsInput {
+  sheetId: string;
+  updates: BulkUpdate[];
+}
+
+export interface StructuralInput {
+  sheetId: string;
+  at: number;
+  count: number;
 }
 
 export interface EvaluateAIFormulaInput {
@@ -80,6 +111,11 @@ export interface CalcPlugin {
   getSheet(sheetId: string): Promise<PBXDocument | null>;
   listSheets(): Promise<SheetSummary[]>;
   updateCell(input: UpdateCellInput): Promise<PBXObject>;
+  updateCells(input: UpdateCellsInput): Promise<PBXObject[]>;
+  insertRows(input: StructuralInput): Promise<PBXDocument>;
+  deleteRows(input: StructuralInput): Promise<PBXDocument>;
+  insertCols(input: StructuralInput): Promise<PBXDocument>;
+  deleteCols(input: StructuralInput): Promise<PBXDocument>;
   evaluateAIFormula(input: EvaluateAIFormulaInput): Promise<PBXObject>;
   embedObject(input: EmbedObjectInput): Promise<PBXObject>;
   aiFillColumn(input: AiFillColumnInput): Promise<AiFillColumnResult>;
@@ -90,6 +126,9 @@ const SPREADSHEET_CLASS = "P2P.Spreadsheet";
 const SHEET_CLASS = "P2P.Sheet";
 const CELL_CLASS = "P2P.Cell";
 const EMBEDDED_CLASS = "P2P.EmbeddedObject";
+
+const DEFAULT_ROWS = 1000;
+const DEFAULT_COLS = 100;
 
 function sheetKey(sheetId: string): string {
   return `${SHEET_KEY_PREFIX}${sheetId}`;
@@ -145,9 +184,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
   ): PBXObject | null {
     const cells = sheet.cells as Record<string, PBXReference> | undefined;
     const ref = cells?.[coord];
-    if (!ref) {
-      return null;
-    }
+    if (!ref) return null;
     return resolveRef(doc, ref);
   }
 
@@ -169,13 +206,12 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     coord: string,
   ): PBXObject {
     const existing = cellAt(doc, sheet, coord);
-    if (existing) {
-      return existing;
-    }
+    if (existing) return existing;
     const cellId = addObject(doc, CELL_CLASS, {
       coord,
       value: null,
       formula: null,
+      format: null,
       embeddedObject: null,
     });
     const cells = (sheet.cells ?? {}) as Record<string, PBXReference>;
@@ -184,22 +220,75 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     return doc.$objects[cellId];
   }
 
-  function evaluateMathFormula(
-    doc: PBXDocument,
-    sheet: PBXObject,
-    formula: Formula,
-  ): CellValue {
-    if (formula.kind === "ai") {
-      return null;
+  /**
+   * Recompute every formula cell in the sheet. References resolve recursively
+   * (so a formula can depend on another formula) and cycles degrade to
+   * `#CYCLE!` instead of infinite recursion.
+   */
+  function recalcSheet(doc: PBXDocument, sheet: PBXObject): void {
+    const cells = (sheet.cells ?? {}) as Record<string, PBXReference>;
+    const memo = new Map<string, CellValue>();
+    const visiting = new Set<string>();
+
+    const resolve = (coord: string): CellValue => {
+      const key = normalizeCoord(coord);
+      if (memo.has(key)) return memo.get(key)!;
+      if (visiting.has(key)) return "#CYCLE!";
+      const cell = cellAt(doc, sheet, key);
+      if (!cell) {
+        memo.set(key, null);
+        return null;
+      }
+      if (typeof cell.formula === "string" && cell.formula !== "") {
+        let ast: Expr | null = null;
+        try {
+          ast = parseExpression(cell.formula);
+        } catch {
+          ast = null;
+        }
+        if (ast && !isAIFormula(ast)) {
+          visiting.add(key);
+          let value: CellValue;
+          try {
+            value = evaluateExpression(ast, resolve);
+          } catch {
+            value = ERROR_ERROR;
+          }
+          visiting.delete(key);
+          memo.set(key, value);
+          return value;
+        }
+        memo.set(key, null);
+        return null;
+      }
+      const v = (cell.value ?? null) as CellValue;
+      memo.set(key, v);
+      return v;
+    };
+
+    for (const coord of Object.keys(cells)) {
+      const key = normalizeCoord(coord);
+      const cell = cellAt(doc, sheet, key);
+      if (!cell || typeof cell.formula !== "string" || cell.formula === "") {
+        continue;
+      }
+      let ast: Expr | null = null;
+      try {
+        ast = parseExpression(cell.formula);
+      } catch {
+        cell.value = ERROR_ERROR;
+        continue;
+      }
+      if (!ast || isAIFormula(ast)) {
+        // AI (or blank) formula: leave value pending for `evaluateAIFormula`.
+        continue;
+      }
+      try {
+        cell.value = evaluateExpression(ast, resolve);
+      } catch {
+        cell.value = ERROR_ERROR;
+      }
     }
-    const range = parseRange(formula.range);
-    if (!range) {
-      return REF_ERROR;
-    }
-    return evaluateMath(
-      formula.kind,
-      rangeCells(range).map((c) => cellValue(doc, sheet, c)),
-    );
   }
 
   function bumpUpdatedAt(doc: PBXDocument): void {
@@ -209,10 +298,12 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     }
   }
 
+  /* ---------------- CRUD ---------------- */
+
   async function createSheet(input: CreateSheetInput): Promise<PBXDocument> {
     const title = (input.title ?? "").trim() || "Untitled sheet";
-    const rowCount = input.rowCount ?? 100;
-    const colCount = input.colCount ?? 26;
+    const rowCount = input.rowCount ?? DEFAULT_ROWS;
+    const colCount = input.colCount ?? DEFAULT_COLS;
     const now = new Date().toISOString();
 
     const doc = createDocument(SPREADSHEET_CLASS, {
@@ -240,9 +331,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     const summaries: SheetSummary[] = [];
     for (const key of keys) {
       const doc = await ctx.storage.get(key);
-      if (!isPBXDocument(doc)) {
-        continue;
-      }
+      if (!isPBXDocument(doc)) continue;
       const root = rootObject(doc);
       summaries.push({
         sheetId: key.slice(SHEET_KEY_PREFIX.length),
@@ -262,14 +351,6 @@ export default function activate(ctx: PluginContext): CalcPlugin {
 
     if (input.formula !== undefined) {
       cell.formula = input.formula;
-      const parsed = parseFormula(input.formula);
-      if (parsed && parsed.kind !== "ai") {
-        cell.value = evaluateMathFormula(doc, sheet, parsed);
-      } else {
-        // AI (or unrecognised) formula: leave the value pending/empty until
-        // `calc.evaluateAIFormula` runs.
-        cell.value = null;
-      }
     } else if (input.value !== undefined) {
       cell.formula = null;
       cell.value = input.value;
@@ -279,14 +360,105 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     }
     cell.updatedAt = new Date().toISOString();
 
+    recalcSheet(doc, sheet);
     bumpUpdatedAt(doc);
     await ctx.storage.set(sheetKey(input.sheetId), doc);
-    await ctx.hooks.emit("calc:cellUpdated", {
-      sheetId: input.sheetId,
-      coord,
-    });
+    await ctx.hooks.emit("calc:cellUpdated", { sheetId: input.sheetId, coord });
     return cell;
   }
+
+  async function updateCells(input: UpdateCellsInput): Promise<PBXObject[]> {
+    const { doc, sheet } = await requireSheet(input.sheetId);
+    const touched: PBXObject[] = [];
+
+    for (const update of input.updates) {
+      const coord = normalizeCoord(update.coord);
+      if (!parseCoord(coord)) continue;
+      const cell = ensureCell(doc, sheet, coord);
+      if (update.formula !== undefined) {
+        cell.formula = update.formula;
+      } else if (update.value !== undefined) {
+        cell.formula = null;
+        cell.value = update.value;
+      }
+      if (update.format !== undefined) {
+        cell.format = update.format;
+      }
+      cell.updatedAt = new Date().toISOString();
+      touched.push(cell);
+    }
+
+    recalcSheet(doc, sheet);
+    bumpUpdatedAt(doc);
+    await ctx.storage.set(sheetKey(input.sheetId), doc);
+    if (touched.length > 0) {
+      await ctx.hooks.emit("calc:cellUpdated", {
+        sheetId: input.sheetId,
+        coords: input.updates.map((u) => normalizeCoord(u.coord)),
+      });
+    }
+    return touched;
+  }
+
+  /* ---------------- structural edits ---------------- */
+
+  async function structuralEdit(
+    input: StructuralInput,
+    kind: "insertRows" | "deleteRows" | "insertCols" | "deleteCols",
+  ): Promise<PBXDocument> {
+    const { doc, sheet } = await requireSheet(input.sheetId);
+    const cells = (sheet.cells ?? {}) as Record<string, PBXReference>;
+    const { shiftRow, shiftCol } = makeShifts(kind, input.at, input.count);
+    const mutate = makeRefMutator(shiftRow, shiftCol);
+
+    const nextCells: Record<string, PBXReference> = {};
+    for (const coord of Object.keys(cells)) {
+      const ref = cells[coord];
+      const cell = resolveRef(doc, ref);
+      if (!cell) continue;
+      const newCoord = shiftCoord(coord, shiftRow, shiftCol);
+      if (!newCoord) continue; // cell removed
+
+      if (typeof cell.formula === "string" && cell.formula !== "") {
+        let ast: Expr | null = null;
+        try {
+          ast = parseExpression(cell.formula);
+        } catch {
+          ast = null;
+        }
+        if (ast) {
+          cell.formula = "=" + stringifyExpression(rewriteRefs(ast, mutate));
+        }
+      }
+
+      cell.coord = newCoord;
+      nextCells[newCoord] = ref;
+    }
+    sheet.cells = nextCells;
+
+    if (kind === "insertRows" || kind === "deleteRows") {
+      const current = typeof sheet.rowCount === "number" ? sheet.rowCount : DEFAULT_ROWS;
+      sheet.rowCount =
+        kind === "insertRows" ? current + input.count : current - input.count;
+    } else {
+      const current = typeof sheet.colCount === "number" ? sheet.colCount : DEFAULT_COLS;
+      sheet.colCount =
+        kind === "insertCols" ? current + input.count : current - input.count;
+    }
+
+    recalcSheet(doc, sheet);
+    bumpUpdatedAt(doc);
+    await ctx.storage.set(sheetKey(input.sheetId), doc);
+    await ctx.hooks.emit("calc:structureChanged", {
+      sheetId: input.sheetId,
+      kind,
+      at: input.at,
+      count: input.count,
+    });
+    return doc;
+  }
+
+  /* ---------------- AI + OLE ---------------- */
 
   async function evaluateAIFormula(
     input: EvaluateAIFormulaInput,
@@ -299,17 +471,20 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     }
 
     const parsed =
-      typeof cell.formula === "string" ? parseFormula(cell.formula) : null;
-    if (!parsed || parsed.kind !== "ai") {
+      typeof cell.formula === "string" ? parseExpression(cell.formula) : null;
+    if (!parsed || !isAIFormula(parsed)) {
       throw new Error(`evaluateAIFormula: cell "${coord}" has no AI formula`);
     }
 
-    const refCell = cellAt(doc, sheet, parsed.ref);
-    const refValue = refCell ? cellValue(doc, sheet, parsed.ref) : REF_ERROR;
+    const aiCall = parsed as Expr & { type: "func"; args: Expr[] };
+    const prompt = aiCall.args[0]?.type === "str" ? aiCall.args[0].value : "";
+    const refArg = aiCall.args[1]?.type === "cell" ? aiCall.args[1].ref.coord : null;
+    const refValue = refArg ? cellValue(doc, sheet, refArg) : null;
+    const refText = isErrorValue(refValue) || refValue === null ? REF_ERROR : refValue;
 
     try {
       cell.value = await ctx.ai.generateText({
-        prompt: `${parsed.prompt}: ${refValue}`,
+        prompt: `${prompt}: ${refText}`,
       });
     } catch {
       cell.value = AI_ERROR;
@@ -318,10 +493,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
 
     bumpUpdatedAt(doc);
     await ctx.storage.set(sheetKey(input.sheetId), doc);
-    await ctx.hooks.emit("calc:cellUpdated", {
-      sheetId: input.sheetId,
-      coord,
-    });
+    await ctx.hooks.emit("calc:cellUpdated", { sheetId: input.sheetId, coord });
     return cell;
   }
 
@@ -398,6 +570,8 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     return { sheetId: input.sheetId, filled: emptyCoords, values };
   }
 
+  /* ---------------- skill registration ---------------- */
+
   ctx.skills.register(
     "createSheet",
     async (payload) => {
@@ -415,14 +589,10 @@ export default function activate(ctx: PluginContext): CalcPlugin {
         colCount: typeof colCount === "number" ? colCount : undefined,
       });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
-  ctx.skills.register(
-    "listSheets",
-    async () => listSheets(),
-    { localOnly: true },
-  );
+  ctx.skills.register("listSheets", async () => listSheets(), { localOnly: true, httpExposed: true });
 
   ctx.skills.register(
     "getSheet",
@@ -433,7 +603,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
       }
       return getSheet(sheetId);
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
@@ -460,8 +630,50 @@ export default function activate(ctx: PluginContext): CalcPlugin {
             : undefined,
       });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
+
+  ctx.skills.register(
+    "updateCells",
+    async (payload) => {
+      const { sheetId, updates } = (payload ?? {}) as {
+        sheetId?: unknown;
+        updates?: unknown;
+      };
+      if (typeof sheetId !== "string" || !Array.isArray(updates)) {
+        throw new Error(
+          "updateCells expects { sheetId: string, updates: BulkUpdate[] }",
+        );
+      }
+      return updateCells({
+        sheetId,
+        updates: updates as BulkUpdate[],
+      });
+    },
+    { localOnly: true, httpExposed: true },
+  );
+
+  for (const kind of ["insertRows", "deleteRows", "insertCols", "deleteCols"] as const) {
+    ctx.skills.register(
+      kind,
+      async (payload) => {
+        const { sheetId, at, count } = (payload ?? {}) as {
+          sheetId?: unknown;
+          at?: unknown;
+          count?: unknown;
+        };
+        if (
+          typeof sheetId !== "string" ||
+          typeof at !== "number" ||
+          typeof count !== "number"
+        ) {
+          throw new Error(`${kind} expects { sheetId: string, at: number, count: number }`);
+        }
+        return structuralEdit({ sheetId, at, count }, kind);
+      },
+      { localOnly: true, httpExposed: true },
+    );
+  }
 
   ctx.skills.register(
     "evaluateAIFormula",
@@ -477,7 +689,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
       }
       return evaluateAIFormula({ sheetId, coord });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
@@ -501,7 +713,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
       }
       return embedObject({ sheetId, coord, targetObjectId, targetClass });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   ctx.skills.register(
@@ -525,7 +737,7 @@ export default function activate(ctx: PluginContext): CalcPlugin {
       }
       return aiFillColumn({ sheetId, startCoord, endCoord, instruction });
     },
-    { localOnly: true },
+    { localOnly: true, httpExposed: true },
   );
 
   return {
@@ -533,6 +745,11 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     getSheet,
     listSheets,
     updateCell,
+    updateCells,
+    insertRows: (i) => structuralEdit(i, "insertRows"),
+    deleteRows: (i) => structuralEdit(i, "deleteRows"),
+    insertCols: (i) => structuralEdit(i, "insertCols"),
+    deleteCols: (i) => structuralEdit(i, "deleteCols"),
     evaluateAIFormula,
     embedObject,
     aiFillColumn,
