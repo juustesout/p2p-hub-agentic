@@ -17,6 +17,34 @@ const HEARTBEAT_INTERVAL_MS = 5_000;
 const DEGRADED_RTT_MS = 1_500;
 const MAX_BACKOFF_MS = 10_000;
 
+let cachedBootToken: string | null | undefined;
+
+/**
+ * Resolve the per-boot token shared with the core-server. Under Tauri the token
+ * is read from the local `boot-token` file (never over HTTP); in a plain
+ * browser (dev/preview) it falls back to `VITE_P2P_HUB_TOKEN`.
+ */
+async function resolveBootToken(): Promise<string | null> {
+  if (cachedBootToken !== undefined) {
+    return cachedBootToken;
+  }
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const token = await invoke<string>("get_boot_token");
+    if (token) {
+      cachedBootToken = token;
+      return token;
+    }
+  } catch {
+    // Not running under Tauri, or the command/file is unavailable.
+  }
+  const envToken = (
+    import.meta as unknown as { env?: { VITE_P2P_HUB_TOKEN?: string } }
+  ).env?.VITE_P2P_HUB_TOKEN;
+  cachedBootToken = envToken ?? null;
+  return cachedBootToken;
+}
+
 /**
  * Connection-resilient bridge to @p2p-hub/core-server. Maintains a persistent
  * WebSocket for real-time events and issues HTTP calls for capabilities and
@@ -37,7 +65,7 @@ export class CoreBridge {
 
   connect(): void {
     this.manuallyClosed = false;
-    this.open();
+    void this.open();
   }
 
   disconnect(): void {
@@ -105,12 +133,14 @@ export class CoreBridge {
   // Internals
   // -------------------------------------------------------------------
 
-  private open(): void {
+  private async open(): Promise<void> {
     if (this.socket) {
       return;
     }
     this.setState("reconnecting");
-    this.socket = new WebSocket(WS_PATH);
+    const token = await resolveBootToken();
+    const wsUrl = token ? `${WS_PATH}?token=${encodeURIComponent(token)}` : WS_PATH;
+    this.socket = new WebSocket(wsUrl);
 
     this.socket.onopen = () => {
       this.reconnectAttempts = 0;
@@ -159,7 +189,7 @@ export class CoreBridge {
     );
     this.reconnectAttempts += 1;
     this.setState("reconnecting");
-    this.reconnectTimer = window.setTimeout(() => this.open(), delay);
+    this.reconnectTimer = window.setTimeout(() => void this.open(), delay);
   }
 
   private startHeartbeat(): void {
@@ -214,9 +244,17 @@ export class CoreBridge {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const token = await resolveBootToken();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
     const res = await fetch(path, {
-      headers: { "Content-Type": "application/json" },
       ...init,
+      headers: {
+        ...headers,
+        ...((init?.headers as Record<string, string> | undefined) ?? {}),
+      },
     });
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as { error?: string } | null;

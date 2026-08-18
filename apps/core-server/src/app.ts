@@ -1,6 +1,13 @@
 import * as http from "node:http";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
+import {
+  generateBootToken,
+  safeTokenEqual,
+  tokenFromAuthorization,
+  tokenFromQuery,
+  writeBootToken,
+} from "./auth";
 import type { TaskResult } from "@p2p-hub/sdk";
 import {
   CoreAIProvider,
@@ -18,6 +25,8 @@ export interface CoreServerOptions {
   port?: number;
   /** Vault master passphrase (falls back to env / dev key). */
   masterKey?: string;
+  /** Explicit boot token; overrides env and auto-generation. */
+  bootToken?: string;
   /** Hook events to bridge to the WebSocket activity bus. */
   bridgedEvents?: string[];
 }
@@ -51,6 +60,7 @@ export class CoreServer {
   private readonly clients = new Set<WebSocket>();
   private readonly knownPeers = new Set<string>();
   private peerTimer: NodeJS.Timeout | null = null;
+  private bootToken = "";
 
   constructor(options: CoreServerOptions) {
     this.options = options;
@@ -65,6 +75,8 @@ export class CoreServer {
   async start(): Promise<void> {
     await this.host.boot();
 
+    this.bootToken = this.resolveBootToken();
+
     this.registerCoreSkills();
     this.bridgeHookEvents();
 
@@ -73,7 +85,12 @@ export class CoreServer {
       .filter((s) => !s.localOnly)
       .map((s) => s.skill);
 
-    this.provider = new NetworkLightProvider({ port: 0, skills: remoteSkills });
+    const identity = await this.host.identityManager().getOrCreateIdentity();
+    this.provider = new NetworkLightProvider({
+      port: 0,
+      skills: remoteSkills,
+      identity,
+    });
     this.registry.register(this.provider);
     wireNetworkToBroker(this.provider, this.broker);
     await this.provider.start();
@@ -83,7 +100,9 @@ export class CoreServer {
     });
 
     this.wss = new WebSocketServer({ server: this.httpServer, path: "/ws" });
-    this.wss.on("connection", (socket) => this.handleSocket(socket));
+    this.wss.on("connection", (socket, request) =>
+      this.handleSocket(socket, request),
+    );
 
     const port = this.options.port ?? 8787;
     const host = this.options.host ?? "127.0.0.1";
@@ -94,6 +113,15 @@ export class CoreServer {
 
     this.peerTimer = setInterval(() => this.pollPeers(), 2000);
     this.pollPeers();
+  }
+
+  /** Bound address of the HTTP server, or null before `start()`. */
+  address(): { host: string; port: number } | null {
+    const addr = this.httpServer?.address();
+    if (addr && typeof addr === "object") {
+      return { host: addr.address, port: addr.port };
+    }
+    return null;
   }
 
   async stop(): Promise<void> {
@@ -198,7 +226,11 @@ export class CoreServer {
   // WebSocket (activity bus)
   // ---------------------------------------------------------------------
 
-  private handleSocket(socket: WebSocket): void {
+  private handleSocket(socket: WebSocket, request: http.IncomingMessage): void {
+    if (!this.isAuthorized(request)) {
+      socket.close(1008, "unauthorized");
+      return;
+    }
     this.clients.add(socket);
     socket.on("message", (data) => {
       try {
@@ -241,6 +273,10 @@ export class CoreServer {
   ): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
+
+    if (path.startsWith("/api/") && !this.isAuthorized(req)) {
+      return this.sendJson(res, 401, { error: "unauthorized" });
+    }
 
     try {
       if (req.method === "GET" && path === "/api/health") {
@@ -415,6 +451,29 @@ export class CoreServer {
   private reservedPrefixFor(key: string): string | null {
     const reserved = this.host.vaultManager().reservedPrefixes;
     return reserved.find((p) => key.startsWith(p)) ?? null;
+  }
+
+  /**
+   * Resolve (or generate) the boot token and persist it to the data directory
+   * so the desktop shell can read it out-of-band. The env override exists for
+   * headless/tests; a token is always written so `get_boot_token` never races
+   * a missing file.
+   */
+  private resolveBootToken(): string {
+    const token =
+      this.options.bootToken ??
+      process.env.P2P_HUB_BOOT_TOKEN ??
+      generateBootToken();
+    writeBootToken(this.options.dataDir, token);
+    return token;
+  }
+
+  /** Authorize a request via its `Authorization` header or `?token=` query. */
+  private isAuthorized(req: http.IncomingMessage): boolean {
+    return (
+      safeTokenEqual(tokenFromAuthorization(req.headers.authorization), this.bootToken) ||
+      safeTokenEqual(tokenFromQuery(req), this.bootToken)
+    );
   }
 
   private sendJson(
