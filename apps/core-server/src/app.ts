@@ -1,4 +1,5 @@
 import * as http from "node:http";
+import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import {
@@ -12,18 +13,30 @@ import {
   MAX_PAYLOAD_BYTES,
   ObjectDepthExceededError,
   PayloadTooLargeError,
+  evaluateSettingsRisk,
+  isPlainObject,
+  normalizeSettings,
   validateJsonNestingDepth,
   validateObjectDepth,
   validatePayloadSize,
 } from "@p2p-hub/sdk";
-import type { TaskResult } from "@p2p-hub/sdk";
+import type {
+  EffectiveSettings,
+  RiskAssessment,
+  TaskResult,
+} from "@p2p-hub/sdk";
 import {
   CoreAIProvider,
   NetworkRegistry,
   PluginHost,
   TaskBroker,
+  TrustConfirmationDeniedError,
+  TrustTierGate,
+  atomicWriteFile,
+  readJsonFile,
   wireNetworkToBroker,
 } from "@p2p-hub/core";
+import type { TrustConfirmation } from "@p2p-hub/core";
 import { NetworkLightProvider } from "@p2p-hub/network-light";
 
 export interface CoreServerOptions {
@@ -37,6 +50,11 @@ export interface CoreServerOptions {
   bootToken?: string;
   /** Hook events to bridge to the WebSocket activity bus. */
   bridgedEvents?: string[];
+  /**
+   * Native tier-2 confirmation capability injected by the host. Absent by
+   * default, which makes every tier-2 settings change fail closed (denied).
+   */
+  trustConfirmation?: TrustConfirmation;
 }
 
 const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
@@ -73,6 +91,7 @@ export class CoreServer {
   private readonly knownPeers = new Set<string>();
   private peerTimer: NodeJS.Timeout | null = null;
   private bootToken = "";
+  private readonly trustGate: TrustTierGate;
 
   constructor(options: CoreServerOptions) {
     this.options = options;
@@ -82,6 +101,7 @@ export class CoreServer {
       masterKey: options.masterKey,
     });
     this.broker = this.host.taskBroker();
+    this.trustGate = new TrustTierGate(options.trustConfirmation);
   }
 
   async start(): Promise<void> {
@@ -353,6 +373,43 @@ export class CoreServer {
         this.broadcast("vault:updated", { key, action: "delete" });
         return this.sendJson(res, 200, { ok: true, deleted });
       }
+      if (req.method === "GET" && path === "/api/settings") {
+        const settings = await this.loadSettings();
+        return this.sendJson(res, 200, {
+          settings,
+          risk: evaluateSettingsRisk(settings),
+        });
+      }
+      if (req.method === "POST" && path === "/api/settings/apply") {
+        const body = await readJson(req);
+        if (!isPlainObject(body)) {
+          return this.sendJson(res, 400, {
+            ok: false,
+            error: "apply expects a settings object",
+          });
+        }
+        const settings = normalizeSettings(body);
+        const risk = evaluateSettingsRisk(settings);
+        try {
+          await this.trustGate.authorize(
+            risk.aggregate,
+            settingsApplySummary(risk),
+            { authenticated: true },
+          );
+        } catch (err) {
+          if (err instanceof TrustConfirmationDeniedError) {
+            return this.sendJson(res, 403, {
+              ok: false,
+              error: "confirmation required",
+              requiredTier: err.requiredTier,
+            });
+          }
+          throw err;
+        }
+        await this.saveSettings(settings);
+        this.broadcast("settings:updated", { settings, risk });
+        return this.sendJson(res, 200, { ok: true, risk });
+      }
 
       return this.sendJson(res, 404, { error: "not found" });
     } catch (err) {
@@ -507,6 +564,22 @@ export class CoreServer {
     return reserved.find((p) => key.startsWith(p)) ?? null;
   }
 
+  /** Path of the minimal settings file (only the effective security flags). */
+  private settingsFile(): string {
+    return path.join(this.options.dataDir, "settings.json");
+  }
+
+  private async loadSettings(): Promise<EffectiveSettings> {
+    const stored = await readJsonFile<Partial<EffectiveSettings>>(
+      this.settingsFile(),
+    );
+    return normalizeSettings(stored ?? undefined);
+  }
+
+  private async saveSettings(settings: EffectiveSettings): Promise<void> {
+    await atomicWriteFile(this.settingsFile(), JSON.stringify(settings));
+  }
+
   /**
    * Resolve (or generate) the boot token and persist it to the data directory
    * so the desktop shell can read it out-of-band. The env override exists for
@@ -538,6 +611,16 @@ export class CoreServer {
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
   }
+}
+
+/** Human-readable summary shown to the native tier-2 confirmation prompt. */
+function settingsApplySummary(risk: RiskAssessment): string {
+  if (risk.findings.length === 0) {
+    return "Apply security settings (no known risks)";
+  }
+  return `Apply security settings (${risk.aggregate}): ${risk.findings
+    .map((f) => f.id)
+    .join(", ")}`;
 }
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {
