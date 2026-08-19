@@ -223,3 +223,70 @@ test("core:ready is emitted only after all plugins are activated", async () => {
 
   assert.deepEqual(seen, ["alpha:true", "beta:true"]);
 });
+
+test("ctx.trust resolves contacts late-bound across load order", async () => {
+  const root = await makeTmpRoot();
+  // "aaa-probe" activates before "contacts" (alphabetical), so at its own
+  // activation time contacts is not yet loaded. Its lookup must still resolve
+  // correctly when called after boot.
+  await writePlugin(
+    root,
+    "aaa-probe",
+    { id: "aaa-probe", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+       return {
+         lookup: async (peerId) => (ctx.trust ? ctx.trust.getContact(peerId) : null),
+       };
+     }`,
+  );
+  await writePlugin(
+    root,
+    "contacts",
+    { id: "contacts", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate() {
+       return {
+         getContact: async (peerId) =>
+           peerId === "a".repeat(64) ? { trustState: "verified" } : null,
+       };
+     }`,
+  );
+
+  const host = new PluginHost({
+    pluginsDir: path.join(root, "plugins"),
+    dataDir: path.join(root, "data"),
+  });
+  await host.boot();
+
+  const probe = host.getActivated("aaa-probe") as {
+    lookup: (peerId: string) => Promise<{ trustState: string } | null>;
+  };
+
+  assert.deepEqual(await probe.lookup("a".repeat(64)), { trustState: "verified" });
+  assert.equal(await probe.lookup("b".repeat(64)), null);
+});
+
+test("ctx.trust fails closed when no contacts plugin is active", async () => {
+  const root = await makeTmpRoot();
+  await writePlugin(
+    root,
+    "probe",
+    { id: "probe", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+       return {
+         lookup: async (peerId) => (ctx.trust ? ctx.trust.getContact(peerId) : null),
+       };
+     }`,
+  );
+
+  const host = new PluginHost({
+    pluginsDir: path.join(root, "plugins"),
+    dataDir: path.join(root, "data"),
+  });
+  await host.boot();
+
+  const probe = host.getActivated("probe") as {
+    lookup: (peerId: string) => Promise<unknown>;
+  };
+
+  assert.equal(await probe.lookup("a".repeat(64)), null);
+});

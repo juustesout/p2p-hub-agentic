@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import * as path from "node:path";
 import type { PluginManifest } from "@p2p-hub/sdk";
+import { asContactLookup } from "@p2p-hub/sdk";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
@@ -143,6 +144,7 @@ export class PluginHost {
             this.identity,
             this.networks,
             disposers,
+            () => asContactLookup(this.getActivated("contacts")),
           ),
           this.activationTimeoutMs,
           () =>

@@ -1,7 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { PluginManifest, NetworkPeer, TaskRequest, TaskResult } from "@p2p-hub/sdk";
+import type {
+  PluginManifest,
+  NetworkPeer,
+  TaskRequest,
+  TaskResult,
+  ContactLookup,
+} from "@p2p-hub/sdk";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
 import { CoreAIProvider } from "../ai/core-ai-provider";
@@ -166,6 +172,7 @@ export async function loadPlugin(
   identityManager: IdentityManager = new IdentityManager({ vault: vaultManager }),
   networkRegistry: NetworkRegistry | null = null,
   disposers: DisposerBag = new DisposerBag(),
+  resolveTrustLookup: (() => ContactLookup | null) | null = null,
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   const own = storageManager.getOrCreate(manifest.id);
@@ -263,6 +270,14 @@ export async function loadPlugin(
       peerId: async () => (await identityManager.getOrCreateIdentity()).peerId,
     },
     network: buildNetworkCapability(networkRegistry),
+    trust: resolveTrustLookup
+      ? {
+          getContact: async (peerId) => {
+            const lookup = resolveTrustLookup();
+            return lookup ? await lookup.getContact(peerId) : null;
+          },
+        }
+      : null,
     timers: {
       setTimeout: (handler, ms) => {
         const timer = globalThis.setTimeout(() => handler(), ms);

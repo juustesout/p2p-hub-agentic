@@ -224,6 +224,17 @@ When asked to review or verify security-relevant work in this repo:
   "local-only mode" for the core-server itself is ever added — a local-only
   core-server must gate its identity/vault dependency behind networking the same
   way `PluginHost.boot()` now does, not fail hard on a corrupt vault.
+- **PeerSite P2P mutual TLS (option c) is deferred.** PeerSite Fase 3
+  authenticates inbound peer claims with a challenge-response
+  proof-of-possession (`core/src/identity/peer-auth.ts`,
+  `p2p-hub:peersite:auth:v1:`) over the existing `network-light` TLS session,
+  gated on `ctx.trust.getContact` (verified contact only). A future
+  hardening step is to additionally verify the peer's *certificate fingerprint*
+  against the contact record so the transport layer itself is pinned to the
+  claimed identity; that is a larger network-light refactor and is not done
+  yet. Don't "fix" the gap with `rejectUnauthorized: false` (CLAUDE.md
+  principle #4) — pin the fingerprint via the already-trusted mDNS TXT side
+  channel and verify it after `secureConnect`, when that work happens.
 
 ## Spec-gaps: when an acceptance criterion hides a dependency
 

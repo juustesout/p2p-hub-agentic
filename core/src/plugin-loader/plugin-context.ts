@@ -1,5 +1,6 @@
 import type { AIContext } from "@p2p-hub/sdk";
 import type {
+  ContactLookup,
   NetworkPeer,
   TaskRequest,
   TaskResult,
@@ -132,6 +133,15 @@ export interface PluginContext {
    * it is not a thrown error.
    */
   network: NetworkCapability | null;
+  /**
+   * In-process trust lookup, or `null` when no lookup was wired (e.g. a bare
+   * {@link loadPlugin} call outside a {@link PluginHost}). When present, it is
+   * late-bound: `getContact` resolves the contacts plugin at *call* time, so a
+   * plugin that activates before contacts is loaded still sees the up-to-date
+   * trust state once contacts is active. Absent/unloaded contacts always
+   * resolve to `null` (fail-closed), never a thrown error.
+   */
+  trust: ContactLookup | null;
   /**
    * Plugin-scoped timers. The returned handles are tracked by the host and
    * cleared automatically when the plugin is deactivated, so a plugin that
