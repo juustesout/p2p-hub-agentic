@@ -1,0 +1,8 @@
+{
+  "id": "smartbase",
+  "name": "SmartBase",
+  "version": "0.1.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": []
+}
