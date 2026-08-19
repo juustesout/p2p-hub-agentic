@@ -7,16 +7,15 @@ the repo from scratch. Keep it updated at the end of every task.
 
 - Branch `main`, remote `origin` = `https://github.com/juustesout/p2p-hub-agentic`.
 - Recent commits on `origin/main`:
+  - `49055e7` feat(core): crash-safe atomic storage and fail-loud corruption handling
+  - `6f6674d` docs(handoff): record P2 hardening completion and clean working tree
   - `b18f264` feat(security): P2 hardening — gate non-loopback bridge, lock down skill advertising
-  - `b97a453` docs(handoff): record P1 hardening completion and clean working tree
   - `34671e7` feat(security): P1 hardening — identifier validation, task concurrency cap, provider selection
   - `366c733` feat(security): wire boundary guards and sanitizers across trust boundaries (P0)
-  - `3c23801` feat(hardening): defensive parsing for manifests, PBX and formulas
-  - `35a91cd` feat(core): network resilience, peer TTL expiry and plugin disposal
-  - `7baf54c` feat(core): security boundary guard, AST sanitizer and action validator
-- Test suite: **267 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **dirty**: the storage-durability task (below) is implemented
-  and tested but NOT yet committed/pushed (commit only when asked).
+- Test suite: **303 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: the `smartbase` plugin and the security-coherence
+  phase (both below) are implemented and tested but NOT yet committed/pushed
+  (commit only when asked).
 
 ## What exists / is done
 
@@ -139,6 +138,118 @@ way. Build green, 267 tests pass.
   concurrent `set` no-lost-update test), expanded `vault-manager.test.ts` and
   `plugin-host.test.ts`; `resilience.test.ts` rewritten (old auto-recovery/
   `.bak`/`.corrupt` tests removed as obsolete).
+
+## SmartBase plugin (this task — NOT yet committed)
+
+New `plugins/smartbase`: an Airtable-like structured-data plugin on the PBX/OLE
+standard, `localOnly`, no new `PluginContext` capabilities — pure `ctx.storage`.
+
+- **Document schema (Deel 1)**: `P2P.Database` root `{ title, tables: $ref[] }`
+  → `P2P.Table` `{ name, schema: { fields: [{name, type}] }, records: $ref[] }`
+  → `P2P.Record` `{ fields: Record<string, string|number|boolean> }`. Field
+  types are `string | number | boolean | date` (date stored as an ISO 8601
+  string). Insert/update validate values against the schema: unknown keys and
+  type mismatches are rejected — no free-form writes outside the schema.
+- **Skills**: `createDatabase`, `createTable`, `insertRecord`, `updateRecord`,
+  `deleteRecord`, `query`, `listTables`, `getSchema` (all `localOnly: true`).
+- **No SQL parsing / no eval (the hard rule)**: `query` takes a structured
+  `QueryFilter = Record<string, FieldFilter>` where
+  `FieldFilter = {op, value}` with a fixed op set (`eq/neq/gt/gte/lt/lte/
+  contains`); evaluation is a `switch` over `op` doing pure typed comparisons.
+  A filter value is always literal text — never parsed, interpolated or
+  executed. Unknown ops are rejected with a clean error. No `OR`, no nesting.
+- **`limit` is always bounded**: `DEFAULT_QUERY_LIMIT = 100`,
+  `MAX_QUERY_LIMIT = 500`; `limit: 1000000` → 500 records (`truncated: true`),
+  no error, no unlimited result set. `QueryResult` carries `truncated` so a
+  caller can tell when more matched than were returned.
+- **Boundary-guard reuse**: `validateObjectDepth` / `validateKeyCount` /
+  `isPlainObject` / `MAX_KEY_COUNT` from `@p2p-hub/sdk` run on the externally
+  shaped `fields` and `filter` objects; the schema/type/unknown-key checks are
+  smartbase-specific (not generic boundary concerns).
+- **Known perf trade-off (deliberate, non-optimized)**: `query` is a full
+  linear scan over the table's records per query (no index), and every
+  mutation does a whole-document read-modify-write via `ctx.storage.set`. Fine
+  for now; a table with hundreds of thousands of records would make each query
+  and each mutation O(n) on a growing document. `limit` caps the returned set
+  but not the scan itself.
+- **Build plumbing**: added `{ "path": "./plugins/smartbase" }` to the root
+  `tsconfig.json` references (necessary for `tsc -b` to build the plugin; the
+  only change outside `plugins/smartbase/`).
+
+## Security coherence & trust foundation (this task — NOT yet committed)
+
+Pure settings-risk engine, a fail-closed trust-tier gate, a native tier-2
+confirmation path, and a blast-radius settings UI. No new features, no
+P2P/plugin/vault redesign, no remote JS execution.
+
+- **Pure engine lives in `@p2p-hub/sdk`** (`sdk/src/settings-risk.ts`), NOT
+  `core/src/security/` as first planned. Reason: the desktop shell (Vite,
+  browser bundle) must evaluate risk live on every settings change, and the
+  shell has no dependency on `@p2p-hub/core` (which pulls Node builtins). The
+  SDK is pure (no Node builtins) and browser-safe. Core re-exports the engine
+  and `TrustTier` from `core/src/security/index.ts`, so it is also part of the
+  "core security module". The only `Buffer` in the SDK is inside
+  `validatePayloadSize` (function body, never called by the shell), so the
+  browser bundle is safe.
+- **`evaluateSettingsRisk(settings)`** is pure/deterministic/side-effect-free
+  (<5ms), returns `RiskAssessment { findings, aggregate }`. The three mandatory
+  rules and their exact ids/severities:
+  - `p2pHubExposed && chatAutoNotify && unrestrictedRemoteSkills` →
+    `ERR_EXPOSED_UNRESTRICTED_SKILL` (critical)
+  - `allowExternalApiExecution && unrestrictedRemoteSkills` →
+    `ERR_REMOTE_EXTERNAL_API_ACCESS` (high)
+  - `p2pHubExposed && localVaultStorage` → `WARN_P2P_VAULT_EXPOSURE` (medium)
+  `aggregate` = `highestSeverity(findings)`; findings are sorted highest-first.
+  `normalizeSettings` coerces a partial input to all-`false` defaults.
+- **`TrustTier` (0|1|2)** + `requiredTrustTier(severity)` in
+  `sdk/src/trust-tier.ts`: critical→2, high→1, else→0.
+- **`TrustTierGate`** (`core/src/security/trust-gate.ts`) is the fail-closed
+  enforcement: tier 0 → allow; tier 1 → allow only for an authenticated session
+  (existing boot-token capability context); tier 2 → require a fresh native
+  `TrustConfirmation.confirmTier2` (no `window.confirm`). No confirmer, a
+  confirmer that returns false, or one that throws all surface as
+  `TrustConfirmationDeniedError` (deny).
+- **core-server** (`apps/core-server/src/app.ts`) gained `trustConfirmation`
+  (injectable, default absent → deny) plus two endpoints:
+  - `GET /api/settings` → `{ settings, risk }` (defaults all-false before first
+    apply).
+  - `POST /api/settings/apply` → `normalizeSettings` → `evaluateSettingsRisk` →
+    `trustGate.authorize(aggregate, …, { authenticated: true })` (the `/api/*`
+    path is already token-guarded). Denied → `403 { requiredTier }`; allowed →
+    persisted to `<data-dir>/settings.json` via `atomicWriteFile`, then
+    `200 { ok, risk }`.
+  - **Phase-1 scope note:** these settings are *recorded, evaluated and gated*;
+    they do NOT yet drive runtime behaviour (e.g. actually relaxing
+    remote-skill restrictions). Wiring the effective settings into behaviour is
+    the follow-up "coherence" work.
+- **Native confirmation**: `apps/desktop-shell/src-tauri/src/lib.rs` adds a
+  `request_tier2_confirmation(window, summary)` command using
+  `tauri-plugin-dialog` (`MessageDialogBuilder::blocking_show`), scoped to
+  `window.label() == "main"`. Cargo.toml adds `tauri-plugin-dialog = "2"`.
+  **UNVERIFIED**: no Rust toolchain in this environment — needs `cargo build`.
+  The frontend wrapper `services/trust-confirm.ts` (`confirmTier2`) invokes it
+  and returns `false` (fail-closed) on any error/unavailability.
+- **Capability isolation** (audited, no change needed beyond the command):
+  `capabilities/default.json` is already `windows: ["main"]` + `core:default`
+  only (no fs/shell/dialog/vault plugin permissions). Plugin panels are iframes
+  inside the main window, not Tauri webviews, so they have no Tauri IPC access.
+  Boot token stays in a module-scoped variable (not window/React/storage); the
+  only URL exposure is the documented `?token=` WS-upgrade accepted risk.
+- **Shell UI**: `BlastRadiusBadge` + `RiskFindingBanner` + `SettingsWindow`
+  (5 toggles, live `evaluateSettingsRisk` on every change, per-field warnings,
+  Save → `confirmTier2` for critical → `coreBridge.applySettings`).
+  `StartMenu`/`Taskbar` gained a Settings entry. `core-bridge.ts` gained
+  `getSettings`/`applySettings`. `vite.config.ts` sets
+  `build.commonjsOptions.include: [/node_modules/, /sdk\/dist/]` so Rollup
+  resolves the symlinked CJS `@p2p-hub/sdk` barrel's named exports (the shell
+  build failed without it). `desktop-shell/package.json` adds the
+  `@p2p-hub/sdk` dependency.
+- **Vault UI audit (clean)**: `VaultModal` shows only key names + metadata and
+  boolean "configured/missing" for the AI model; stored values are never
+  rendered. No `console.log`/`debug`, no `dangerouslySetInnerHTML`/`innerHTML`,
+  no `localStorage`/`sessionStorage`/`document.cookie` anywhere in the shell.
+- **Tests added**: `sdk/src/settings-risk.test.ts` (12), `core/src/security/
+  trust-gate.test.ts` (8), `apps/core-server/src/settings.test.ts` (7).
 
 ## Tests added in this pass
 
