@@ -16,9 +16,9 @@ the repo from scratch. Keep it updated at the end of every task.
   - `a25dbc0` feat(security): add pure settings-risk engine and trust-tier policy
   - `eb2c871` feat(smartbase): add Airtable-like structured data plugin
   - `49055e7` feat(core): crash-safe atomic storage and fail-loud corruption handling
-- Test suite: **315 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **dirty**: PeerSite Fase 1 (below) is implemented and tested
-  but NOT yet committed/pushed (commit only when asked).
+- Test suite: **322 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: PeerSite Fase 1 + Fase 2 (below) are implemented
+  and tested but NOT yet committed/pushed (commit only when asked).
 
 ## What exists / is done
 
@@ -347,7 +347,40 @@ scoped credentials, no LAN exposure yet.
 - Tests: `apps/core-server/src/peersite.test.ts` (7 tests) — valid serving +
   headers, directory index, traversal (encoded/raw/encoded-slash), symlink
   escape, dotfile/dot-dir deny, data-dir rejection at startup, and
-  disabled-by-default. Total suite now **315 tests, 0 failures**.
+  disabled-by-default.
+
+## PeerSite — Fase 2: scoped agent API & LAN opt-in (NOT yet committed)
+
+Third phase: a scoped `/peersite/*` API plus explicit LAN opt-in, still in
+`apps/core-server`. No friends/P2P discovery, no TLS/fingerprint work yet.
+
+- **Scoped site credential** (`generateSiteToken` in `auth.ts`): a separate
+  in-memory random token generated at boot, exposed to the host only via
+  `CoreServer.siteCredential()`. It is **never** persisted, never injected into
+  served HTML, and never printed. `isSiteAuthorized()` authenticates only the
+  `/peersite/*` routes; the site token is rejected on `/api/*` and `/ws`
+  (which keep requiring the boot token), and the boot token is not accepted on
+  `/peersite/*` — credential isolation is asserted by a test.
+- **Tiered endpoints** in `tryServePeersite()`:
+  - `GET /peersite/status` — tier 0 public metadata: `{ online, peerName,
+    activePluginsCount }` (no tokens, paths, vault keys, or internal names).
+  - `POST /peersite/message` — tier 1: site token + per-IP fixed-window rate
+    limit (30/min → 429), `validateTextLength` + `sanitizeText`.
+  - `POST /peersite/execute-skill` — tier 2: site token + identifier
+    validation, `trustGate.authorize("critical", …)` → 403
+    `{ ok:false, requiredTier:2 }` when no native confirmation approves, 200
+    with the task result when it does.
+- **LAN opt-in** in async `initSite()`: a non-loopback bind only enables the
+  site when `peersiteEnabled && peersiteLanExposed` are both true in
+  `settings.json`, and it logs a loud `EXPOSING` warning with the aggregate
+  risk level. Otherwise the site stays disabled (loopback still serves).
+- `this.peerId` is captured from `getOrCreateIdentity()` in `start()` and used
+  by `/peersite/status`.
+- Tests: `apps/core-server/src/peersite.test.ts` grew from 7 → 14 tests (the
+  Fase 2 ones: credential isolation on `/api`/`/ws`, clean status metadata,
+  fail-closed and approving execute-skill, message auth + rate limit, LAN
+  refuse-without-flags and serve-with-flags). Total suite now **322 tests, 0
+  failures**.
 
 ## Tests added in this pass
 

@@ -87,3 +87,13 @@ export function safeTokenEqual(candidate: string | null, expected: string): bool
 export function generateBootToken(): string {
   return randomBytes(32).toString("hex");
 }
+
+/**
+ * Generate a fresh, in-memory scoped site credential. Unlike the boot token it
+ * is never written to disk, and it only ever authorizes `/peersite/*` routes —
+ * it must never be accepted by the boot-token check that guards `/api/*` and
+ * `/ws`. Keeping it in-memory means it dies with the process (per-boot).
+ */
+export function generateSiteToken(): string {
+  return randomBytes(32).toString("hex");
+}

@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { isLoopbackHost } from "./host";
 import {
   generateBootToken,
+  generateSiteToken,
   safeTokenEqual,
   tokenFromAuthorization,
   tokenFromQuery,
@@ -19,9 +20,11 @@ import {
   evaluateSettingsRisk,
   isPlainObject,
   normalizeSettings,
+  sanitizeText,
   validateJsonNestingDepth,
   validateObjectDepth,
   validatePayloadSize,
+  validateTextLength,
 } from "@p2p-hub/sdk";
 import type {
   EffectiveSettings,
@@ -75,6 +78,16 @@ const PEER_ID_RE = /^[a-zA-Z0-9-]{1,128}$/;
 
 /** URL prefix under which the static site is served. */
 const SITE_PREFIX = "/site";
+
+/** URL prefix under which the scoped PeerSite API is served. */
+const PEERSITE_PREFIX = "/peersite";
+
+/** Max characters accepted in a `/peersite/message` body. */
+const PEERSITE_MESSAGE_MAX_LENGTH = 10_000;
+
+/** Per-source-IP message rate limit (fixed window). */
+const MESSAGE_RATE_LIMIT = 30;
+const MESSAGE_RATE_WINDOW_MS = 60_000;
 
 /** Security headers applied to every served static asset. */
 const SITE_SECURITY_HEADERS: Record<string, string> = {
@@ -141,6 +154,9 @@ export class CoreServer {
   private bootToken = "";
   private readonly trustGate: TrustTierGate;
   private siteRootReal: string | null = null;
+  private siteToken = "";
+  private peerId = "";
+  private readonly messageTimestamps = new Map<string, number[]>();
 
   constructor(options: CoreServerOptions) {
     this.options = options;
@@ -158,7 +174,9 @@ export class CoreServer {
 
     this.bootToken = this.resolveBootToken();
 
-    this.initSite();
+    this.siteToken = generateSiteToken();
+
+    await this.initSite();
 
     this.registerCoreSkills();
     this.bridgeHookEvents();
@@ -169,6 +187,7 @@ export class CoreServer {
       .map((s) => s.skill);
 
     const identity = await this.host.identityManager().getOrCreateIdentity();
+    this.peerId = identity.peerId;
     this.provider = new NetworkLightProvider({
       port: 0,
       skills: remoteSkills,
@@ -368,6 +387,9 @@ export class CoreServer {
 
     try {
       if (await this.tryServeSite(req, res, path)) {
+        return;
+      }
+      if (await this.tryServePeersite(req, res, path)) {
         return;
       }
       if (req.method === "GET" && path === "/api/health") {
@@ -615,6 +637,119 @@ export class CoreServer {
   }
 
   // ---------------------------------------------------------------------
+  // Scoped PeerSite API (/peersite/*)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Attempt to handle a scoped PeerSite API request. Returns `true` when the
+   * request targeted `/peersite` and was answered; `false` otherwise. The API
+   * is only active when the site is enabled (`siteRoot` configured). The scoped
+   * site credential is the *only* thing that can authenticate `/peersite/*` —
+   * the boot token never applies here, and the site credential never applies to
+   * `/api/*` or `/ws`.
+   */
+  private async tryServePeersite(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ): Promise<boolean> {
+    if (!this.siteRootReal) {
+      return false;
+    }
+    if (
+      pathname !== PEERSITE_PREFIX &&
+      !pathname.startsWith(PEERSITE_PREFIX + "/")
+    ) {
+      return false;
+    }
+
+    if (req.method === "GET" && pathname === "/peersite/status") {
+      this.sendJson(res, 200, {
+        online: true,
+        peerName: this.peerId,
+        activePluginsCount: this.host.listPlugins().length,
+      });
+      return true;
+    }
+
+    if (req.method === "POST" && pathname === "/peersite/message") {
+      if (!this.isSiteAuthorized(req)) {
+        this.sendJson(res, 401, { error: "unauthorized" });
+        return true;
+      }
+      const remote = req.socket.remoteAddress ?? "unknown";
+      if (!this.allowMessage(remote)) {
+        this.sendJson(res, 429, { error: "rate limit exceeded" });
+        return true;
+      }
+      const body = (await readJson(req)) as { message?: unknown };
+      if (typeof body.message !== "string") {
+        this.sendJson(res, 400, {
+          ok: false,
+          error: "message expects { message: string }",
+        });
+        return true;
+      }
+      validateTextLength(body.message, PEERSITE_MESSAGE_MAX_LENGTH);
+      const clean = sanitizeText(body.message);
+      this.broadcast("peersite:message", { message: clean, ts: Date.now() });
+      this.sendJson(res, 200, { ok: true });
+      return true;
+    }
+
+    if (req.method === "POST" && pathname === "/peersite/execute-skill") {
+      if (!this.isSiteAuthorized(req)) {
+        this.sendJson(res, 401, { error: "unauthorized" });
+        return true;
+      }
+      const body = (await readJson(req)) as {
+        serviceId?: unknown;
+        method?: unknown;
+        arguments?: unknown;
+      };
+      const { serviceId, method } = body;
+      if (
+        typeof serviceId !== "string" ||
+        typeof method !== "string" ||
+        !IDENTIFIER_RE.test(serviceId) ||
+        !IDENTIFIER_RE.test(method)
+      ) {
+        this.sendJson(res, 400, {
+          ok: false,
+          error: "execute-skill expects safe serviceId and method identifiers",
+        });
+        return true;
+      }
+      try {
+        await this.trustGate.authorize(
+          "critical",
+          `Execute skill ${serviceId}.${method} from PeerSite`,
+          { authenticated: true },
+        );
+      } catch (err) {
+        if (err instanceof TrustConfirmationDeniedError) {
+          this.sendJson(res, 403, {
+            ok: false,
+            error: "confirmation required",
+            requiredTier: err.requiredTier,
+          });
+          return true;
+        }
+        throw err;
+      }
+      const id = randomUUID();
+      const result = await this.broker.handleHttp({
+        id,
+        skill: `${serviceId}.${method}`,
+        payload: body.arguments,
+      });
+      this.sendJson(res, 200, result);
+      return true;
+    }
+
+    return false;
+  }
+
   private buildCapabilities(): unknown {
     const plugins = this.host.listPlugins().map((p) => ({
       id: p.id,
@@ -795,12 +930,17 @@ export class CoreServer {
   }
 
   /**
-   * Resolve and validate `options.siteRoot` at startup. Static serving is
-   * loopback-only: a non-loopback bind disables the site with a loud warning
-   * (no silent widening). The resolved realpath is the canonical root for
-   * containment on every request.
+   * Resolve and validate `options.siteRoot` at startup, deciding whether the
+   * site is active and whether it is exposed beyond loopback.
+   *
+   * Loopback serving is always allowed when `siteRoot` is configured. Serving
+   * beyond loopback is an explicit opt-in: it requires both `peersiteEnabled`
+   * and `peersiteLanExposed` from the persisted settings, and when enabled it
+   * logs a loud exposure + risk warning (CLAUDE.md principle #8 — no silent
+   * widening). The resolved realpath is the canonical root for containment on
+   * every request.
    */
-  private initSite(): void {
+  private async initSite(): Promise<void> {
     const siteRoot = this.options.siteRoot;
     if (!siteRoot) {
       this.siteRootReal = null;
@@ -809,12 +949,23 @@ export class CoreServer {
 
     const host = this.options.host ?? "127.0.0.1";
     if (!isLoopbackHost(host)) {
+      const settings = await this.loadSettings();
+      if (!settings.peersiteEnabled || !settings.peersiteLanExposed) {
+        console.warn(
+          "[core-server] PeerSite: siteRoot configured but the bridge is not " +
+            "bound to loopback and peersiteEnabled/peersiteLanExposed are not " +
+            "both enabled; static + /peersite serving is refused (loopback-only).",
+        );
+        this.siteRootReal = null;
+        return;
+      }
+      const risk = evaluateSettingsRisk(settings).aggregate;
       console.warn(
-        "[core-server] PeerSite: siteRoot configured but the bridge is not " +
-          "bound to loopback; static serving is refused (loopback-only).",
+        `[core-server] PeerSite: EXPOSING the static site and /peersite API on ` +
+          `non-loopback "${host}". Anyone who can reach this port can read the ` +
+          `published site and call the scoped peersite API. Active risk level: ` +
+          `${risk}. Keep the site token secret and treat the network as untrusted.`,
       );
-      this.siteRootReal = null;
-      return;
     }
 
     let rootReal: string;
@@ -834,6 +985,37 @@ export class CoreServer {
     }
 
     this.siteRootReal = rootReal;
+  }
+
+  /**
+   * The scoped site credential, exposed for the host (desktop shell) to read
+   * out-of-band. It is in-memory only — never persisted and never injected into
+   * served static HTML — and only authorizes `/peersite/*` routes.
+   */
+  siteCredential(): string {
+    return this.siteToken;
+  }
+
+  /** Authorize a request using the scoped site credential (not the boot token). */
+  private isSiteAuthorized(req: http.IncomingMessage): boolean {
+    return (
+      safeTokenEqual(tokenFromAuthorization(req.headers.authorization), this.siteToken) ||
+      safeTokenEqual(tokenFromQuery(req), this.siteToken)
+    );
+  }
+
+  /** Fixed-window rate limit for `/peersite/message`, keyed by source IP. */
+  private allowMessage(remoteAddress: string): boolean {
+    const now = Date.now();
+    const recent = (this.messageTimestamps.get(remoteAddress) ?? []).filter(
+      (t) => now - t < MESSAGE_RATE_WINDOW_MS,
+    );
+    if (recent.length >= MESSAGE_RATE_LIMIT) {
+      return false;
+    }
+    recent.push(now);
+    this.messageTimestamps.set(remoteAddress, recent);
+    return true;
   }
 
   private sendJson(

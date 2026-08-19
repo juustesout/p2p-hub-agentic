@@ -234,3 +234,208 @@ test("static serving is disabled when siteRoot is not configured", async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Fase 2 — scoped agent API & LAN opt-in
+// ---------------------------------------------------------------------------
+
+test("scoped site token is rejected on /api and /ws (credential isolation)", async () => {
+  const siteDir = await makeSiteRoot();
+  await fs.writeFile(path.join(siteDir, "index.html"), "hi");
+  const { server, port } = await startServer({ siteRoot: siteDir });
+  try {
+    const siteToken = server.siteCredential();
+    assert.ok(siteToken.length >= 64);
+    assert.notEqual(siteToken, TOKEN);
+
+    // Site token on a boot-token-guarded settings route -> 401.
+    const apply = await fetch(`http://127.0.0.1:${port}/api/settings/apply`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${siteToken}`,
+      },
+      body: JSON.stringify({ p2pHubExposed: true }),
+    });
+    assert.equal(apply.status, 401);
+
+    // Site token on general task execution -> 401.
+    const execute = await fetch(`http://127.0.0.1:${port}/api/execute`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${siteToken}`,
+      },
+      body: JSON.stringify({ serviceId: "core", method: "echo", arguments: "hi" }),
+    });
+    assert.equal(execute.status, 401);
+
+    // Site token on the WebSocket upgrade -> rejected.
+    assert.equal(await wsConnect(port, siteToken), "rejected");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("GET /peersite/status returns clean metadata without secrets", async () => {
+  const siteDir = await makeSiteRoot();
+  await fs.writeFile(path.join(siteDir, "index.html"), "hi");
+  const { server, port, dataDir } = await startServer({ siteRoot: siteDir });
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/peersite/status`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.online, true);
+    assert.equal(typeof body.peerName, "string");
+    assert.equal(typeof body.activePluginsCount, "number");
+
+    const text = JSON.stringify(body);
+    assert.ok(!text.includes(TOKEN), "boot token must not leak");
+    assert.ok(!text.includes(dataDir), "internal paths must not leak");
+    assert.ok(!text.includes("apiKey"), "vault keys must not leak");
+    assert.ok(!text.includes("boot-token"));
+
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      ["activePluginsCount", "online", "peerName"],
+    );
+  } finally {
+    await server.stop();
+  }
+});
+
+test("POST /peersite/execute-skill fails closed without tier-2 confirmation", async () => {
+  const siteDir = await makeSiteRoot();
+  await fs.writeFile(path.join(siteDir, "index.html"), "hi");
+  const { server, port } = await startServer({ siteRoot: siteDir });
+  try {
+    const siteToken = server.siteCredential();
+    const res = await fetch(`http://127.0.0.1:${port}/peersite/execute-skill`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${siteToken}`,
+      },
+      body: JSON.stringify({ serviceId: "core", method: "echo", arguments: "hi" }),
+    });
+    assert.equal(res.status, 403);
+    const body = (await res.json()) as {
+      ok: boolean;
+      requiredTier: number;
+      error: string;
+    };
+    assert.equal(body.ok, false);
+    assert.equal(body.requiredTier, 2);
+    assert.match(body.error, /confirmation/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("POST /peersite/execute-skill succeeds when tier-2 confirmation approves", async () => {
+  const siteDir = await makeSiteRoot();
+  await fs.writeFile(path.join(siteDir, "index.html"), "hi");
+  const confirmer: TrustConfirmation = { confirmTier2: async () => true };
+  const { server, port } = await startServer({
+    siteRoot: siteDir,
+    trustConfirmation: confirmer,
+  });
+  try {
+    const siteToken = server.siteCredential();
+    const res = await fetch(`http://127.0.0.1:${port}/peersite/execute-skill`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${siteToken}`,
+      },
+      body: JSON.stringify({ serviceId: "core", method: "echo", arguments: "hi" }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string; result: unknown };
+    assert.equal(body.status, "ok");
+    assert.equal(body.result, "hi");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("POST /peersite/message requires the site token and is rate-limited", async () => {
+  const siteDir = await makeSiteRoot();
+  await fs.writeFile(path.join(siteDir, "index.html"), "hi");
+  const { server, port } = await startServer({ siteRoot: siteDir });
+  try {
+    const siteToken = server.siteCredential();
+    const post = (token: string | null, message: string) =>
+      fetch(`http://127.0.0.1:${port}/peersite/message`, {
+        method: "POST",
+        headers: token
+          ? { "Content-Type": "application/json", Authorization: `Bearer ${token}` }
+          : { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      });
+
+    // Without the site token -> 401.
+    assert.equal((await post(null, "hi")).status, 401);
+
+    // With the site token -> 200, up to the rate limit.
+    const first = await post(siteToken, "hello");
+    assert.equal(first.status, 200);
+
+    // Drive past the fixed-window limit (30/min): the tail must be 429.
+    const statuses: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      statuses.push((await post(siteToken, `m${i}`)).status);
+    }
+    assert.equal(statuses[0], 200);
+    assert.equal(statuses[statuses.length - 1], 429);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("non-loopback binding refuses the site unless peersite flags are set", async () => {
+  const siteDir = await makeSiteRoot();
+  await fs.writeFile(path.join(siteDir, "index.html"), "<h1>lan</h1>");
+  // No settings -> peersiteLanExposed false -> site refused on 0.0.0.0.
+  const { server, port } = await startServer({
+    siteRoot: siteDir,
+    host: "0.0.0.0",
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/site/index.html`);
+    assert.equal(res.status, 404);
+    const status = await fetch(`http://127.0.0.1:${port}/peersite/status`);
+    assert.equal(status.status, 404);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("non-loopback binding serves the site when peersite flags are enabled", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = ((...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  }) as typeof console.warn;
+  try {
+    const siteDir = await makeSiteRoot();
+    await fs.writeFile(path.join(siteDir, "index.html"), "<h1>lan</h1>");
+    const { server, port } = await startServer({
+      siteRoot: siteDir,
+      host: "0.0.0.0",
+      settings: { peersiteEnabled: true, peersiteLanExposed: true },
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/site/index.html`);
+      assert.equal(res.status, 200);
+      assert.equal(await res.text(), "<h1>lan</h1>");
+    } finally {
+      await server.stop();
+    }
+    assert.ok(
+      warnings.some((w) => /EXPOSING/.test(w)),
+      "expected a loud exposure warning on LAN opt-in",
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
