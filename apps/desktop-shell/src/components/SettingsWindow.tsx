@@ -74,6 +74,7 @@ function summaryFor(risk: RiskAssessment): string {
 
 export function SettingsWindow() {
   const [settings, setSettings] = useState<EffectiveSettings>(DEFAULTS);
+  const [lastSaved, setLastSaved] = useState<EffectiveSettings>(DEFAULTS);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -81,7 +82,10 @@ export function SettingsWindow() {
   useEffect(() => {
     coreBridge
       .getSettings()
-      .then((res) => setSettings(res.settings))
+      .then((res) => {
+        setSettings(res.settings);
+        setLastSaved(res.settings);
+      })
       .catch(() => {
         /* keep defaults while the server is unreachable */
       })
@@ -109,6 +113,8 @@ export function SettingsWindow() {
     if (risk.aggregate === "critical") {
       const confirmed = await confirmTier2(summaryFor(risk));
       if (!confirmed) {
+        // Roll back any optimistic toggles to the last server-confirmed state.
+        setSettings(lastSaved);
         setMessage(
           "This change requires a native (host) confirmation that was not granted.",
         );
@@ -118,12 +124,15 @@ export function SettingsWindow() {
     setSaving(true);
     try {
       const result = await coreBridge.applySettings(settings);
-      setMessage(
-        result.ok
-          ? "Settings applied."
-          : result.error ?? "Settings were not applied.",
-      );
+      if (result.ok) {
+        setLastSaved(settings);
+        setMessage("Settings applied.");
+      } else {
+        setSettings(lastSaved);
+        setMessage(result.error ?? "Settings were not applied.");
+      }
     } catch (err) {
+      setSettings(lastSaved);
       setMessage(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
