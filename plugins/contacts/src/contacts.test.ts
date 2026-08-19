@@ -104,3 +104,25 @@ test("verifyPeer returns a graceful error when no network is available", async (
   const listed = await contacts.listContacts();
   assert.equal(listed[0].trustState, "pending");
 });
+
+test("getContact returns null for an unknown peer", async () => {
+  const contacts = await loadContacts();
+  assert.equal(await contacts.getContact(PEER_ID), null);
+});
+
+test("getContact returns the trust state for a known contact", async () => {
+  const contacts = await loadContacts();
+
+  await contacts.addContact({
+    peerId: PEER_ID,
+    publicKeyHex: PEER_ID,
+    displayName: "Alice",
+  });
+
+  assert.deepEqual(await contacts.getContact(PEER_ID), { trustState: "pending" });
+});
+
+test("getContact rejects a non-string peerId with null", async () => {
+  const contacts = await loadContacts();
+  assert.equal(await contacts.getContact(123 as unknown as string), null);
+});

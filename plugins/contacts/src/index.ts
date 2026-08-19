@@ -7,6 +7,8 @@ import {
   linkObject,
   resolveRef,
   rootObject,
+  type ContactLookup,
+  type ContactTrustState,
   type PBXDocument,
   type PBXObject,
   type PBXReference,
@@ -28,7 +30,7 @@ import {
  * deliberately signs a *domain-separated* message, never attacker-chosen bytes.
  */
 
-export type TrustState = "pending" | "verified" | "blocked";
+export type TrustState = ContactTrustState;
 
 /** A contact as exposed by the plugin API (a `P2P.Contact` object's fields). */
 export interface ContactRecord {
@@ -56,7 +58,7 @@ export interface VerifyResult {
   error?: string;
 }
 
-export interface ContactsPlugin {
+export interface ContactsPlugin extends ContactLookup {
   addContact(input: AddContactInput): Promise<ContactRecord>;
   listContacts(): Promise<ContactRecord[]>;
   removeContact(peerId: string): Promise<boolean>;
@@ -259,6 +261,27 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
     return { verified: true };
   }
 
+  /**
+   * The in-process trust seam (implements {@link ContactLookup}). Answers
+   * "what is this peer's stored trust state?" without exposing the contact
+   * book or any other field. Returns `null` for unknown peers. Deliberately
+   * NOT registered as a skill — it is only reachable in-process via
+   * `host.getActivated("contacts")`, never over the network.
+   */
+  async function getContact(
+    peerId: string,
+  ): Promise<{ trustState: TrustState } | null> {
+    if (typeof peerId !== "string") {
+      return null;
+    }
+    const book = await loadBook();
+    const contact = findContact(book, peerId);
+    if (!contact) {
+      return null;
+    }
+    return { trustState: contact.trustState as TrustState };
+  }
+
   ctx.skills.register("addContact", async (payload) => addContact(payload as AddContactInput), {
     localOnly: true,
   });
@@ -300,5 +323,5 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
     { localOnly: false },
   );
 
-  return { addContact, listContacts, removeContact, verifyPeer };
+  return { addContact, listContacts, removeContact, verifyPeer, getContact };
 }
