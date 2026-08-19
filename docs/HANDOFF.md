@@ -14,9 +14,9 @@ the repo from scratch. Keep it updated at the end of every task.
   - `a25dbc0` feat(security): add pure settings-risk engine and trust-tier policy
   - `eb2c871` feat(smartbase): add Airtable-like structured data plugin
   - `49055e7` feat(core): crash-safe atomic storage and fail-loud corruption handling
-- Test suite: **303 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **clean** (all work through the security-coherence phase is
-  committed and pushed).
+- Test suite: **308 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: PeerSite Fase 0 (below) is implemented and tested
+  but NOT yet committed/pushed (commit only when asked).
 
 ## What exists / is done
 
@@ -286,10 +286,36 @@ runtime binding and the Rust build happen.
 3. **No sensitive values in `EffectiveSettings`.** It is a 5-boolean record;
    `normalizeSettings` structurally drops any non-boolean field, so API keys or
    other secrets passed to the engine can never be carried into browser state or
-   logs. Keep it that way: the settings engine must only ever see boolean flags
-   + metadata, never secrets. Re-audit the `settings:updated` broadcast payload
-   and any future settings-adjacent logging to confirm they serialize only
-   booleans.
+    logs. Keep it that way: the settings engine must only ever see boolean flags
+    + metadata, never secrets. Re-audit the `settings:updated` broadcast payload
+    and any future settings-adjacent logging to confirm they serialize only
+    booleans.
+
+## PeerSite — Fase 0: boundaries, settings & risk engine (NOT yet committed)
+
+First phase of the "local-first creator workflow" initiative (see
+`docs/peersite-plan.md` for the full phased design). Data model + risk rules
+only — no HTTP serving, no UI components yet.
+
+- `EffectiveSettings` gained two boolean fields, both defaulting `false` via
+  `normalizeSettings`: `peersiteEnabled` (master switch) and
+  `peersiteLanExposed` (bind beyond loopback + mDNS advertise).
+- `RiskFinding` gained an optional `affectedFields?: string[]` (populated only
+  by the new rules; existing findings are unchanged).
+- Three new rules in `evaluateSettingsRisk` (pure, deterministic, no side
+  effects):
+  - `WARN_PEERSITE_LAN_EXPOSURE` (medium) — `peersiteEnabled && peersiteLanExposed`.
+  - `WARN_PEERSITE_UNRESTRICTED_SKILLS` (high) — the above plus
+    `unrestrictedRemoteSkills`.
+  - `ERR_EXPOSED_PEERSITE_EXECUTION` (critical) — `peersiteEnabled &&
+    peersiteLanExposed && allowExternalApiExecution`.
+- Fixture updates required by the type change (not new features):
+  `apps/desktop-shell/src/components/SettingsWindow.tsx` `DEFAULTS` and
+  `apps/core-server/src/settings.test.ts` `SAFE`/`CRITICAL` gained the two
+  `false` fields so the build and `deepEqual` assertions stay green.
+- Tests: `sdk/src/settings-risk.test.ts` gained 6 new cases (disabled peersite
+  triggers nothing; exact medium; high; critical; aggregate scales to critical;
+  severity-sorted ordering). Total suite now **308 tests, 0 failures**.
 
 ## Tests added in this pass
 
