@@ -3,8 +3,6 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { safeReadJson } from "../storage/backup";
-import { writeAtomicJson } from "../storage/atomic";
 import { FileWriteQueue } from "../storage/queue";
 import { VaultManager } from "../storage/vault-manager";
 import {
@@ -27,100 +25,6 @@ async function writePlugin(
   await fs.writeFile(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 2));
   await fs.writeFile(path.join(dir, "index.mjs"), entrySource);
 }
-
-test("safeReadJson returns fallback when the file is missing", async () => {
-  const dir = await makeTmpDir("resilience-");
-  const file = path.join(dir, "missing.json");
-
-  assert.equal(await safeReadJson(file, "fallback"), "fallback");
-});
-
-test("truncated JSON is quarantined, warns, and falls back without throwing", async () => {
-  const dir = await makeTmpDir("resilience-");
-  const file = path.join(dir, "data.json");
-  await fs.writeFile(file, '{"broken_json":', "utf8");
-
-  const warnings: { event: string; payload: unknown }[] = [];
-  const result = await safeReadJson(file, { safe: true }, async (event, payload) => {
-    warnings.push({ event, payload });
-  });
-
-  assert.deepEqual(result, { safe: true });
-  assert.equal(warnings.length, 1);
-  assert.equal(warnings[0].event, "system:storageCorrupted");
-
-  const entries = await fs.readdir(dir);
-  assert.ok(
-    entries.some((e) => e.startsWith("data.json.corrupt.")),
-    "expected a quarantine file",
-  );
-  assert.equal(
-    await fs.access(file).then(() => true, () => false),
-    false,
-    "corrupt primary should have been moved aside",
-  );
-});
-
-test("a corrupt file recovers from its .bak and restores the primary", async () => {
-  const dir = await makeTmpDir("resilience-");
-  const file = path.join(dir, "data.json");
-
-  await writeAtomicJson(file, { version: 1 });
-  await writeAtomicJson(file, { version: 2 }); // rotates version 1 into data.json.bak
-
-  await fs.writeFile(file, "{ not valid", "utf8");
-
-  const result = await safeReadJson<{ version?: number }>(file, {});
-  assert.deepEqual(result, { version: 1 }, "should return the backup contents");
-
-  const restored = await safeReadJson<{ version?: number }>(file, {});
-  assert.deepEqual(restored, { version: 1 }, "primary should be restored");
-});
-
-test("a corrupt file with no backup is quarantined and falls back", async () => {
-  const dir = await makeTmpDir("resilience-");
-  const file = path.join(dir, "solo.json");
-  await fs.writeFile(file, "garbage that is not json", "utf8");
-
-  assert.equal(await safeReadJson(file, 42), 42);
-
-  const entries = await fs.readdir(dir);
-  assert.ok(entries.some((e) => e.startsWith("solo.json.corrupt.")));
-});
-
-test("an orphaned .tmp from a crashed write does not break later I/O", async () => {
-  const dir = await makeTmpDir("resilience-");
-  const file = path.join(dir, "data.json");
-
-  // Simulate a process that died between writing the temp file and renaming it.
-  const orphan = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(orphan, "partial payload", "utf8");
-
-  await writeAtomicJson(file, { ok: 1 });
-  assert.deepEqual(await safeReadJson(file, null), { ok: 1 });
-
-  // The stale temp file is left alone but is harmless.
-  assert.equal(await fs.access(orphan).then(() => true, () => false), true);
-});
-
-test("100 concurrent atomic writes to one path serialize without corruption", async () => {
-  const dir = await makeTmpDir("resilience-");
-  const file = path.join(dir, "hot.json");
-
-  await Promise.all(
-    Array.from({ length: 100 }, (_, i) => writeAtomicJson(file, { n: i })),
-  );
-
-  const final = await safeReadJson<{ n: number }>(file, { n: -1 });
-  assert.equal(final.n, 99, "last enqueued write wins, file stays complete");
-
-  const entries = await fs.readdir(dir);
-  assert.equal(
-    entries.some((e) => e.endsWith(".tmp")),
-    false,
-    "no temp files left behind",
-  );
-});
 
 test("50 concurrent vault.setSecret calls commit every key", async () => {
   const dir = await makeTmpDir("resilience-vault-");

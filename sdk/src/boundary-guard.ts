@@ -115,6 +115,61 @@ function walkDepth(value: unknown, depth: number, maxDepth: number): void {
 }
 
 /**
+ * Reject a raw JSON *string* whose container nesting exceeds `maxDepth`
+ * without parsing it. Deeply-nested input like `[[[[…]]]]` (2 bytes per
+ * level) is cheap to build, but it can overflow recursive consumers further
+ * down the line. `validateObjectDepth` already caps post-parse traversal
+ * stack-safely (it throws at depth `maxDepth` before recursing), but it only
+ * runs *after* `JSON.parse` has already built the full object graph. This
+ * guard runs first, scanning the bytes linearly (string/escape-aware) so
+ * over-deep JSON is rejected deterministically with an
+ * {@link ObjectDepthExceededError} before any recursive work — including
+ * `JSON.stringify`, which *does* overflow the call stack on such a graph —
+ * can happen.
+ *
+ * It is also defensive against JSON parsers that are themselves recursive
+ * (e.g. serde_json, older or non-V8 engines), where deep input would throw a
+ * stack-overflow `RangeError` from inside the parser rather than a typed
+ * depth error.
+ *
+ * This is a conservative pre-check, not a JSON validator: it only measures
+ * bracket/brace depth and never rejects valid JSON at or under `maxDepth`.
+ * Brackets inside string literals are ignored, and malformed JSON is left to
+ * the real parser to reject.
+ */
+export function validateJsonNestingDepth(
+  raw: string,
+  maxDepth: number = MAX_OBJECT_DEPTH,
+): void {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "[" || ch === "{") {
+      depth += 1;
+      if (depth > maxDepth) {
+        throw new ObjectDepthExceededError(maxDepth);
+      }
+    } else if (ch === "]" || ch === "}") {
+      depth -= 1;
+    }
+  }
+}
+
+/**
  * Throw {@link KeyCountExceededError} when any object (or array) in `obj` has
  * more than `maxKeys` keys/items. Traversal is depth-capped by
  * {@link MAX_OBJECT_DEPTH} so a pathological deep structure fails fast.

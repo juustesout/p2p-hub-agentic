@@ -84,6 +84,47 @@ miss, not boilerplate to skim.
    without an explicit override. A silent fallback in an open-source repo
    means the fallback value is public.
 
+9. **Storage writes are atomic; storage corruption fails loudly, never
+   silently "empty".** All persistence goes through one shared helper —
+   `atomicWriteFile` in `core/src/storage/atomic-write.ts` (temp file in the
+   same directory → `fsync` → `rename`), used by both `ScopedStorage` and
+   `VaultManager` — never a bare `fs.writeFile` over the target. On the read
+   side, a file that exists but cannot be parsed must throw
+   `StorageCorruptionError` (with the path attached), which is a *different*
+   situation from "the file does not exist yet" (that one is an empty store).
+   Never collapse a `JSON.parse` failure into "empty data" — that is silent,
+   permanent data loss. There is **no** automatic quarantine (renaming to
+   `.corrupt-*`) or automatic "start over empty": a human decides, the code
+   only fails loudly. Stray `.{name}.tmp-*` files from a crashed write are
+   never read as data (reads are always by exact path) and are not
+   auto-cleaned.
+
+### JSON nesting depth (corrected finding — don't re-learn this)
+
+`JSON.parse` in current V8 (Node 22, V8 12.4) is **iterative**: it parses
+million-deep nesting like `[[[[…]]]]` without throwing. `JSON.stringify` **is**
+recursive and overflows (`RangeError: Maximum call stack size exceeded`) on a
+deeply-nested object graph. An earlier analysis wrongly claimed `JSON.parse`
+crashes on deep input; it does not, in this runtime.
+
+What actually protects us:
+
+- `validateObjectDepth` (in `sdk/src/boundary-guard.ts`) throws
+  `ObjectDepthExceededError` at `MAX_OBJECT_DEPTH` (10) **before** recursing,
+  so it is stack-safe and caps every parsed object graph at the trust
+  boundaries (`apps/core-server` `readJson`, `network-light` `tryDecodeFrame`).
+- The pre-parse `validateJsonNestingDepth` helper (same file) is therefore
+  **defense-in-depth, not a crash fix**: it rejects over-deep JSON *strings*
+  with a deterministic typed error before any parse/stringify work, and it
+  protects recursive `JSON.parse` implementations (e.g. Rust `serde_json` in
+  the Tauri shell, older/other engines).
+
+The real invariant to maintain: **every `JSON.stringify` that touches
+externally-derived data must sit after a `validateObjectDepth` check** — not
+just on the happy path, but in error/logging/echo paths too (e.g. the WS ping
+handler echoes `message.ts` back into a `stringify`; it now validates first).
+When reviewing JSON handling, audit `stringify` sites, not just `parse`.
+
 ## Core-server boot token (local HTTP/WS bridge)
 
 The core-server HTTP/WebSocket bridge listens on `127.0.0.1`, but that alone
@@ -164,6 +205,25 @@ When asked to review or verify security-relevant work in this repo:
   moment a second, independent implementation of the chat protocol appears
   that cannot share that function — switch to an explicit byte-template
   canonicalization. Not needed until then.
+- **Cross-process file-locking.** If two instances of the app run against the
+  same storage directory at once, they can still race each other's
+  atomic-write `rename` at the "who wrote last" level. The shared write queue
+  only serializes *within* a process. Not prevented today; a write-with-lock
+  architecture is a larger job and out of scope for now.
+- **Windows rename semantics.** POSIX `rename()` atomicity is documented
+  behaviour, but Windows has historically had subtle differences when
+  renaming over an existing file. Everything is only developed/tested on
+  Linux so far — add Windows verification to the checklist before claiming
+  cross-platform durability.
+- **Core-server identity/vault dependency is intentionally unconditional.**
+  `apps/core-server` always starts the network bridge, so `getOrCreateIdentity()`
+  in `start()` failing loudly on a corrupt vault is deliberate and consistent
+  (the server is by definition where network functionality is expected). The
+  `PluginHost` is the opposite: it only creates identity lazily, when networking
+  starts or a plugin calls `ctx.identity.peerId()`. Keep this asymmetry if a
+  "local-only mode" for the core-server itself is ever added — a local-only
+  core-server must gate its identity/vault dependency behind networking the same
+  way `PluginHost.boot()` now does, not fail hard on a corrupt vault.
 
 ## Spec-gaps: when an acceptance criterion hides a dependency
 

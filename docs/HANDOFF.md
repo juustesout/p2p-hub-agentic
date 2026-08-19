@@ -14,8 +14,9 @@ the repo from scratch. Keep it updated at the end of every task.
   - `3c23801` feat(hardening): defensive parsing for manifests, PBX and formulas
   - `35a91cd` feat(core): network resilience, peer TTL expiry and plugin disposal
   - `7baf54c` feat(core): security boundary guard, AST sanitizer and action validator
-- Test suite: **256 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is clean (P0, P1 5–10, and P2 11–13 committed and pushed).
+- Test suite: **267 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: the storage-durability task (below) is implemented
+  and tested but NOT yet committed/pushed (commit only when asked).
 
 ## What exists / is done
 
@@ -102,6 +103,42 @@ imports `isPlainObject`/`MAX_*`/`containsUnsafeContent` from `@p2p-hub/sdk`.
     retried/timeout-bounded call in a try/catch and returns an error
     `TaskResult` instead of rejecting, upholding the "never throws" contract.
     New tests in `core/src/network-registry.test.ts` cover both cases.
+
+## Storage durability & corruption handling (this task — NOT yet committed)
+
+Implemented crash-safe atomic storage and fail-loud corruption handling across
+`ScopedStorage` and `VaultManager`, plus two correctness fixes found along the
+way. Build green, 267 tests pass.
+
+- **One shared atomic helper** `core/src/storage/atomic-write.ts`:
+  `atomicWriteFile(filePath, data, mode=0o600)` (mkdir parent → temp
+  `.{basename}.tmp-{pid}-{ts}-{rand}` in the SAME dir → `fd.sync()` → `rename`)
+  and `readJsonFile<T>()` (`ENOENT` → `null`; JSON parse failure →
+  `StorageCorruptionError` with `filePath`+`cause`; other I/O errors rethrown).
+  `ScopedStorage` and `VaultManager` both rewritten to use it; the old
+  `atomic.ts` / `backup.ts` (auto-quarantine/auto-restore/silent fallback) were
+  DELETED — they embodied exactly the behavior the task forbids.
+- **No silent empty, no auto-recovery**: corruption throws loudly; stray
+  `.tmp-*` files are never read as data and never auto-cleaned. `emitSystemWarning`
+  / `onWarning` plumbing removed.
+- **`PluginHost.boot()` no longer eagerly creates identity.** The previous
+  unconditional `await this.identity.getOrCreateIdentity()` meant a corrupt
+  vault aborted the whole boot (even for `enableNetworking: false` local apps).
+  Removed; identity is now created lazily — only when networking starts
+  (`startNetworking`, already try/catch-guarded) or a plugin calls
+  `ctx.identity.peerId()`. New tests: corrupt vault + local boot still
+  activates plugins; corrupt vault + networking logs the failure but still
+  boots plugins.
+- **`JSON.stringify` vs `JSON.parse` depth correction** (documented in
+  CLAUDE.md): `JSON.parse` is iterative in Node 22/V8 12.4; `JSON.stringify` is
+  recursive and overflows on deep graphs. `validateJsonNestingDepth` is
+  defense-in-depth on JSON *strings* at `apps/core-server` and
+  `network-light`; the real invariant is every `stringify` of
+  externally-derived data sits after `validateObjectDepth`.
+- New tests: `atomic-write.test.ts`, `scoped-storage.test.ts` (incl. a 50-way
+  concurrent `set` no-lost-update test), expanded `vault-manager.test.ts` and
+  `plugin-host.test.ts`; `resilience.test.ts` rewritten (old auto-recovery/
+  `.bak`/`.corrupt` tests removed as obsolete).
 
 ## Tests added in this pass
 

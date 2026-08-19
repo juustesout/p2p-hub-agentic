@@ -1,5 +1,4 @@
 import { ScopedStorage } from "./scoped-storage";
-import type { StorageWarningHandler } from "./backup";
 
 /**
  * Owns one {@link ScopedStorage} per plugin id.
@@ -7,15 +6,12 @@ import type { StorageWarningHandler } from "./backup";
 export class StorageManager {
   private readonly storages = new Map<string, ScopedStorage>();
 
-  constructor(
-    private readonly dataDir: string,
-    private readonly onWarning?: StorageWarningHandler,
-  ) {}
+  constructor(private readonly dataDir: string) {}
 
   getOrCreate(pluginId: string): ScopedStorage {
     let storage = this.storages.get(pluginId);
     if (!storage) {
-      storage = new ScopedStorage(pluginId, this.dataDir, this.onWarning);
+      storage = new ScopedStorage(pluginId, this.dataDir);
       this.storages.set(pluginId, storage);
     }
     return storage;

@@ -1,7 +1,9 @@
 import * as path from "node:path";
-import { writeAtomicFile } from "./atomic";
-import { safeReadJson } from "./backup";
-import type { StorageWarningHandler } from "./backup";
+import {
+  atomicWriteFile,
+  readJsonFile,
+  StorageCorruptionError,
+} from "./atomic-write";
 import { sharedWriteQueue } from "./queue";
 
 /**
@@ -12,15 +14,16 @@ import { sharedWriteQueue } from "./queue";
  * build filesystem paths, so a key like `"../other-plugin/secret"` stays a
  * literal key inside this plugin's own file.
  *
- * Reads go through {@link safeReadJson} (graceful corruption recovery) and
- * every read-modify-write cycle is serialized per file path by the shared
+ * Reads go through {@link readJsonFile}: a missing file is an empty store
+ * (first run), but a file that exists and cannot be parsed throws
+ * {@link StorageCorruptionError} — it is never silently treated as empty.
+ * Every read-modify-write cycle is serialized per file path by the shared
  * write queue, so concurrent `set`/`delete` calls cannot drop one another.
  */
 export class ScopedStorage {
   constructor(
     private readonly pluginId: string,
     private readonly dataDir: string,
-    private readonly onWarning?: StorageWarningHandler,
   ) {}
 
   private filePath(): string {
@@ -28,7 +31,10 @@ export class ScopedStorage {
   }
 
   private async readAll(): Promise<Record<string, unknown>> {
-    const parsed = await safeReadJson<unknown>(this.filePath(), {}, this.onWarning);
+    const parsed = await readJsonFile<unknown>(this.filePath());
+    if (parsed === null) {
+      return {};
+    }
     if (
       typeof parsed === "object" &&
       parsed !== null &&
@@ -36,7 +42,10 @@ export class ScopedStorage {
     ) {
       return parsed as Record<string, unknown>;
     }
-    return {};
+    throw new StorageCorruptionError(
+      this.filePath(),
+      `expected a JSON object, got ${typeof parsed}`,
+    );
   }
 
   async get(key: string): Promise<unknown> {
@@ -48,7 +57,7 @@ export class ScopedStorage {
     await sharedWriteQueue.enqueue(this.filePath(), async () => {
       const data = await this.readAll();
       data[key] = value;
-      await writeAtomicFile(this.filePath(), data);
+      await atomicWriteFile(this.filePath(), JSON.stringify(data, null, 2));
     });
   }
 
@@ -56,7 +65,7 @@ export class ScopedStorage {
     await sharedWriteQueue.enqueue(this.filePath(), async () => {
       const data = await this.readAll();
       delete data[key];
-      await writeAtomicFile(this.filePath(), data);
+      await atomicWriteFile(this.filePath(), JSON.stringify(data, null, 2));
     });
   }
 

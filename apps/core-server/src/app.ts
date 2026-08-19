@@ -12,6 +12,7 @@ import {
   MAX_PAYLOAD_BYTES,
   ObjectDepthExceededError,
   PayloadTooLargeError,
+  validateJsonNestingDepth,
   validateObjectDepth,
   validatePayloadSize,
 } from "@p2p-hub/sdk";
@@ -253,6 +254,7 @@ export class CoreServer {
           type?: string;
           ts?: number;
         };
+        validateObjectDepth(message);
         if (message.type === "ping") {
           socket.send(JSON.stringify({ type: "pong", ts: message.ts ?? Date.now() }));
         }
@@ -554,6 +556,7 @@ async function readJson(req: http.IncomingMessage): Promise<unknown> {
     return {};
   }
   validatePayloadSize(raw, MAX_PAYLOAD_BYTES);
+  validateJsonNestingDepth(raw);
   const parsed: unknown = JSON.parse(raw);
   validateObjectDepth(parsed);
   return parsed;

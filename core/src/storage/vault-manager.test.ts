@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { VaultManager } from "./vault-manager";
+import { StorageCorruptionError } from "./atomic-write";
 
 async function makeDataDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "vault-"));
@@ -130,4 +131,20 @@ test("listSecretMetadata lists all keys without values", async () => {
     ["a", "b"],
   );
   assert.equal(JSON.stringify(metas).includes("value-a"), false);
+});
+
+test("a corrupt vault file throws StorageCorruptionError, not a silent empty vault", async () => {
+  const dataDir = await makeDataDir();
+  await fs.writeFile(path.join(dataDir, "vault.json"), "{ not valid json", "utf8");
+
+  const vault = new VaultManager({ dataDir, masterKey: "test-master" });
+
+  await assert.rejects(() => vault.getSecret("openai.key"), StorageCorruptionError);
+  await assert.rejects(() => vault.listSecretKeys(), StorageCorruptionError);
+
+  assert.equal(
+    await fs.readFile(path.join(dataDir, "vault.json"), "utf8"),
+    "{ not valid json",
+    "corrupt vault bytes must remain untouched",
+  );
 });

@@ -84,14 +84,11 @@ export class PluginHost {
   constructor(private readonly options: PluginHostOptions) {
     const hooks = new HookRegistry();
     this.hooks = hooks;
-    this.storages = new StorageManager(options.dataDir, (event, payload) =>
-      hooks.emit(event, payload),
-    );
+    this.storages = new StorageManager(options.dataDir);
     this.broker = new TaskBroker();
     this.vault = new VaultManager({
       dataDir: options.dataDir,
       masterKey: options.masterKey,
-      emitSystemWarning: (event, payload) => hooks.emit(event, payload),
     });
     this.identity = new IdentityManager({ vault: this.vault });
     this.networks = new NetworkRegistry();
@@ -106,8 +103,6 @@ export class PluginHost {
    * emitted so plugins can run post-boot work without guessing load order.
    */
   async boot(): Promise<void> {
-    await this.identity.getOrCreateIdentity();
-
     let entries: Dirent[];
     try {
       entries = await fs.readdir(this.options.pluginsDir, {

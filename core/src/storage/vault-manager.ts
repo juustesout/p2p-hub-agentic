@@ -1,9 +1,7 @@
 import * as crypto from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
-import { writeAtomicFile } from "./atomic";
-import { safeReadJson } from "./backup";
-import type { StorageWarningHandler } from "./backup";
+import { atomicWriteFile, readJsonFile } from "./atomic-write";
 import { sharedWriteQueue } from "./queue";
 
 export interface VaultManagerOptions {
@@ -26,12 +24,6 @@ export interface VaultManagerOptions {
    * `ai.*`). Defaults to {@link DEFAULT_RESERVED_PREFIXES}.
    */
   reservedPrefixes?: string[];
-  /**
-   * Called with `system:storageCorrupted` when the vault file is corrupted and
-   * had to be recovered or quarantined. Wired by the host to the shared
-   * {@link HookRegistry} so plugins can observe the event.
-   */
-  emitSystemWarning?: StorageWarningHandler;
 }
 
 interface EncryptedEntry {
@@ -90,7 +82,6 @@ export class VaultManager {
   readonly reservedPrefixes: string[];
   /** True when the master key fell back to the insecure dev-only key. */
   readonly usesFallbackKey: boolean;
-  private readonly emitSystemWarning: StorageWarningHandler | undefined;
   private salt: Buffer | null = null;
   private entries: Record<string, EncryptedEntry> = {};
   private derivedKey: Buffer | null = null;
@@ -101,7 +92,6 @@ export class VaultManager {
       options.dataDir ?? path.join(os.homedir(), ".p2p-hub", "vault");
     this.reservedPrefixes =
       options.reservedPrefixes ?? DEFAULT_RESERVED_PREFIXES;
-    this.emitSystemWarning = options.emitSystemWarning;
 
     const { masterKey, usedFallback } = resolveMasterKey(options.masterKey);
     this.masterKey = masterKey;
@@ -144,13 +134,9 @@ export class VaultManager {
   }
 
   private async load(): Promise<void> {
-    const parsed = await safeReadJson<VaultFile | null>(
-      this.filePath(),
-      null,
-      this.emitSystemWarning,
-    );
+    const parsed = await readJsonFile<VaultFile>(this.filePath());
     if (parsed === null) {
-      // Missing, corrupt and unrecoverable, or quarantined — start empty.
+      // Missing file — normal first run. Start empty.
       this.salt = crypto.randomBytes(SALT_LENGTH);
       this.entries = {};
       return;
@@ -167,7 +153,7 @@ export class VaultManager {
       salt: this.salt.toString("hex"),
       entries: this.entries,
     };
-    await writeAtomicFile(this.filePath(), file);
+    await atomicWriteFile(this.filePath(), JSON.stringify(file, null, 2));
   }
 
   async setSecret(key: string, value: string): Promise<void> {

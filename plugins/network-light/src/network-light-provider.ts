@@ -14,6 +14,7 @@ import type {
 import {
   MAX_PAYLOAD_BYTES,
   PayloadTooLargeError,
+  validateJsonNestingDepth,
   validateObjectDepth,
 } from "@p2p-hub/sdk";
 
@@ -419,7 +420,9 @@ export class NetworkLightProvider implements NetworkProvider {
     }
     let skills: string[] = [];
     try {
-      skills = JSON.parse(service.txt?.skills ?? "[]") as string[];
+      const rawSkills = service.txt?.skills ?? "[]";
+      validateJsonNestingDepth(rawSkills);
+      skills = JSON.parse(rawSkills) as string[];
     } catch {
       skills = [];
     }
@@ -496,7 +499,9 @@ function tryDecodeFrame(buffer: Buffer): DecodedFrame | null {
   const body = buffer.subarray(4, 4 + length);
   const rest = buffer.subarray(4 + length);
   try {
-    const value = JSON.parse(body.toString("utf8")) as WireMessage;
+    const raw = body.toString("utf8");
+    validateJsonNestingDepth(raw);
+    const value = JSON.parse(raw) as WireMessage;
     validateObjectDepth(value);
     return { value, rest };
   } catch {

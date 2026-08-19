@@ -170,6 +170,25 @@ test("HTTP /api/execute rejects unsafe serviceId/method/peerId identifiers", asy
   }
 });
 
+test("HTTP /api/execute returns 400 for a deeply-nested JSON body, not 500", async () => {
+  const { server, port } = await startServer();
+  try {
+    // ~200KB of nested arrays — within MAX_PAYLOAD_BYTES but deep enough to
+    // overflow JSON.parse's call stack if it were parsed un-guarded.
+    const deep = "[".repeat(100_000) + "1" + "]".repeat(100_000);
+    const res = await request(port, "/api/execute", {
+      method: "POST",
+      headers: authorizedHeaders(),
+      body: `{"serviceId":"core","method":"echo","arguments":${deep}}`,
+    });
+    assert.equal(res.status, 400, "deep JSON must be rejected cleanly, not crash");
+    const body = (await res.json()) as { error: string };
+    assert.equal(body.error, "invalid request body");
+  } finally {
+    await server.stop();
+  }
+});
+
 function wsConnect(port: number, token?: string): Promise<"accepted" | "rejected"> {
   return new Promise((resolve, reject) => {
     const url = token

@@ -15,6 +15,7 @@ import {
   stripHtml,
   validateKeyCount,
   validateObjectDepth,
+  validateJsonNestingDepth,
   validatePayloadSize,
   validateTextLength,
 } from "@p2p-hub/sdk";
@@ -63,6 +64,50 @@ test("validateObjectDepth rejects a cyclic structure without overflowing", () =>
   const cycle: Record<string, unknown> = { name: "x" };
   cycle.self = cycle;
   assert.throws(() => validateObjectDepth(cycle), ObjectDepthExceededError);
+});
+
+/** Build a JSON string with `n` nested arrays around a scalar. */
+function deepJsonString(n: number): string {
+  return "[".repeat(n) + "1" + "]".repeat(n);
+}
+
+test("validateJsonNestingDepth rejects over-deep JSON strings before parsing", () => {
+  // 100k levels is ~200KB — within MAX_PAYLOAD_BYTES, but far past the V8
+  // JSON.parse recursion limit.
+  const bomb = deepJsonString(100_000);
+  assert.throws(() => validateJsonNestingDepth(bomb), ObjectDepthExceededError);
+  assert.throws(() => validateJsonNestingDepth(deepJsonString(11)), ObjectDepthExceededError);
+});
+
+test("validateJsonNestingDepth accepts JSON at the depth limit", () => {
+  assert.doesNotThrow(() => validateJsonNestingDepth(deepJsonString(MAX_OBJECT_DEPTH)));
+  assert.doesNotThrow(() =>
+    validateJsonNestingDepth('{"a":[1,{"b":[2,{"c":null}]}]}'),
+  );
+});
+
+test("validateJsonNestingDepth ignores brackets inside strings and escapes", () => {
+  const bracketsInString = JSON.stringify({ text: "[[[[[[[[[[[[[[[[", n: 1 });
+  assert.doesNotThrow(() => validateJsonNestingDepth(bracketsInString));
+
+  const escapedQuotes = JSON.stringify({ text: 'a\\"b\\"c[[]]' });
+  assert.doesNotThrow(() => validateJsonNestingDepth(escapedQuotes));
+});
+
+test("deep JSON is rejected before post-parse recursion can overflow", () => {
+  const bomb = deepJsonString(100_000);
+  // JSON.parse in current V8 is iterative and does not throw on this input,
+  // but JSON.stringify (and other recursive consumers) overflow the call
+  // stack on such a graph. The guard rejects the string before any of those
+  // paths can run.
+  assert.throws(
+    () => {
+      validateJsonNestingDepth(bomb);
+      JSON.parse(bomb);
+      JSON.stringify(JSON.parse(bomb));
+    },
+    ObjectDepthExceededError,
+  );
 });
 
 test("validateKeyCount enforces MAX_KEY_COUNT per object", () => {
