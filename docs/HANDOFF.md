@@ -7,15 +7,16 @@ the repo from scratch. Keep it updated at the end of every task.
 
 - Branch `main`, remote `origin` = `https://github.com/juustesout/p2p-hub-agentic`.
 - Recent commits on `origin/main`:
+  - `ef59164` docs(handoff): record smartbase and security-coherence work
+  - `155532e` feat(desktop-shell): add blast-radius settings UI and native tier-2 confirmation
+  - `c10c329` feat(core-server): add trust-gated settings endpoints
+  - `dc5bdbd` feat(security): add fail-closed trust-tier gate
+  - `a25dbc0` feat(security): add pure settings-risk engine and trust-tier policy
+  - `eb2c871` feat(smartbase): add Airtable-like structured data plugin
   - `49055e7` feat(core): crash-safe atomic storage and fail-loud corruption handling
-  - `6f6674d` docs(handoff): record P2 hardening completion and clean working tree
-  - `b18f264` feat(security): P2 hardening — gate non-loopback bridge, lock down skill advertising
-  - `34671e7` feat(security): P1 hardening — identifier validation, task concurrency cap, provider selection
-  - `366c733` feat(security): wire boundary guards and sanitizers across trust boundaries (P0)
 - Test suite: **303 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **dirty**: the `smartbase` plugin and the security-coherence
-  phase (both below) are implemented and tested but NOT yet committed/pushed
-  (commit only when asked).
+- Working tree is **clean** (all work through the security-coherence phase is
+  committed and pushed).
 
 ## What exists / is done
 
@@ -103,7 +104,7 @@ imports `isPlainObject`/`MAX_*`/`containsUnsafeContent` from `@p2p-hub/sdk`.
     `TaskResult` instead of rejecting, upholding the "never throws" contract.
     New tests in `core/src/network-registry.test.ts` cover both cases.
 
-## Storage durability & corruption handling (this task — NOT yet committed)
+## Storage durability & corruption handling (committed)
 
 Implemented crash-safe atomic storage and fail-loud corruption handling across
 `ScopedStorage` and `VaultManager`, plus two correctness fixes found along the
@@ -139,7 +140,7 @@ way. Build green, 267 tests pass.
   `plugin-host.test.ts`; `resilience.test.ts` rewritten (old auto-recovery/
   `.bak`/`.corrupt` tests removed as obsolete).
 
-## SmartBase plugin (this task — NOT yet committed)
+## SmartBase plugin (committed)
 
 New `plugins/smartbase`: an Airtable-like structured-data plugin on the PBX/OLE
 standard, `localOnly`, no new `PluginContext` capabilities — pure `ctx.storage`.
@@ -176,7 +177,7 @@ standard, `localOnly`, no new `PluginContext` capabilities — pure `ctx.storage
   `tsconfig.json` references (necessary for `tsc -b` to build the plugin; the
   only change outside `plugins/smartbase/`).
 
-## Security coherence & trust foundation (this task — NOT yet committed)
+## Security coherence & trust foundation (committed)
 
 Pure settings-risk engine, a fail-closed trust-tier gate, a native tier-2
 confirmation path, and a blast-radius settings UI. No new features, no
@@ -228,7 +229,8 @@ P2P/plugin/vault redesign, no remote JS execution.
   `window.label() == "main"`. Cargo.toml adds `tauri-plugin-dialog = "2"`.
   **UNVERIFIED**: no Rust toolchain in this environment — needs `cargo build`.
   The frontend wrapper `services/trust-confirm.ts` (`confirmTier2`) invokes it
-  and returns `false` (fail-closed) on any error/unavailability.
+  with a 60s timeout and returns `false` (fail-closed) on any error,
+  unavailability, or timeout.
 - **Capability isolation** (audited, no change needed beyond the command):
   `capabilities/default.json` is already `windows: ["main"]` + `core:default`
   only (no fs/shell/dialog/vault plugin permissions). Plugin panels are iframes
@@ -237,7 +239,10 @@ P2P/plugin/vault redesign, no remote JS execution.
   only URL exposure is the documented `?token=` WS-upgrade accepted risk.
 - **Shell UI**: `BlastRadiusBadge` + `RiskFindingBanner` + `SettingsWindow`
   (5 toggles, live `evaluateSettingsRisk` on every change, per-field warnings,
-  Save → `confirmTier2` for critical → `coreBridge.applySettings`).
+  Save → `confirmTier2` for critical → `coreBridge.applySettings`). The window
+  keeps a `lastSaved` (server-confirmed) snapshot and rolls back any optimistic
+  toggles when a tier-2 confirm is denied/failed or the server rejects the
+  apply — no drift between UI state and persisted state.
   `StartMenu`/`Taskbar` gained a Settings entry. `core-bridge.ts` gained
   `getSettings`/`applySettings`. `vite.config.ts` sets
   `build.commonjsOptions.include: [/node_modules/, /sdk\/dist/]` so Rollup
@@ -250,6 +255,41 @@ P2P/plugin/vault redesign, no remote JS execution.
   no `localStorage`/`sessionStorage`/`document.cookie` anywhere in the shell.
 - **Tests added**: `sdk/src/settings-risk.test.ts` (12), `core/src/security/
   trust-gate.test.ts` (8), `apps/core-server/src/settings.test.ts` (7).
+
+## Coherence follow-ups (Phase 2) & Rust verification
+
+Flagged during review of the trust foundation; NOT done yet — do these when the
+runtime binding and the Rust build happen.
+
+1. **Rust / Tauri native dialog**
+   - `blocking_show()` can block the OS main loop on some platforms. Prefer the
+     async `show(|result| …)` form (or an `async fn` command) so the IPC stays
+     non-blocking. The frontend `confirmTier2` already wraps the call in a 60s
+     timeout that fails closed (`false`) — keep that even after switching to the
+     async dialog.
+   - **Main-window isolation is not yet provably hard-gated.** The
+     `window.label() == "main"` check in `lib.rs` is a good first line, but the
+     definitive boundary in Tauri v2 is a capability/permission gate for the
+     custom command. Verify with `cargo build` + a test command that a secondary
+     window (or an external webview iframe) cannot invoke
+     `request_tier2_confirmation`. If Tauri v2 cannot gate custom commands via
+     capabilities, keep the label check AND document that plugin panels are
+     iframes with no Tauri IPC access at all.
+2. **Runtime binding (the "coherence" step).** The 5 flags are currently only
+   *recorded + evaluated + gated* in `settings.json`; they do not yet change
+   behaviour. When wiring them in, give each consumer (P2P hub listener, skill
+   executor, chat auto-notify, vault storage mode, external-API gate) a
+   direct-read or event-driven subscription to `EffectiveSettings`, and keep the
+   `settings:updated` broadcast as the change signal. Avoid a second,
+   independent settings store — subscribe to the one written by
+   `POST /api/settings/apply`.
+3. **No sensitive values in `EffectiveSettings`.** It is a 5-boolean record;
+   `normalizeSettings` structurally drops any non-boolean field, so API keys or
+   other secrets passed to the engine can never be carried into browser state or
+   logs. Keep it that way: the settings engine must only ever see boolean flags
+   + metadata, never secrets. Re-audit the `settings:updated` broadcast payload
+   and any future settings-adjacent logging to confirm they serialize only
+   booleans.
 
 ## Tests added in this pass
 
