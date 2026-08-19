@@ -1,0 +1,12 @@
+{
+  "id": "peersite",
+  "name": "PeerSite",
+  "version": "0.1.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": [
+    "network:skill:peersite.status",
+    "network:skill:peersite.fetchAsset",
+    "network:skill:peersite.signAuthChallenge"
+  ]
+}

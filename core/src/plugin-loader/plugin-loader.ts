@@ -195,6 +195,7 @@ export async function loadPlugin(
         list: (prefix) => other.list(prefix),
       };
     },
+    dataDir: storageManager.getDataDir(),
     hooks: {
       on: (event, handler, priority = 10) => {
         const subscription = hookRegistry.on(event, handler, priority);

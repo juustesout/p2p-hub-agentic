@@ -15,6 +15,7 @@ export * from "./plugin-host/plugin-host";
 export * from "./task-broker/task-broker";
 export * from "./task-broker/wire-network";
 export * from "./identity/peer-auth";
+export * from "./site/site-files";
 
 import { IdentityManager } from "./identity/identity-manager";
 

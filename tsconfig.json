@@ -12,6 +12,7 @@
     { "path": "./plugins/calc" },
     { "path": "./plugins/paint" },
     { "path": "./plugins/contacts" },
+    { "path": "./plugins/peersite" },
     { "path": "./plugins/chat" },
     { "path": "./plugins/tasks" },
     { "path": "./plugins/smartbase" },

@@ -1,6 +1,5 @@
 import * as http from "node:http";
 import * as path from "node:path";
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
@@ -39,7 +38,9 @@ import {
   TrustConfirmationDeniedError,
   TrustTierGate,
   atomicWriteFile,
+  contentTypeForPath,
   readJsonFile,
+  resolveAndContainFile,
   wireNetworkToBroker,
 } from "@p2p-hub/core";
 import type { TrustConfirmation } from "@p2p-hub/core";
@@ -61,12 +62,6 @@ export interface CoreServerOptions {
    * default, which makes every tier-2 settings change fail closed (denied).
    */
   trustConfirmation?: TrustConfirmation;
-  /**
-   * Path to a user-chosen directory served as a static site under `/site/*`.
-   * Optional; when absent, static serving is disabled. Resolved and validated
-   * at startup (realpath containment, data-dir block, loopback-only).
-   */
-  siteRoot?: string;
 }
 
 const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
@@ -96,41 +91,22 @@ const SITE_SECURITY_HEADERS: Record<string, string> = {
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;",
 };
 
-const SITE_MIME_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".htm": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".txt": "text/plain; charset=utf-8",
-  ".md": "text/markdown; charset=utf-8",
-  ".xml": "application/xml; charset=utf-8",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".webp": "image/webp",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-};
-
-const SITE_DEFAULT_MIME = "application/octet-stream";
-
-/** Explicit, extension-only MIME lookup (never trusts a user-provided type). */
-function SITE_CONTENT_TYPE(extension: string): string {
-  const lower = extension.toLowerCase();
-  return SITE_MIME_TYPES[lower] ?? SITE_DEFAULT_MIME;
-}
-
 interface ExecuteBody {
   peerId?: string;
   serviceId: string;
   method: string;
   requestId?: string;
   arguments?: unknown;
+}
+
+/**
+ * Structural view of the activated `peersite` plugin. Core-server stays
+ * type-ignorant of the plugin package: it only needs the site root the plugin
+ * owns, read through `host.getActivated("peersite")` behind a `typeof` guard
+ * (the same read-seam pattern as `ctx.trust`/`asContactLookup`).
+ */
+interface PeerSitePlugin {
+  getSiteRoot(): Promise<string | null>;
 }
 
 /**
@@ -153,7 +129,7 @@ export class CoreServer {
   private peerTimer: NodeJS.Timeout | null = null;
   private bootToken = "";
   private readonly trustGate: TrustTierGate;
-  private siteRootReal: string | null = null;
+  private lanSiteAllowed = true;
   private siteToken = "";
   private peerId = "";
   private readonly messageTimestamps = new Map<string, number[]>();
@@ -520,7 +496,7 @@ export class CoreServer {
     res: http.ServerResponse,
     pathname: string,
   ): Promise<boolean> {
-    const root = this.siteRootReal;
+    const root = await this.effectiveSiteRoot();
     if (!root) {
       return false;
     }
@@ -551,64 +527,23 @@ export class CoreServer {
       return true;
     }
 
-    const segments = decoded.split("/").filter((segment) => segment.length > 0);
-    for (const segment of segments) {
-      // Dot-segments (`.`, `..`) and dotfiles (`.env`, `.git`) all begin with
-      // a dot and are default-denied. Backslashes and null bytes are never
-      // valid in a served path.
-      if (
-        segment.startsWith(".") ||
-        segment.includes("\\") ||
-        segment.includes("\0")
-      ) {
-        this.sendSiteEmpty(res, 404, false);
-        return true;
-      }
-    }
-
-    let candidate = path.join(root, ...segments);
-    try {
-      candidate = fs.realpathSync(candidate);
-    } catch {
+    // Containment (dot-segments, dotfiles, symlinks, data-dir escapes) is
+    // decided once, in the shared helper — identical to the P2P fetchAsset path.
+    const resolved = resolveAndContainFile(root, decoded);
+    if (!resolved) {
       this.sendSiteEmpty(res, 404, false);
       return true;
-    }
-    if (candidate !== root && !candidate.startsWith(root + path.sep)) {
-      this.sendSiteEmpty(res, 404, false);
-      return true;
-    }
-
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(candidate);
-    } catch {
-      this.sendSiteEmpty(res, 404, false);
-      return true;
-    }
-
-    if (stat.isDirectory()) {
-      try {
-        const index = fs.realpathSync(path.join(candidate, "index.html"));
-        if (index !== root && !index.startsWith(root + path.sep)) {
-          this.sendSiteEmpty(res, 404, false);
-          return true;
-        }
-        candidate = index;
-      } catch {
-        this.sendSiteEmpty(res, 404, false);
-        return true;
-      }
     }
 
     let contents: Buffer;
     try {
-      contents = await fsp.readFile(candidate);
+      contents = await fsp.readFile(resolved);
     } catch {
       this.sendSiteEmpty(res, 404, false);
       return true;
     }
 
-    this.sendSiteFile(res, req.method === "HEAD", contents, candidate);
+    this.sendSiteFile(res, req.method === "HEAD", contents, resolved);
     return true;
   }
 
@@ -627,7 +562,7 @@ export class CoreServer {
     contents: Buffer,
     filePath: string,
   ): void {
-    const contentType = SITE_CONTENT_TYPE(path.extname(filePath));
+    const contentType = contentTypeForPath(filePath);
     res.writeHead(200, {
       ...SITE_SECURITY_HEADERS,
       "Content-Type": contentType,
@@ -643,17 +578,17 @@ export class CoreServer {
   /**
    * Attempt to handle a scoped PeerSite API request. Returns `true` when the
    * request targeted `/peersite` and was answered; `false` otherwise. The API
-   * is only active when the site is enabled (`siteRoot` configured). The scoped
-   * site credential is the *only* thing that can authenticate `/peersite/*` —
-   * the boot token never applies here, and the site credential never applies to
-   * `/api/*` or `/ws`.
+   * is only active when the site is enabled (the peersite plugin has a
+   * configured root). The scoped site credential is the *only* thing that can
+   * authenticate `/peersite/*` — the boot token never applies here, and the
+   * site credential never applies to `/api/*` or `/ws`.
    */
   private async tryServePeersite(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     pathname: string,
   ): Promise<boolean> {
-    if (!this.siteRootReal) {
+    if (!(await this.effectiveSiteRoot())) {
       return false;
     }
     if (
@@ -930,33 +865,26 @@ export class CoreServer {
   }
 
   /**
-   * Resolve and validate `options.siteRoot` at startup, deciding whether the
-   * site is active and whether it is exposed beyond loopback.
+   * Resolve the LAN exposure decision at startup. The site root itself is
+   * owned by the `peersite` plugin (see {@link effectiveSiteRoot}); this only
+   * decides whether a configured site may be served beyond loopback.
    *
-   * Loopback serving is always allowed when `siteRoot` is configured. Serving
-   * beyond loopback is an explicit opt-in: it requires both `peersiteEnabled`
-   * and `peersiteLanExposed` from the persisted settings, and when enabled it
-   * logs a loud exposure + risk warning (CLAUDE.md principle #8 — no silent
-   * widening). The resolved realpath is the canonical root for containment on
-   * every request.
+   * Loopback serving is always allowed. Serving beyond loopback is an explicit
+   * opt-in: it requires both `peersiteEnabled` and `peersiteLanExposed` from
+   * the persisted settings, and when enabled it logs a loud exposure + risk
+   * warning (CLAUDE.md principle #8 — no silent widening).
    */
   private async initSite(): Promise<void> {
-    const siteRoot = this.options.siteRoot;
-    if (!siteRoot) {
-      this.siteRootReal = null;
-      return;
-    }
-
     const host = this.options.host ?? "127.0.0.1";
     if (!isLoopbackHost(host)) {
       const settings = await this.loadSettings();
       if (!settings.peersiteEnabled || !settings.peersiteLanExposed) {
         console.warn(
-          "[core-server] PeerSite: siteRoot configured but the bridge is not " +
-            "bound to loopback and peersiteEnabled/peersiteLanExposed are not " +
-            "both enabled; static + /peersite serving is refused (loopback-only).",
+          "[core-server] PeerSite: the bridge is not bound to loopback and " +
+            "peersiteEnabled/peersiteLanExposed are not both enabled; static + " +
+            "/peersite serving is refused (loopback-only).",
         );
-        this.siteRootReal = null;
+        this.lanSiteAllowed = false;
         return;
       }
       const risk = evaluateSettingsRisk(settings).aggregate;
@@ -967,24 +895,37 @@ export class CoreServer {
           `${risk}. Keep the site token secret and treat the network as untrusted.`,
       );
     }
+  }
 
-    let rootReal: string;
-    try {
-      rootReal = fs.realpathSync(path.resolve(siteRoot));
-    } catch {
-      throw new Error(
-        `PeerSite siteRoot "${siteRoot}" does not exist or cannot be resolved`,
-      );
+  /**
+   * The currently-active site root, owned by the `peersite` plugin and read
+   * through `host.getActivated("peersite")`. Returns `null` (site disabled)
+   * when the plugin is absent, has no configured root, or LAN exposure was
+   * refused. The root is already a canonical realpath (validated by the
+   * plugin's `setSiteRoot` via the shared {@link validateSiteRoot}).
+   */
+  private async effectiveSiteRoot(): Promise<string | null> {
+    if (!this.lanSiteAllowed) {
+      return null;
     }
-
-    const dataReal = fs.realpathSync(this.options.dataDir);
-    if (rootReal === dataReal || rootReal.startsWith(dataReal + path.sep)) {
-      throw new Error(
-        "PeerSite siteRoot must not be the agent data directory or a path inside it",
-      );
+    const plugin = this.peersite();
+    if (!plugin) {
+      return null;
     }
+    return plugin.getSiteRoot();
+  }
 
-    this.siteRootReal = rootReal;
+  /** Activated `peersite` plugin, duck-typed (fail-closed) — never a blind cast. */
+  private peersite(): PeerSitePlugin | null {
+    const instance = this.host.getActivated("peersite");
+    if (
+      typeof instance === "object" &&
+      instance !== null &&
+      typeof (instance as { getSiteRoot?: unknown }).getSiteRoot === "function"
+    ) {
+      return instance as PeerSitePlugin;
+    }
+    return null;
   }
 
   /**

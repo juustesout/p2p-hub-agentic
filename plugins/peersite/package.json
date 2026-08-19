@@ -1,0 +1,19 @@
+{
+  "name": "@p2p-hub/peersite",
+  "version": "0.1.0",
+  "description": "P2P static-site publishing with verified-peer asset access",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/sdk": "0.1.0"
+  },
+  "license": "MIT"
+}

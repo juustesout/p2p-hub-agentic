@@ -10,6 +10,11 @@ import type { TrustConfirmation } from "@p2p-hub/core";
 
 const TOKEN = "peersite-test-token";
 
+/** Source of the compiled peersite plugin, copied into each temp pluginsDir. */
+const PEERSITE_SRC = path.resolve(__dirname, "../../../plugins/peersite");
+/** Repo node_modules, symlinked so the copied plugin resolves `@p2p-hub/*`. */
+const REPO_NODE_MODULES = path.resolve(__dirname, "../../../node_modules");
+
 interface StartOptions {
   siteRoot?: string;
   host?: string;
@@ -28,25 +33,68 @@ async function startServer(opts: StartOptions = {}): Promise<{
   );
   const pluginsDir = path.join(dataDir, "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
+
+  // Load only the peersite plugin. `fs.cp` (not a symlink) so the host's
+  // `readdir(...).isDirectory()` scan sees a real directory; the node_modules
+  // symlink lets the copied entry resolve `@p2p-hub/core`/`@p2p-hub/sdk`.
+  await fs.cp(PEERSITE_SRC, path.join(pluginsDir, "peersite"), {
+    recursive: true,
+  });
+  await fs.symlink(REPO_NODE_MODULES, path.join(pluginsDir, "node_modules"), "dir");
+
   if (opts.settings) {
     await fs.writeFile(
       path.join(dataDir, "settings.json"),
       JSON.stringify(opts.settings),
     );
   }
+
   const server = new CoreServer({
     pluginsDir,
     dataDir,
     host: opts.host ?? "127.0.0.1",
     port: 0,
     bootToken: TOKEN,
-    siteRoot: opts.siteRoot,
     trustConfirmation: opts.trustConfirmation,
   });
   await server.start();
   const addr = server.address();
   assert.ok(addr, "server should report its bound address");
+
+  if (opts.siteRoot) {
+    const result = await configureSiteRoot(addr.port, opts.siteRoot);
+    assert.equal(
+      result.status,
+      "ok",
+      `setSiteRoot failed: ${JSON.stringify(result)}`,
+    );
+  }
+
   return { server, port: addr.port, dataDir };
+}
+
+/**
+ * Configure the site root through the authenticated HTTP bridge, exactly as the
+ * desktop shell does (`/api/execute` → `peersite.setSiteRoot`).
+ */
+async function configureSiteRoot(
+  port: number,
+  siteRoot: string,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`http://127.0.0.1:${port}/api/execute`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${TOKEN}`,
+    },
+    body: JSON.stringify({
+      serviceId: "peersite",
+      method: "setSiteRoot",
+      arguments: { siteRoot },
+    }),
+  });
+  assert.equal(res.status, 200);
+  return (await res.json()) as Record<string, unknown>;
 }
 
 /** Send a raw GET with a hand-built path, bypassing `fetch` URL normalization. */
@@ -206,25 +254,22 @@ test("dotfiles and dot-directories are denied", async () => {
   }
 });
 
-test("siteRoot equal to the data directory is rejected at startup", async () => {
-  const dataDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), "core-server-peersite-datadir-"),
-  );
-  const pluginsDir = path.join(dataDir, "plugins");
-  await fs.mkdir(pluginsDir, { recursive: true });
-  const server = new CoreServer({
-    pluginsDir,
-    dataDir,
-    host: "127.0.0.1",
-    port: 0,
-    bootToken: TOKEN,
-    siteRoot: dataDir,
-  });
-  await assert.rejects(server.start());
-  await server.stop();
+test("siteRoot equal to the data directory is rejected by the plugin", async () => {
+  const { server, port, dataDir } = await startServer();
+  try {
+    const result = await configureSiteRoot(port, dataDir);
+    assert.equal(result.status, "error");
+    assert.match(String(result.error), /data directory/);
+
+    // The rejected root must never become active.
+    const res = await fetch(`http://127.0.0.1:${port}/site/index.html`);
+    assert.equal(res.status, 404);
+  } finally {
+    await server.stop();
+  }
 });
 
-test("static serving is disabled when siteRoot is not configured", async () => {
+test("static serving is disabled when no site root is configured", async () => {
   const { server, port } = await startServer();
   try {
     const res = await fetch(`http://127.0.0.1:${port}/site/index.html`);

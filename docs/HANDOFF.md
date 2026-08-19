@@ -7,18 +7,15 @@ the repo from scratch. Keep it updated at the end of every task.
 
 - Branch `main`, remote `origin` = `https://github.com/juustesout/p2p-hub-agentic`.
 - Recent commits on `origin/main`:
+  - `ad51482` feat(core): add ctx.trust capability and PeerSite inbound peer-auth
+  - `58bd274` feat(sdk): add in-process contact trust-lookup seam
+  - `369899d` feat(core-server): add scoped PeerSite API and LAN opt-in (PeerSite Fase 2)
   - `a74963d` docs(peersite): add design plan and record Fase 0 status
   - `21762e7` feat(sdk): add peersite settings flags and risk rules
   - `ef59164` docs(handoff): record smartbase and security-coherence work
-  - `155532e` feat(desktop-shell): add blast-radius settings UI and native tier-2 confirmation
-  - `c10c329` feat(core-server): add trust-gated settings endpoints
-  - `dc5bdbd` feat(security): add fail-closed trust-tier gate
-  - `a25dbc0` feat(security): add pure settings-risk engine and trust-tier policy
-  - `eb2c871` feat(smartbase): add Airtable-like structured data plugin
-  - `49055e7` feat(core): crash-safe atomic storage and fail-loud corruption handling
-- Test suite: **322 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **dirty**: PeerSite Fase 1 + Fase 2 (below) are implemented
-  and tested but NOT yet committed/pushed (commit only when asked).
+- Test suite: **358 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: PeerSite Fase 3 (below) is implemented and tested
+  but NOT yet committed/pushed (commit only when asked).
 
 ## What exists / is done
 
@@ -319,7 +316,7 @@ only — no HTTP serving, no UI components yet.
   triggers nothing; exact medium; high; critical; aggregate scales to critical;
   severity-sorted ordering). Total suite now **308 tests, 0 failures**.
 
-## PeerSite — Fase 1: static serve (loopback-only, hardened) (NOT yet committed)
+## PeerSite — Fase 1: static serve (loopback-only, hardened) (committed)
 
 Second phase: hardened static file serving from a user-chosen directory in
 `apps/core-server`, strictly loopback-only. No dynamic `/peersite/*` API, no
@@ -349,7 +346,7 @@ scoped credentials, no LAN exposure yet.
   escape, dotfile/dot-dir deny, data-dir rejection at startup, and
   disabled-by-default.
 
-## PeerSite — Fase 2: scoped agent API & LAN opt-in (NOT yet committed)
+## PeerSite — Fase 2: scoped agent API & LAN opt-in (committed)
 
 Third phase: a scoped `/peersite/*` API plus explicit LAN opt-in, still in
 `apps/core-server`. No friends/P2P discovery, no TLS/fingerprint work yet.
@@ -381,6 +378,58 @@ Third phase: a scoped `/peersite/*` API plus explicit LAN opt-in, still in
   fail-closed and approving execute-skill, message auth + rate limit, LAN
   refuse-without-flags and serve-with-flags). Total suite now **322 tests, 0
   failures**.
+
+## PeerSite — Fase 3: PeerSite as a plugin + shared containment (NOT yet committed)
+
+Fourth phase: the site-root ownership and file containment move out of
+`apps/core-server` into a real `plugins/peersite` plugin, with the P2P
+`fetchAsset` surface on top. This is the "P2P published site" leg of the
+creator workflow.
+
+- **New plugin `plugins/peersite`** (`generic`, entry `./dist/index.js`),
+  owning the site-root config in its own `ctx.storage`:
+  - `peersite.setSiteRoot` — `localOnly: true, httpExposed: true` (reachable
+    only over the authenticated HTTP bridge, so the desktop shell configures
+    the site without any network exposure). Validates via `validateSiteRoot`
+    and persists the raw path; returns the canonical realpath.
+  - `peersite.status` — `localOnly: false`, returns `{ online, peerName,
+    siteRootConfigured }`.
+  - `peersite.fetchAsset` — `localOnly: false`, tier-2 P2P asset read. Fail-
+    closed: `authenticateIncomingPeer` first (verified-contact challenge over
+    `peersite.signAuthChallenge`, domain `p2p-hub:peersite:auth:v1:`), then
+    `resolveAndContainFile`. Returns base64 `data` + `contentType` + `name`,
+    or `{ ok:false }` (auth failure → `unauthorized`, containment failure →
+    `not found`, never which-path-exists to an unverified peer).
+  - `peersite.signAuthChallenge` — `localOnly: false`, signs
+    `PEERSITE_AUTH_CONTEXT || nonce` (never caller-chosen bytes), mirroring
+    `contacts.signChallenge` but domain-separated.
+- **Shared containment in `core/src/site/site-files.ts`** (exported from
+  `@p2p-hub/core`):
+  - `validateSiteRoot(siteRoot, dataDir)` → canonical realpath, throws loudly
+    on missing/unresolvable root or a root equal to / inside the data dir.
+  - `resolveAndContainFile(siteRoot, requestedPath)` → canonical file path or
+    `null` (quiet per-request denial): dot-segments/dotfiles/backslashes/NUL
+    default-denied, `realpath` containment with a trailing-separator-anchored
+    prefix check (symlink escape blocked), directory → `index.html`.
+  - `contentTypeForPath` (extension-only MIME, moved out of `app.ts`).
+- **`apps/core-server` refactor**: `CoreServerOptions.siteRoot` is **removed**.
+  `initSite()` now only resolves the LAN gate (`lanSiteAllowed`); the effective
+  root is read per request via `host.getActivated("peersite")` behind a
+  `typeof`-guarded `PeerSitePlugin` interface (`effectiveSiteRoot()`), so the
+  shell can configure the root after boot. `tryServeSite` uses
+  `resolveAndContainFile` — the same helper as `fetchAsset`, so HTTP and P2P
+  accept/reject identical paths by construction.
+- **`ctx.dataDir`**: `PluginContext` gained a read-only `dataDir` (from a new
+  `StorageManager.getDataDir()`), so the plugin can validate the site root
+  against the data directory without core exposing anything wider.
+- Tests: new `core/src/site/site-files.test.ts` (8) + `plugins/peersite/src/
+  peersite.test.ts` (10: config persistence + data-dir/missing rejections,
+  fetchAsset denied for pending/unknown/no-trust/no-network, served for a
+  verified peer, traversal/symlink/dotfile/backslash deny, and a direct
+  HTTP↔P2P parity assertion against `resolveAndContainFile`).
+  `apps/core-server/src/peersite.test.ts` now loads only the peersite plugin
+  (copied + a `node_modules` symlink) and configures the root via the bridge.
+  Total suite now **358 tests, 0 failures**.
 
 ## Tests added in this pass
 

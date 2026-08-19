@@ -8,6 +8,11 @@ export class StorageManager {
 
   constructor(private readonly dataDir: string) {}
 
+  /** The host data directory every plugin's storage is rooted under. */
+  getDataDir(): string {
+    return this.dataDir;
+  }
+
   getOrCreate(pluginId: string): ScopedStorage {
     let storage = this.storages.get(pluginId);
     if (!storage) {

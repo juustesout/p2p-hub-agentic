@@ -121,6 +121,12 @@ export interface PluginContext {
     get(key: string): Promise<unknown>;
     list(prefix?: string): Promise<string[]>;
   } | null;
+  /**
+   * Absolute path of the host data directory. Read-only; exposed so a plugin
+   * can validate a user-supplied path against it (e.g. the PeerSite site root
+   * must not live inside the agent data directory). Never a secret.
+   */
+  dataDir: string;
   hooks: HookContext;
   skills: SkillContext;
   ai: AIContext;
