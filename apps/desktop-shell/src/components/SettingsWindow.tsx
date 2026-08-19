@@ -13,6 +13,8 @@ const DEFAULTS: EffectiveSettings = {
   unrestrictedRemoteSkills: false,
   allowExternalApiExecution: false,
   localVaultStorage: false,
+  peersiteEnabled: false,
+  peersiteLanExposed: false,
 };
 
 interface Field {

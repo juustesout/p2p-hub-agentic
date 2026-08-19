@@ -14,6 +14,8 @@ const CRITICAL = {
   unrestrictedRemoteSkills: true,
   allowExternalApiExecution: true,
   localVaultStorage: true,
+  peersiteEnabled: false,
+  peersiteLanExposed: false,
 };
 
 const SAFE = {
@@ -22,6 +24,8 @@ const SAFE = {
   unrestrictedRemoteSkills: false,
   allowExternalApiExecution: false,
   localVaultStorage: false,
+  peersiteEnabled: false,
+  peersiteLanExposed: false,
 };
 
 async function startServer(

@@ -14,6 +14,8 @@ const SAFE: EffectiveSettings = {
   unrestrictedRemoteSkills: false,
   allowExternalApiExecution: false,
   localVaultStorage: false,
+  peersiteEnabled: false,
+  peersiteLanExposed: false,
 };
 
 function withOverrides(
@@ -80,6 +82,105 @@ test("medium rule: exposed hub + local vault storage", () => {
   );
   assert.equal(result.aggregate, "medium");
   assert.ok(result.findings.some((f) => f.id === "WARN_P2P_VAULT_EXPOSURE"));
+});
+
+test("peersite disabled triggers nothing, regardless of lan exposure", () => {
+  const lanOn = evaluateSettingsRisk(
+    withOverrides({ peersiteEnabled: false, peersiteLanExposed: true }),
+  );
+  assert.equal(lanOn.aggregate, "none");
+  assert.deepEqual(lanOn.findings, []);
+
+  const bothOff = evaluateSettingsRisk(
+    withOverrides({ peersiteEnabled: false, peersiteLanExposed: false }),
+  );
+  assert.deepEqual(bothOff.findings, []);
+});
+
+test("peersite enabled + lan exposed yields exactly the medium warning", () => {
+  const result = evaluateSettingsRisk(
+    withOverrides({ peersiteEnabled: true, peersiteLanExposed: true }),
+  );
+  assert.equal(result.aggregate, "medium");
+  assert.deepEqual(result.findings, [
+    {
+      id: "WARN_PEERSITE_LAN_EXPOSURE",
+      severity: "medium",
+      message:
+        "PeerSite is exposed on the local network (LAN). Anyone on your Wi-Fi/network can read your published site assets.",
+      affectedFields: ["peersiteEnabled", "peersiteLanExposed"],
+    },
+  ]);
+});
+
+test("peersite lan exposure + unrestricted remote skills triggers high", () => {
+  const result = evaluateSettingsRisk(
+    withOverrides({
+      peersiteEnabled: true,
+      peersiteLanExposed: true,
+      unrestrictedRemoteSkills: true,
+    }),
+  );
+  assert.equal(result.aggregate, "high");
+  const finding = result.findings.find(
+    (f) => f.id === "WARN_PEERSITE_UNRESTRICTED_SKILLS",
+  );
+  assert.ok(finding);
+  assert.equal(finding.severity, "high");
+  assert.deepEqual(finding.affectedFields, [
+    "peersiteEnabled",
+    "peersiteLanExposed",
+    "unrestrictedRemoteSkills",
+  ]);
+  // The base medium warning still fires alongside the high finding.
+  assert.ok(
+    result.findings.some((f) => f.id === "WARN_PEERSITE_LAN_EXPOSURE"),
+  );
+});
+
+test("peersite lan exposure + external api execution triggers critical", () => {
+  const result = evaluateSettingsRisk(
+    withOverrides({
+      peersiteEnabled: true,
+      peersiteLanExposed: true,
+      allowExternalApiExecution: true,
+    }),
+  );
+  assert.equal(result.aggregate, "critical");
+  const finding = result.findings.find(
+    (f) => f.id === "ERR_EXPOSED_PEERSITE_EXECUTION",
+  );
+  assert.ok(finding);
+  assert.equal(finding.severity, "critical");
+  assert.deepEqual(finding.affectedFields, [
+    "peersiteEnabled",
+    "peersiteLanExposed",
+    "allowExternalApiExecution",
+  ]);
+});
+
+test("peersite findings are sorted highest severity first", () => {
+  const result = evaluateSettingsRisk(
+    withOverrides({
+      peersiteEnabled: true,
+      peersiteLanExposed: true,
+      unrestrictedRemoteSkills: true,
+      allowExternalApiExecution: true,
+    }),
+  );
+  assert.equal(result.aggregate, "critical");
+  // severity order is critical > high > high (cross-rule) > medium.
+  const severities = result.findings.map((f) => f.severity);
+  assert.deepEqual(severities, ["critical", "high", "high", "medium"]);
+  assert.deepEqual(
+    result.findings.map((f) => f.id),
+    [
+      "ERR_EXPOSED_PEERSITE_EXECUTION",
+      "ERR_REMOTE_EXTERNAL_API_ACCESS",
+      "WARN_PEERSITE_UNRESTRICTED_SKILLS",
+      "WARN_PEERSITE_LAN_EXPOSURE",
+    ],
+  );
 });
 
 test("all findings are returned, sorted highest severity first", () => {

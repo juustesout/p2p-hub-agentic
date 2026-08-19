@@ -21,6 +21,11 @@ export interface EffectiveSettings {
   allowExternalApiExecution: boolean;
   /** True when the vault is stored locally (vs. a remote/HSM-backed store). */
   localVaultStorage: boolean;
+  /** Master switch for the PeerSite feature (default false). */
+  peersiteEnabled: boolean;
+  /** True when PeerSite binds beyond loopback and advertises via mDNS
+   * (default false). */
+  peersiteLanExposed: boolean;
 }
 
 /** Ordered risk severity. Individual findings are never `none`; only the
@@ -35,6 +40,8 @@ export interface RiskFinding {
   severity: Exclude<RiskSeverity, "none">;
   /** Short human-readable explanation of the risk. */
   message: string;
+  /** The settings fields this finding is about (informational, for UI). */
+  affectedFields?: string[];
 }
 
 /** Result of a risk evaluation: all findings plus the aggregate severity. */
@@ -83,6 +90,8 @@ export function normalizeSettings(
     unrestrictedRemoteSkills: s.unrestrictedRemoteSkills === true,
     allowExternalApiExecution: s.allowExternalApiExecution === true,
     localVaultStorage: s.localVaultStorage === true,
+    peersiteEnabled: s.peersiteEnabled === true,
+    peersiteLanExposed: s.peersiteLanExposed === true,
   };
 }
 
@@ -90,8 +99,13 @@ function finding(
   id: string,
   severity: Exclude<RiskSeverity, "none">,
   message: string,
+  affectedFields?: string[],
 ): RiskFinding {
-  return { id, severity, message };
+  const result: RiskFinding = { id, severity, message };
+  if (affectedFields) {
+    result.affectedFields = affectedFields;
+  }
+  return result;
 }
 
 const SEVERITY_DESC: Record<Exclude<RiskSeverity, "none">, number> = {
@@ -138,6 +152,47 @@ export function evaluateSettingsRisk(
         "WARN_P2P_VAULT_EXPOSURE",
         "medium",
         "The vault is stored locally while the P2P hub is exposed beyond loopback.",
+      ),
+    );
+  }
+
+  if (s.peersiteEnabled && s.peersiteLanExposed) {
+    findings.push(
+      finding(
+        "WARN_PEERSITE_LAN_EXPOSURE",
+        "medium",
+        "PeerSite is exposed on the local network (LAN). Anyone on your Wi-Fi/network can read your published site assets.",
+        ["peersiteEnabled", "peersiteLanExposed"],
+      ),
+    );
+  }
+
+  if (
+    s.peersiteEnabled &&
+    s.peersiteLanExposed &&
+    s.unrestrictedRemoteSkills
+  ) {
+    findings.push(
+      finding(
+        "WARN_PEERSITE_UNRESTRICTED_SKILLS",
+        "high",
+        "Exposing PeerSite to the LAN while unrestricted remote skills are enabled allows external network clients to potentially trigger local skill execution.",
+        ["peersiteEnabled", "peersiteLanExposed", "unrestrictedRemoteSkills"],
+      ),
+    );
+  }
+
+  if (
+    s.peersiteEnabled &&
+    s.peersiteLanExposed &&
+    s.allowExternalApiExecution
+  ) {
+    findings.push(
+      finding(
+        "ERR_EXPOSED_PEERSITE_EXECUTION",
+        "critical",
+        "CRITICAL: PeerSite is visible to the network and external API execution is allowed without restriction. Remote actors can drive arbitrary automated tasks.",
+        ["peersiteEnabled", "peersiteLanExposed", "allowExternalApiExecution"],
       ),
     );
   }
