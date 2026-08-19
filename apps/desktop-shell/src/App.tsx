@@ -6,6 +6,7 @@ import { StartMenu } from "./components/StartMenu";
 import { PeerInspector } from "./components/PeerInspector";
 import { HermesSidebar } from "./components/HermesSidebar";
 import { VaultModal } from "./components/VaultModal";
+import { SettingsWindow } from "./components/SettingsWindow";
 import { Toasts } from "./components/Toasts";
 import { WindowManager, type ManagedWindow } from "./components/WindowManager";
 
@@ -60,6 +61,9 @@ export default function App() {
       <PeerInspector />
     ));
 
+  const openSettings = () =>
+    openWindow("settings", "Settings", () => <SettingsWindow />);
+
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-950">
       {/* Desktop backdrop */}
@@ -85,6 +89,10 @@ export default function App() {
             openPeerInspector();
             setStartOpen(false);
           }}
+          onOpenSettings={() => {
+            openSettings();
+            setStartOpen(false);
+          }}
         />
       )}
 
@@ -97,6 +105,7 @@ export default function App() {
         onToggleHermes={() => setHermesOpen((v) => !v)}
         onOpenVault={() => setVaultOpen(true)}
         onOpenInspector={openPeerInspector}
+        onOpenSettings={openSettings}
       />
     </div>
   );

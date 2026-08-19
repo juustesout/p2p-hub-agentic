@@ -4,6 +4,13 @@ export type ConnectionState =
   | "reconnecting"
   | "offline";
 
+export type {
+  EffectiveSettings,
+  RiskAssessment,
+  RiskFinding,
+  RiskSeverity,
+} from "@p2p-hub/sdk";
+
 export interface CapabilityPlugin {
   id: string;
   name: string;

@@ -1,15 +1,21 @@
 import { useMemo, useState } from "react";
 import { useApp } from "../state/AppState";
 import type { CapabilitySkill, RemotePeer } from "../types";
-import { Search, KeyRound, Network, Puzzle } from "lucide-react";
+import { Search, KeyRound, Network, Puzzle, Settings } from "lucide-react";
 
 interface StartMenuProps {
   onClose: () => void;
   onOpenVault: () => void;
   onOpenInspector: () => void;
+  onOpenSettings: () => void;
 }
 
-export function StartMenu({ onClose, onOpenVault, onOpenInspector }: StartMenuProps) {
+export function StartMenu({
+  onClose,
+  onOpenVault,
+  onOpenInspector,
+  onOpenSettings,
+}: StartMenuProps) {
   const { capabilities, execute } = useApp();
   const [query, setQuery] = useState("");
 
@@ -145,6 +151,15 @@ export function StartMenu({ onClose, onOpenVault, onOpenInspector }: StartMenuPr
               <Network size={16} />
             </span>
             <span className="text-sm text-slate-100">Peer & Capability Inspector</span>
+          </button>
+          <button
+            onClick={onOpenSettings}
+            className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left glass-hover"
+          >
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-500/20 text-slate-300">
+              <Settings size={16} />
+            </span>
+            <span className="text-sm text-slate-100">Settings</span>
           </button>
         </div>
       </div>

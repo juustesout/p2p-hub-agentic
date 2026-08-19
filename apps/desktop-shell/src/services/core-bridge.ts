@@ -2,7 +2,9 @@ import type {
   ActivityEvent,
   Capabilities,
   ConnectionState,
+  EffectiveSettings,
   ExecuteRequest,
+  RiskAssessment,
   TaskResult,
   VaultKeyMeta,
   VaultModelInfo,
@@ -127,6 +129,43 @@ export class CoreBridge {
     return this.request(`/api/vault/${encodeURIComponent(key)}`, {
       method: "DELETE",
     });
+  }
+
+  async getSettings(): Promise<{
+    settings: EffectiveSettings;
+    risk: RiskAssessment;
+  }> {
+    return this.request("/api/settings");
+  }
+
+  async applySettings(settings: EffectiveSettings): Promise<{
+    ok: boolean;
+    risk?: RiskAssessment;
+    requiredTier?: number;
+    error?: string;
+  }> {
+    const token = await resolveBootToken();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const res = await fetch("/api/settings/apply", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(settings),
+    });
+    const body = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      risk?: RiskAssessment;
+      requiredTier?: number;
+      error?: string;
+    } | null;
+    return {
+      ok: res.ok,
+      risk: body?.risk,
+      requiredTier: body?.requiredTier,
+      error: body?.error,
+    };
   }
 
   // -------------------------------------------------------------------

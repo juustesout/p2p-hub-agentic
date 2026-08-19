@@ -23,4 +23,13 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    commonjsOptions: {
+      // @p2p-hub/sdk is a CommonJS workspace package symlinked out of
+      // node_modules; include its dist so Rollup resolves the named exports
+      // (e.g. `evaluateSettingsRisk`) instead of treating the barrel as an
+      // empty ES module.
+      include: [/node_modules/, /sdk\/dist/],
+    },
+  },
 });

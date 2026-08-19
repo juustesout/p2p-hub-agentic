@@ -35,6 +35,7 @@ interface TaskbarProps {
   onToggleHermes: () => void;
   onOpenVault: () => void;
   onOpenInspector: () => void;
+  onOpenSettings: () => void;
 }
 
 export function Taskbar({
@@ -44,6 +45,7 @@ export function Taskbar({
   onToggleHermes,
   onOpenVault,
   onOpenInspector,
+  onOpenSettings,
 }: TaskbarProps) {
   return (
     <div className="absolute bottom-0 left-0 right-0 z-40 flex items-center justify-center px-3 pb-2">
@@ -96,6 +98,7 @@ export function Taskbar({
           <Search size={20} />
         </button>
         <button
+          onClick={onOpenSettings}
           className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-300 transition-colors hover:bg-white/10"
           aria-label="Settings"
           title="Settings"
