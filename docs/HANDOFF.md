@@ -7,6 +7,8 @@ the repo from scratch. Keep it updated at the end of every task.
 
 - Branch `main`, remote `origin` = `https://github.com/juustesout/p2p-hub-agentic`.
 - Recent commits on `origin/main`:
+  - `a74963d` docs(peersite): add design plan and record Fase 0 status
+  - `21762e7` feat(sdk): add peersite settings flags and risk rules
   - `ef59164` docs(handoff): record smartbase and security-coherence work
   - `155532e` feat(desktop-shell): add blast-radius settings UI and native tier-2 confirmation
   - `c10c329` feat(core-server): add trust-gated settings endpoints
@@ -14,8 +16,8 @@ the repo from scratch. Keep it updated at the end of every task.
   - `a25dbc0` feat(security): add pure settings-risk engine and trust-tier policy
   - `eb2c871` feat(smartbase): add Airtable-like structured data plugin
   - `49055e7` feat(core): crash-safe atomic storage and fail-loud corruption handling
-- Test suite: **308 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **dirty**: PeerSite Fase 0 (below) is implemented and tested
+- Test suite: **315 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: PeerSite Fase 1 (below) is implemented and tested
   but NOT yet committed/pushed (commit only when asked).
 
 ## What exists / is done
@@ -291,7 +293,7 @@ runtime binding and the Rust build happen.
     and any future settings-adjacent logging to confirm they serialize only
     booleans.
 
-## PeerSite — Fase 0: boundaries, settings & risk engine (NOT yet committed)
+## PeerSite — Fase 0: boundaries, settings & risk engine (committed)
 
 First phase of the "local-first creator workflow" initiative (see
 `docs/peersite-plan.md` for the full phased design). Data model + risk rules
@@ -316,6 +318,36 @@ only — no HTTP serving, no UI components yet.
 - Tests: `sdk/src/settings-risk.test.ts` gained 6 new cases (disabled peersite
   triggers nothing; exact medium; high; critical; aggregate scales to critical;
   severity-sorted ordering). Total suite now **308 tests, 0 failures**.
+
+## PeerSite — Fase 1: static serve (loopback-only, hardened) (NOT yet committed)
+
+Second phase: hardened static file serving from a user-chosen directory in
+`apps/core-server`, strictly loopback-only. No dynamic `/peersite/*` API, no
+scoped credentials, no LAN exposure yet.
+
+- `CoreServerOptions.siteRoot?: string` — resolved and validated at startup in
+  `initSite()`: `realpathSync`, a **data-dir block** (site root may never be
+  the agent data dir or a path inside it — this keeps `boot-token`,
+  `settings.json` and vault files out of the served tree), and a **loopback
+  gate** (non-loopback bind disables static serving with a loud warning, not a
+  silent widen).
+- Static route under `/site/*` (`tryServeSite` in `app.ts`):
+  - Pre-check rejects raw `%2e`/`%00`/`..`/null-byte sub-paths, then decodes
+    and re-checks segment-by-segment (dot-segments, dotfiles, backslashes, null
+    bytes). Note: `new URL(...)` already collapses literal and `%2e`-encoded
+    dot segments; the guard that actually fires on the wire is the
+    encoded-slash (`%2f`-based) traversal and the dotfile check.
+  - `realpath` containment: the resolved file must be the real root or a path
+    under it (`startsWith(root + path.sep)`), which blocks symlink escapes.
+  - Directory requests resolve to `index.html` (re-containment-checked).
+  - All rejects are **404** (never 403) to avoid leaking directory structure.
+  - Security headers on every asset: `X-Content-Type-Options: nosniff` +
+    restrictive `Content-Security-Policy`; explicit extension→MIME map with
+    `application/octet-stream` default.
+- Tests: `apps/core-server/src/peersite.test.ts` (7 tests) — valid serving +
+  headers, directory index, traversal (encoded/raw/encoded-slash), symlink
+  escape, dotfile/dot-dir deny, data-dir rejection at startup, and
+  disabled-by-default. Total suite now **315 tests, 0 failures**.
 
 ## Tests added in this pass
 

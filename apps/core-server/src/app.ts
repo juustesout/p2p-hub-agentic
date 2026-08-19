@@ -1,7 +1,10 @@
 import * as http from "node:http";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
+import { isLoopbackHost } from "./host";
 import {
   generateBootToken,
   safeTokenEqual,
@@ -55,6 +58,12 @@ export interface CoreServerOptions {
    * default, which makes every tier-2 settings change fail closed (denied).
    */
   trustConfirmation?: TrustConfirmation;
+  /**
+   * Path to a user-chosen directory served as a static site under `/site/*`.
+   * Optional; when absent, static serving is disabled. Resolved and validated
+   * at startup (realpath containment, data-dir block, loopback-only).
+   */
+  siteRoot?: string;
 }
 
 const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
@@ -63,6 +72,45 @@ const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
 const IDENTIFIER_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 /** Safe identifier for a peer reference (per-boot instance id or persistent peerId). */
 const PEER_ID_RE = /^[a-zA-Z0-9-]{1,128}$/;
+
+/** URL prefix under which the static site is served. */
+const SITE_PREFIX = "/site";
+
+/** Security headers applied to every served static asset. */
+const SITE_SECURITY_HEADERS: Record<string, string> = {
+  "X-Content-Type-Options": "nosniff",
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;",
+};
+
+const SITE_MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+const SITE_DEFAULT_MIME = "application/octet-stream";
+
+/** Explicit, extension-only MIME lookup (never trusts a user-provided type). */
+function SITE_CONTENT_TYPE(extension: string): string {
+  const lower = extension.toLowerCase();
+  return SITE_MIME_TYPES[lower] ?? SITE_DEFAULT_MIME;
+}
 
 interface ExecuteBody {
   peerId?: string;
@@ -92,6 +140,7 @@ export class CoreServer {
   private peerTimer: NodeJS.Timeout | null = null;
   private bootToken = "";
   private readonly trustGate: TrustTierGate;
+  private siteRootReal: string | null = null;
 
   constructor(options: CoreServerOptions) {
     this.options = options;
@@ -108,6 +157,8 @@ export class CoreServer {
     await this.host.boot();
 
     this.bootToken = this.resolveBootToken();
+
+    this.initSite();
 
     this.registerCoreSkills();
     this.bridgeHookEvents();
@@ -316,6 +367,9 @@ export class CoreServer {
     }
 
     try {
+      if (await this.tryServeSite(req, res, path)) {
+        return;
+      }
       if (req.method === "GET" && path === "/api/health") {
         return this.sendJson(res, 200, { ok: true, uptime: process.uptime() });
       }
@@ -424,6 +478,143 @@ export class CoreServer {
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Static site serving (loopback-only, hardened)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Attempt to serve a request from the configured site root. Returns `true`
+   * (and writes a response) when the request targeted the `/site` prefix;
+   * returns `false` so the caller can continue routing when it did not.
+   *
+   * Hardening: raw `..`/`%2e`/`%00` segments are rejected before decoding, the
+   * decoded sub-path is re-checked segment-by-segment (dot-segments, dotfiles,
+   * backslashes, null bytes), and the final file is resolved with `realpath`
+   * and required to stay under the real site root (blocks symlink escapes).
+   * Every reject is a 404 — never 403 — to avoid leaking directory structure.
+   */
+  private async tryServeSite(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ): Promise<boolean> {
+    const root = this.siteRootReal;
+    if (!root) {
+      return false;
+    }
+    if (pathname !== SITE_PREFIX && !pathname.startsWith(SITE_PREFIX + "/")) {
+      return false;
+    }
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      this.sendSiteEmpty(res, 405, false);
+      return true;
+    }
+
+    const rawSubpath = pathname.slice(SITE_PREFIX.length);
+    if (
+      /%2e/i.test(rawSubpath) ||
+      /%00/i.test(rawSubpath) ||
+      rawSubpath.includes("..") ||
+      rawSubpath.includes("\0")
+    ) {
+      this.sendSiteEmpty(res, 404, false);
+      return true;
+    }
+
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSubpath);
+    } catch {
+      this.sendSiteEmpty(res, 404, false);
+      return true;
+    }
+
+    const segments = decoded.split("/").filter((segment) => segment.length > 0);
+    for (const segment of segments) {
+      // Dot-segments (`.`, `..`) and dotfiles (`.env`, `.git`) all begin with
+      // a dot and are default-denied. Backslashes and null bytes are never
+      // valid in a served path.
+      if (
+        segment.startsWith(".") ||
+        segment.includes("\\") ||
+        segment.includes("\0")
+      ) {
+        this.sendSiteEmpty(res, 404, false);
+        return true;
+      }
+    }
+
+    let candidate = path.join(root, ...segments);
+    try {
+      candidate = fs.realpathSync(candidate);
+    } catch {
+      this.sendSiteEmpty(res, 404, false);
+      return true;
+    }
+    if (candidate !== root && !candidate.startsWith(root + path.sep)) {
+      this.sendSiteEmpty(res, 404, false);
+      return true;
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(candidate);
+    } catch {
+      this.sendSiteEmpty(res, 404, false);
+      return true;
+    }
+
+    if (stat.isDirectory()) {
+      try {
+        const index = fs.realpathSync(path.join(candidate, "index.html"));
+        if (index !== root && !index.startsWith(root + path.sep)) {
+          this.sendSiteEmpty(res, 404, false);
+          return true;
+        }
+        candidate = index;
+      } catch {
+        this.sendSiteEmpty(res, 404, false);
+        return true;
+      }
+    }
+
+    let contents: Buffer;
+    try {
+      contents = await fsp.readFile(candidate);
+    } catch {
+      this.sendSiteEmpty(res, 404, false);
+      return true;
+    }
+
+    this.sendSiteFile(res, req.method === "HEAD", contents, candidate);
+    return true;
+  }
+
+  private sendSiteEmpty(
+    res: http.ServerResponse,
+    status: number,
+    withHeaders: boolean,
+  ): void {
+    res.writeHead(status, withHeaders ? SITE_SECURITY_HEADERS : {});
+    res.end();
+  }
+
+  private sendSiteFile(
+    res: http.ServerResponse,
+    headOnly: boolean,
+    contents: Buffer,
+    filePath: string,
+  ): void {
+    const contentType = SITE_CONTENT_TYPE(path.extname(filePath));
+    res.writeHead(200, {
+      ...SITE_SECURITY_HEADERS,
+      "Content-Type": contentType,
+      "Content-Length": contents.length,
+    });
+    res.end(headOnly ? undefined : contents);
+  }
+
+  // ---------------------------------------------------------------------
   private buildCapabilities(): unknown {
     const plugins = this.host.listPlugins().map((p) => ({
       id: p.id,
@@ -601,6 +792,48 @@ export class CoreServer {
       safeTokenEqual(tokenFromAuthorization(req.headers.authorization), this.bootToken) ||
       safeTokenEqual(tokenFromQuery(req), this.bootToken)
     );
+  }
+
+  /**
+   * Resolve and validate `options.siteRoot` at startup. Static serving is
+   * loopback-only: a non-loopback bind disables the site with a loud warning
+   * (no silent widening). The resolved realpath is the canonical root for
+   * containment on every request.
+   */
+  private initSite(): void {
+    const siteRoot = this.options.siteRoot;
+    if (!siteRoot) {
+      this.siteRootReal = null;
+      return;
+    }
+
+    const host = this.options.host ?? "127.0.0.1";
+    if (!isLoopbackHost(host)) {
+      console.warn(
+        "[core-server] PeerSite: siteRoot configured but the bridge is not " +
+          "bound to loopback; static serving is refused (loopback-only).",
+      );
+      this.siteRootReal = null;
+      return;
+    }
+
+    let rootReal: string;
+    try {
+      rootReal = fs.realpathSync(path.resolve(siteRoot));
+    } catch {
+      throw new Error(
+        `PeerSite siteRoot "${siteRoot}" does not exist or cannot be resolved`,
+      );
+    }
+
+    const dataReal = fs.realpathSync(this.options.dataDir);
+    if (rootReal === dataReal || rootReal.startsWith(dataReal + path.sep)) {
+      throw new Error(
+        "PeerSite siteRoot must not be the agent data directory or a path inside it",
+      );
+    }
+
+    this.siteRootReal = rootReal;
   }
 
   private sendJson(
