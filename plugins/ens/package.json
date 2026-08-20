@@ -1,0 +1,22 @@
+{
+  "name": "@p2p-hub/ens",
+  "version": "0.1.0",
+  "description": "ENS name -> verified peerId discovery (cross-signed, fail-closed)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@adraffy/ens-normalize": "^1.11.1",
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/sdk": "0.1.0",
+    "unicode-confusables": "^0.1.1",
+    "viem": "^2.55.19"
+  },
+  "license": "MIT"
+}

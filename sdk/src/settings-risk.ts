@@ -26,6 +26,12 @@ export interface EffectiveSettings {
   /** True when PeerSite binds beyond loopback and advertises via mDNS
    * (default false). */
   peersiteLanExposed: boolean;
+  /** True when ENS name resolution is enabled (default false). Deliberately
+   * NOT part of the persisted settings shape: `normalizeSettings` does not emit
+   * it, and `evaluateSettingsRisk` reads it from the raw input only. A future
+   * wiring layer (e.g. reading the ens plugin's stored config) passes it
+   * explicitly. */
+  ensEnabled?: boolean;
 }
 
 /** Ordered risk severity. Individual findings are never `none`; only the
@@ -124,6 +130,12 @@ export function evaluateSettingsRisk(
 ): RiskAssessment {
   const s = normalizeSettings(settings);
 
+  // `ensEnabled` is a risk-engine input read from the raw settings, not from
+  // the normalized output — see the field's doc comment. Adding this rule must
+  // not change the persisted settings shape.
+  const ensEnabled =
+    (settings as Partial<EffectiveSettings> | undefined)?.ensEnabled === true;
+
   const findings: RiskFinding[] = [];
 
   if (s.p2pHubExposed && s.chatAutoNotify && s.unrestrictedRemoteSkills) {
@@ -163,6 +175,17 @@ export function evaluateSettingsRisk(
         "medium",
         "PeerSite is exposed on the local network (LAN). Anyone on your Wi-Fi/network can read your published site assets.",
         ["peersiteEnabled", "peersiteLanExposed"],
+      ),
+    );
+  }
+
+  if (ensEnabled) {
+    findings.push(
+      finding(
+        "WARN_ENS_RESOLUTION_ENABLED",
+        "medium",
+        "ENS name resolution is enabled; name lookups are sent to a third-party RPC provider.",
+        ["ensEnabled"],
       ),
     );
   }

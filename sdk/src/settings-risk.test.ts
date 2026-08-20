@@ -84,6 +84,28 @@ test("medium rule: exposed hub + local vault storage", () => {
   assert.ok(result.findings.some((f) => f.id === "WARN_P2P_VAULT_EXPOSURE"));
 });
 
+test("ens resolution enabled triggers exactly the medium warning", () => {
+  const result = evaluateSettingsRisk(withOverrides({ ensEnabled: true }));
+  assert.equal(result.aggregate, "medium");
+  assert.deepEqual(result.findings, [
+    {
+      id: "WARN_ENS_RESOLUTION_ENABLED",
+      severity: "medium",
+      message:
+        "ENS name resolution is enabled; name lookups are sent to a third-party RPC provider.",
+      affectedFields: ["ensEnabled"],
+    },
+  ]);
+});
+
+test("ens resolution disabled triggers nothing", () => {
+  const result = evaluateSettingsRisk(
+    withOverrides({ ensEnabled: false }),
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.aggregate, "none");
+});
+
 test("peersite disabled triggers nothing, regardless of lan exposure", () => {
   const lanOn = evaluateSettingsRisk(
     withOverrides({ peersiteEnabled: false, peersiteLanExposed: true }),
