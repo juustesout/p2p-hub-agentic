@@ -5,6 +5,9 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveAndContainFile, validateSiteRoot } from "./site-files";
+import { canCreateSymlinksSync } from "../test-support";
+
+const SYMLINKS_OK = canCreateSymlinksSync();
 
 async function makeDir(prefix: string): Promise<string> {
   return fsp.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -80,7 +83,7 @@ test("resolveAndContainFile denies traversal, dotfiles and backslashes", async (
   }
 });
 
-test("resolveAndContainFile denies a symlink escaping the root", async () => {
+test("resolveAndContainFile denies a symlink escaping the root", { skip: !SYMLINKS_OK && "symlinks unavailable in this environment" }, async () => {
   const root = await makeDir("sitefiles-root-");
   const outside = await makeDir("sitefiles-out-");
   await fsp.writeFile(path.join(outside, "secret.txt"), "top secret");

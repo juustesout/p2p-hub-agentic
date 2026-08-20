@@ -16,6 +16,7 @@ export * from "./task-broker/task-broker";
 export * from "./task-broker/wire-network";
 export * from "./identity/peer-auth";
 export * from "./site/site-files";
+export * from "./test-support";
 
 import { IdentityManager } from "./identity/identity-manager";
 

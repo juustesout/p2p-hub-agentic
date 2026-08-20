@@ -25,7 +25,7 @@ async function waitFor<T>(
 }
 
 function generateSelfSignedCert(): { key: string; cert: string } {
-  const keys = forge.pki.rsa.generateKeyPair(1024);
+  const keys = forge.pki.rsa.generateKeyPair(2048);
   const cert = forge.pki.createCertificate();
   cert.publicKey = keys.publicKey;
   cert.serialNumber = "01" + forge.util.bytesToHex(forge.random.getBytesSync(16));

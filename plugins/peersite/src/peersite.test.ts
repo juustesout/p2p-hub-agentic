@@ -5,6 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  canCreateSymlinksSync,
   DisposerBag,
   HookRegistry,
   loadPlugin,
@@ -235,14 +236,10 @@ test("fetchAsset serves a file to a verified peer", async () => {
 // fetchAsset — containment (traversal / symlink / dotfile / escape)
 // ---------------------------------------------------------------------------
 
-test("fetchAsset denies traversal, dotfiles, backslashes and symlink escapes", async () => {
+test("fetchAsset denies traversal, dotfiles and backslashes", async () => {
   const { plugin, peerId } = await loadPeerSite();
-  const { root, dataDir } = await makeSite();
+  const { root } = await makeSite();
   await plugin.setSiteRoot(root);
-
-  // Symlink pointing outside the site root (a data-dir "escape").
-  await fs.writeFile(path.join(dataDir, "secret.txt"), "top secret");
-  await fs.symlink(path.join(dataDir, "secret.txt"), path.join(root, "leak.txt"));
 
   const denied = [
     "..", // dot-segment
@@ -251,7 +248,6 @@ test("fetchAsset denies traversal, dotfiles, backslashes and symlink escapes", a
     ".env", // dotfile
     "..\\secret.txt", // backslash traversal
     "sub/../..", // traversal via directory
-    "leak.txt", // symlink escape
   ];
 
   for (const p of denied) {
@@ -259,6 +255,23 @@ test("fetchAsset denies traversal, dotfiles, backslashes and symlink escapes", a
     assert.equal(result.ok, false, `expected denial for ${JSON.stringify(p)}`);
   }
 });
+
+test(
+  "fetchAsset denies a symlink escaping the site root",
+  { skip: !canCreateSymlinksSync() && "symlinks unavailable in this environment" },
+  async () => {
+    const { plugin, peerId } = await loadPeerSite();
+    const { root, dataDir } = await makeSite();
+    await plugin.setSiteRoot(root);
+
+    // Symlink pointing outside the site root (a data-dir "escape").
+    await fs.writeFile(path.join(dataDir, "secret.txt"), "top secret");
+    await fs.symlink(path.join(dataDir, "secret.txt"), path.join(root, "leak.txt"));
+
+    const result = await plugin.fetchAsset({ peerId, path: "leak.txt" });
+    assert.equal(result.ok, false, "expected denial for symlink escape");
+  },
+);
 
 // ---------------------------------------------------------------------------
 // HTTP <-> P2P parity

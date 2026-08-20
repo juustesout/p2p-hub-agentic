@@ -6,14 +6,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { WebSocket } from "ws";
 import { CoreServer } from "./app";
-import type { TrustConfirmation } from "@p2p-hub/core";
+import { canCreateSymlinksSync, type TrustConfirmation } from "@p2p-hub/core";
 
 const TOKEN = "peersite-test-token";
 
 /** Source of the compiled peersite plugin, copied into each temp pluginsDir. */
 const PEERSITE_SRC = path.resolve(__dirname, "../../../plugins/peersite");
-/** Repo node_modules, symlinked so the copied plugin resolves `@p2p-hub/*`. */
-const REPO_NODE_MODULES = path.resolve(__dirname, "../../../node_modules");
+/**
+ * Temp dirs for tests that boot a real PluginHost. Placed under the repo's
+ * `node_modules/.cache` so a copied plugin's `require("@p2p-hub/*")` resolves by
+ * walking up to the repo's own `node_modules` — no symlink needed, which would
+ * fail on Windows without Developer Mode / elevation.
+ */
+const TEST_TMP_ROOT = path.resolve(__dirname, "../../../node_modules/.cache/p2p-hub-test");
+const SYMLINKS_OK = canCreateSymlinksSync();
 
 interface StartOptions {
   siteRoot?: string;
@@ -28,19 +34,19 @@ async function startServer(opts: StartOptions = {}): Promise<{
   port: number;
   dataDir: string;
 }> {
+  await fs.mkdir(TEST_TMP_ROOT, { recursive: true });
   const dataDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), "core-server-peersite-data-"),
+    path.join(TEST_TMP_ROOT, "core-server-peersite-data-"),
   );
   const pluginsDir = path.join(dataDir, "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
 
   // Load only the peersite plugin. `fs.cp` (not a symlink) so the host's
-  // `readdir(...).isDirectory()` scan sees a real directory; the node_modules
-  // symlink lets the copied entry resolve `@p2p-hub/core`/`@p2p-hub/sdk`.
+  // `readdir(...).isDirectory()` scan sees a real directory; `@p2p-hub/*`
+  // resolves because the temp dir lives inside the repo's node_modules tree.
   await fs.cp(PEERSITE_SRC, path.join(pluginsDir, "peersite"), {
     recursive: true,
   });
-  await fs.symlink(REPO_NODE_MODULES, path.join(pluginsDir, "node_modules"), "dir");
 
   if (opts.settings) {
     await fs.writeFile(
@@ -223,7 +229,7 @@ test("path traversal returns 404 and leaks nothing outside the root", async () =
   }
 });
 
-test("symlink pointing outside the site root is denied", async () => {
+test("symlink pointing outside the site root is denied", { skip: !SYMLINKS_OK && "symlinks unavailable in this environment" }, async () => {
   const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "peersite-out-"));
   await fs.writeFile(path.join(outsideDir, "secret.txt"), "top secret");
   const siteDir = await makeSiteRoot();

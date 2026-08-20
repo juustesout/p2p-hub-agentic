@@ -30,7 +30,17 @@ test("atomicWriteFile writes exact content and leaves no temp file behind", asyn
   );
 
   const stat = await fs.stat(file);
-  assert.equal(stat.mode & 0o777, 0o600, "default mode must be owner-only 0600");
+  if (process.platform === "win32") {
+    // NTFS has no POSIX mode bits; chmod maps to the read-only flag only, so
+    // the strongest observable guarantee is that the 0600 write did not make
+    // the file read-only.
+    assert.ok(
+      (stat.mode & 0o200) !== 0,
+      "on Windows the file must remain owner-writeable",
+    );
+  } else {
+    assert.equal(stat.mode & 0o777, 0o600, "default mode must be owner-only 0600");
+  }
 });
 
 test("a write that fails before rename leaves the target unchanged", async () => {

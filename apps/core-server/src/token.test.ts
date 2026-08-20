@@ -16,6 +16,22 @@ import {
 
 const TOKEN = "test-token-123";
 
+/**
+ * NTFS has no POSIX mode bits: chmod only toggles the read-only flag, so the
+ * strongest observable guarantee on Windows is that the 0600 write left the
+ * file owner-writeable. On POSIX the exact 0600 mode is asserted.
+ */
+function assertOwnerOnlyMode(stat: { mode: number }, file: string): void {
+  if (process.platform === "win32") {
+    assert.ok(
+      (stat.mode & 0o200) !== 0,
+      `${file} must be owner-writeable on Windows`,
+    );
+  } else {
+    assert.equal(stat.mode & 0o777, 0o600, `${file} must be owner-only 0600`);
+  }
+}
+
 async function startServer(): Promise<{ server: CoreServer; port: number; dataDir: string }> {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "core-server-token-"));
   const pluginsDir = path.join(dataDir, "plugins");
@@ -70,7 +86,7 @@ test("the boot token is persisted to a 0600 file in the data directory", async (
   assert.equal(written, file);
 
   const stat = await fs.stat(file);
-  assert.equal(stat.mode & 0o777, 0o600);
+  assertOwnerOnlyMode(stat, file);
   assert.equal((await fs.readFile(file, "utf8")).trim(), token);
 
   // A file carried over from a prior boot with looser perms is normalised to
@@ -78,7 +94,7 @@ test("the boot token is persisted to a 0600 file in the data directory", async (
   await fs.writeFile(file, "stale-token", { mode: 0o644 });
   const token2 = generateBootToken();
   writeBootToken(dataDir, token2);
-  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+  assertOwnerOnlyMode(await fs.stat(file), file);
   assert.equal((await fs.readFile(file, "utf8")).trim(), token2);
 });
 
