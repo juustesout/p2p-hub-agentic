@@ -1,131 +1,134 @@
-# plan.md — p2p-hub: visie & routekaart (Fase 0 → 2)
+# plan.md — p2p-hub: definitieve routekaart & architectuurbeslissingen
 
-Doel van dit document: een gedeeld beeld zodat Gemini, Claude, ChatGPT, Hermes en
-Monkey op één lijn zitten over **wat** we bouwen en **in welke volgorde**. Het is
-geen spec; het is de prioriteitenladder.
+Dit document vervangt de eerdere open beslisvragen. Het is de **technische
+opdracht**: niet opnieuw breed herontwerpen; waar details ontbreken eerst code
+inspecteren en bestaande security-/architectuurprincipes behouden.
 
-## Visie (kort)
+## Doel
 
-Het fundament (transport, plugins, core-server, Tauri-shell, security-reflexen) is
-er en draait — 378 tests groen, netwerk-discovery werkt met een peer. De volgende
-sprong is NIET "meer plugins erbij", maar drie dingen tegelijk:
+Geen "desktop app met wat plugins", maar een **P2P-first desktop suite** waarin
+een lokale peer veilig capabilities/services aanbiedt aan andere peers.
 
-1. **Fundering cross-platform betrouwbaar maken** (Windows is nu de zwakke schakel).
-2. **Protocollen expliciet en gepind maken** zodat ze tegen *onvertrouwde* peers
-   kunnen, niet alleen tegen onze eigen twee nodes op één machine.
-3. **Eerste-klas plugin-ontwikkelervaring + veilige distributie**, zodat "dikke
-   professionele plugins" door derden gebouwd kunnen worden zonder dat wij hun code
-   hoeven te vertrouwen.
+```
+Identity → Discovery → Authenticated P2P transport → Versioned protocol
+        → Scoped capabilities/services → Plugins / Peer Apps
+```
 
-Multi-peer testen is de toetssteen van élke fase: elke fase eindigt met een
-concreet meerpeers-scenario dat moet slagen.
+P2P-exposure is een primaire protocol-laag, niet alleen HTTP. De later komende
+statische-website-functionaliteit is hier een concreet voorbeeld: een peer
+publiceert een lokale directory via het P2P-protocol voor geautoriseerde peers,
+zonder publieke HTTP-webserver.
 
----
+## Fase 0 — Fundering en testbaarheid (volledig betrouwbaar vóór nieuw werk)
 
-## Fase 0 — Fundering: kunnen we vertrouwen wat we hebben?
+- **0A Cross-platform CI** — GitHub Actions op Linux + Windows: `tsc -b`,
+  alle tests, `cargo check`, relevante smoke/integration tests. Windows-issues
+  mogen niet terugkeren.
+- **0B Multi-peer testlab** — in de monorepo (`apps/testlab`), meerdere
+  onafhankelijke `PluginHost`s, echte netwerkcommunicatie, min. A↔B↔C met een
+  network-exposed capability-aanroep. Uitvoerbaar in CI. "378 tests groen" is
+  géén bewijs voor correct P2P — multi-peer integration tests zijn een aparte
+  kwaliteitslaag.
+- **0C mDNS geen capability-lek** — mDNS is uitsluitend discovery/bootstrap.
+  Adverteer géén skill-namen; alleen peerId/node-identity, IP, poort,
+  protocol/version. Capability-discovery pas na authenticated/encrypted
+  handshake. Onbekende LAN-peer kan uit mDNS niet afleiden welke skills bestaan.
+- **0D Expliciete network exposure** — `P2P_HUB_HOST=0.0.0.0` mag nooit
+  automatisch de bridge publiek maken; expliciete opt-in `P2P_HUB_EXPOSE=1`;
+  local-only core-server blijft mogelijk; networking blijft achter dezelfde
+  identity/vault/security gates als `PluginHost.boot()`.
+- **0E Storage concurrency** — cross-process locking rond het bestaande
+  atomic-write (temp → fsync → rename blijft), de hele write onder een
+  cross-process lock. Gedrag expliciet verifiëren op Windows én Linux.
 
-**Klaar vóór we met meerdere peers gaan testen. Alles hier is korte klus (dagen).**
+## Fase 1 — Protocolcontract vóór verdere uitbreiding
 
-### 1. Cross-platform CI + testlab
-GitHub Actions: Windows runner (en Linux) → `tsc -b`, `npm test`, `cargo check`.
-De Windows-only hang in core is net gefixt, maar dit moet structureel gevangen
-worden — anders regresseert het. Bouw meteen een **multi-peer smoke-test** in de
-CI: 2–3 PluginHosts (in-process, real network-light) die elkaars network-exposed
-skill aanroepen. Dat is de eerste "meerdere peers"-test die we überhaupt hebben.
+Regel: **een P2P-peer is een onbetrouwbare externe actor**, ook op eigen
+machine/LAN.
 
-### 2. mDNS skill-naam-lek dichten
-`network-light` adverteert nu álle lokale skill-namen via mDNS, óók `localOnly` /
-niet-network-exposed. Wordt op de broker correct afgewezen, maar het **lekt wél
-welke skills bestaan** aan iedereen op de LAN (staat als open follow-up in
-CLAUDE.md). Fix: alleen namen adverteren die door een `network:skill:<id>.<name>`
-permissie zijn gedekt. Essentieel omdat "meerdere peers" = "onbekende peers
-luisteren mee".
+- **1A Protocol-versionering eerst** — elk externally-triggerable protocol krijgt
+  protocol-ID, versie, capabilities, expliciet wire contract; onbekende versies
+  default-deny; canonicalisatie expliciet in het contract (geen gedeelde TS
+  constructor-afhankelijkheid). Handshake onderhandelt versie/capabilities/limits.
+- **1B Daarna identity binding / cert-pinning** — claimed PeerID ↔
+  cryptografische identity ↔ transport identity als één verifieerbare keten.
+  Bestaande `p2p-hub:peersite:auth:v1` blijft onderdeel. Nooit
+  `rejectUnauthorized: false` als oplossing.
+- **1C Peer-level abuse protection** — broker-level limits per peer: requests,
+  payload-size (hergebruik `validatePayloadSize`), concurrent tasks, eventueel
+  bandwidth/queue. Test expliciet met: onbekende identity, replay, malformed,
+  oversized payload, flood.
 
-### 3. Expliciete opt-in voor netwerk-blootstelling + local-only core-server
-`P2P_HUB_HOST=0.0.0.0` mag niet impliciet de bridge openleggen; forceer een
-expliciete, losse `P2P_HUB_EXPOSE=1` (staat als open follow-up). Daarnaast: een
-"local-only mode" voor de core-server die de identity/vault-afhankelijkheid
-achter networking gated (zoals `PluginHost.boot()` al doet) — anders faalt een
-lokale installatie hard op een corrupte vault.
+## Fase 2 — Peer Apps en veilige distributie
 
----
+- **2A peer-app = algemeen capability-model** — Peersite is het prototype. Een
+  plugin mag een remote service aanbieden, nooit "remote execute arbitrary
+  skill". Gates: verified contact **of** access pass, altijd capability-scoped.
+- **2B Plugin security** — derde-partij plugins geen automatische
+  OS/fs/netwerk-rechten; plugin-UI declaratief, geen shell/OS-authoriteit;
+  autoriteitsgrens blijft de bestaande capability-matrix
+  (UI → scoped bridge → PluginContext → core).
+- **2C Plugin distributie** — scaffold, manifest-signing (Ed25519),
+  signature-verificatie bij install/load, unieke plugin identity, oplossing voor
+  dotted skill-ID-collisions. Géén marketplace vóór signing+identity correct zijn.
 
-## Fase 1 — Protocol verstevigen: vertrouwen zonder transport-trust
+## Belangrijke richting: P2P Static Websites (vanaf Fase 2)
 
-**De kern van "protocollen strenghtenen". Nadruk: expliciete wire-contracten en
-pinning — niet vertrouwen op "we praten alleen met onszelf".**
+Een peer publiceert een lokale directory als P2P-website (bijv.
+`C:\Sites\juust.eth\`); een geautoriseerde peer haalt `/juust.eth/about.html`
+op via het P2P-protocol. Géén verpakte HTTP-server — een capability bovenop het
+transport. Wire protocol bijv. `p2p-hub:website:v1`: expliciete requests, path
+validation, payload limits, default-deny; alleen binnen een geconfigureerde
+root; absolute paden en `..`-traversal onmogelijk.
 
-### 4. Transport-identiteit pinnen op geclaimde identiteit
-Peersite Fase 3 authenticatie is challenge-response proof-of-possession over de
-TLS-sessie (`p2p-hub:peersite:auth:v1:`). De aangekondigde vervolgstap: de
-**certificaat-fingerprint van de peer verifiëren tegen de contactrecord** via het
-mDNS TXT side-channel (nooit `rejectUnauthorized: false`). Dit maakt de
-transportlaag zelf gepind op wie de peer beweert te zijn — de grootste
-vertrouwenssprong die we kunnen maken.
+## ENS als toekomstige naming/discovery-adapter
 
-### 5. Expliciete protocol-versionering & wire-contracten
-Chat's canonical message is nu `JSON.stringify` met vaste key-volgorde — dat is
-alleen correct zolang beide kanten dezelfde `canonicalMessage`-constructor
-delen. Zet vóór een tweede onafhankelijke implementatie een expliciete
-byte-template-canonicalisatie en een handshake met versie + capabilities.
-Regel: elk protocol dat een peer van buiten kan triggeren krijgt een versie-veld
-én een default-deny voor onbekende versies.
+Ontwerp nu een adapter-interface zodat ENS later slechts een
+resolver/discovery-plugin is ("wie/waar moet ik zoeken?"), los van P2P ("hoe
+praat ik met die peer?") en website-service ("welke bestanden mag die peer
+zien?"). Geen blockchain-afhankelijkheid als vereiste; de website werkt ook met
+directe PeerID/contactrecord.
 
-### 6. Cross-process storage-locking + Windows-verificatie
-Twee instances tegen hetzelfde storage-dir racen nu op "wie schrijft als laatst".
-Met meerdere testers wordt dit reëel. Plan een write-with-lock architectuur op
-het gedeelde `atomicWriteFile`-pad (temp + fsync + rename blijft, maar binnen
-een lock). Verifieer daarnaast de rename-over-bestaand-bestand-semantiek op
-Windows — alles is tot nu toe alleen op Linux getest.
+## Teststrategie (elke fase eindigt met echte multi-peer tests)
 
-### 7. Peer-level rate-limiting & quota op de broker
-Peersite-knock heeft 1/uur in-memory; dat is het enige peer-level limiet. Voor
-multi-peer moet de broker per-peer inkomende task-snelheid en payload-quota
-kunnen limiteren (payload-quota bestaat al via `validatePayloadSize`). Zonder
-dit is een onvertrouwde peer één systeemaanval verwijderd van een flood.
+- **Fase 0:** 2–3 hosts, LAN discovery, authenticated capability call,
+  Windows + Linux.
+- **Fase 1:** min. 3 peers (A honest, B honest, C malicious): spoofed identity,
+  replay, malformed protocol, unsupported version, capability probing,
+  rate flood, oversized payload, concurrent storage access.
+- **Fase 2:** 4+ peers: third-party plugin, signed manifest, capability
+  permissions, peer-app access, prototype static website service
+  (A HTML → P2P → B renderable, zonder publieke HTTP-server).
 
----
+## Niet doen nu
 
-## Fase 2 — Dikke professionele plugins & distributie
+Marketplace, complexe plugin store, volledige ENS-integratie, blockchain als
+runtime dependency, IPFS als verplichte storage, willekeurige remote code
+execution, capability discovery via onbeveiligd mDNS, HTTP bridge als
+vervanging van het P2P-protocol.
 
-**Voorwaarde voor "we maken hier een product van".**
+## Kern volgorde
 
-### 8. Plugin-scaffold + declaratieve config-UI
-Eén `create-p2p-plugin` template en één "thick plugin"-contract: manifest-ui,
-skill-metadata (beschrijvingen, schemas), declaratieve `exposedEvents`. Doel:
-elke plugin krijgt automatisch een consistent instellingenvenster en
-toestemmingsmatrix in de shell, zonder dat elke plugin zijn eigen UI/security
-hoeft te timmeren. Dit is wat "dikke professionele plugin" betekent in deze
-architectuur — en het verlaagt de drempel voor derden.
+```
+Cross-platform → Multi-peer → Explicit protocol → Identity binding
+→ Capability security → Peer Apps → P2P Website → ENS naming adapter
+```
 
-### 9. Manifest-signing (ed25519) + id-collisie-oplossing
-Plugins van derden vergen verificatie van herkomst: onderteken het manifest
-(`manifest.signature`), verifieer bij install/load, en los het dotted-id-probleem
-op (`"a.b"` en `"a"` kunnen nu dezelfde broker-skill-key claimen). Dit is het
-fundament voor een marketplace, **zonder** meteen een store te bouwen.
+## Eindcriterium
 
-### 10. Peer-app-model veralgemenen (peersite → algemene capability)
-Peersite heeft als eerste plugin een veilige remote-toegangsmodus (containment,
-access-passes, verified-contact gate). Generaliseer dat tot een `peer-app`
-capability zodat elke plugin een beveiligde web/remote-modus kan krijgen met
-dezelfde gates: verified-contact **of** access-pass, nooit `execute-skill`. Dat
-is het moment waarop het product niet meer "een desktop met plugins" is, maar
-"een P2P-suite waarin peers elkaars apps draaien".
+Geslaagd wanneer een lokale machine veilig kan zeggen: "Dit is mijn peer
+identity. Ik expose deze specifieke capability aan deze peer. Eén van mijn
+capabilities is een statische website. De website staat lokaal op mijn disk.
+Een andere peer kan hem via het P2P-protocol ophalen, zonder dat ik een
+publieke webserver hoef te draaien."
 
----
+## Status / voortgang
 
-## Multi-peer testplan (rode draad, per fase)
-
-- **Fase 0:** CI smoke-test met 2–3 hosts in-process; daarna twee echte
-  machines + één browser-dev shell.
-- **Fase 1:** drie machines, één daarvan "kwaadaardig" (gokt identiteit, replays,
-  floot). Iedere protocol-verandering eindigt met zo'n scenario.
-- **Fase 2:** vier+ peers met plugins van "derde partij" (gesigneerde manifests).
-
-## Beslisvragen voor het overleg met de modellen
-
-1. Klopt de volgorde — Fase 0 eerst, of willen jullie een ander punt naar voren?
-2. Punt 4 (cert-pinning) of punt 5 (protocol-versionering) eerst in Fase 1?
-3. Is de `peer-app`-generalisatie (10) de juiste vorm voor "dikke plugins", of
-   moet de plugin-UI juist méér mogen (config-UI dieper in de shell)?
-4. Waar hoort het testlab te leven: aparte repo/scripts, of in `apps/`?
+- **Fase 0**
+  - 0A CI — `.github/workflows/ci.yml` (Linux+Windows, Node 20/22, tsc -b, tests, cargo check). GEDONE.
+  - 0B Testlab — `apps/testlab`, A↔B↔C mesh + direct + chained call, test + manual runner. GEDONE (groen lokaal; CI-netwerkgedrag nog te bevestigen op runners).
+  - 0C mDNS-lek — nog niet gestart.
+  - 0D Exposure — `decideBindHost`/`P2P_HUB_EXPOSE` bestaat; local-only core-server nog niet.
+  - 0E Storage locking — nog niet gestart.
+- **Fase 1** — nog niet gestart.
+- **Fase 2** — nog niet gestart.

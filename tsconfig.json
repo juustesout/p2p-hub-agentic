@@ -17,6 +17,7 @@
     { "path": "./plugins/chat" },
     { "path": "./plugins/tasks" },
     { "path": "./plugins/smartbase" },
-    { "path": "./apps/core-server" }
+    { "path": "./apps/core-server" },
+    { "path": "./apps/testlab" }
   ]
 }

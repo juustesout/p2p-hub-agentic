@@ -1,0 +1,17 @@
+{
+  "name": "@p2p-hub/testlab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-peer integration lab: boots several independent PluginHosts and exercises real P2P communication",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\"",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/sdk": "0.1.0"
+  },
+  "license": "MIT"
+}
