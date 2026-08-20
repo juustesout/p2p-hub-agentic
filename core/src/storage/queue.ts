@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { withFileLock } from "./file-lock";
 
 /**
  * Serializes asynchronous tasks per filesystem path.
@@ -7,6 +8,11 @@ import * as path from "node:path";
  * tasks for *different* paths are independent and may run concurrently. This is
  * the in-memory mutex that prevents lost updates and interleaved writes when
  * several callers hit the same storage file at once.
+ *
+ * Every task additionally runs under the cross-process lock for its path (see
+ * {@link withFileLock}), so the whole read-modify-write is also atomic against
+ * a *second process* writing the same file — the in-memory chain alone cannot
+ * serialize two separate app instances.
  *
  * A failing task rejects its own caller but never blocks the chain: the next
  * task for that path still runs.
@@ -23,7 +29,10 @@ export class FileWriteQueue {
   enqueue<T>(filePath: string, task: () => Promise<T>): Promise<T> {
     const key = path.resolve(filePath);
     const previous = this.queues.get(key) ?? Promise.resolve();
-    const run = previous.then(task, task);
+    const run = previous.then(
+      () => withFileLock(key, task),
+      () => withFileLock(key, task),
+    );
     this.queues.set(
       key,
       run.then(

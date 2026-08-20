@@ -42,15 +42,16 @@ test("50 concurrent vault.setSecret calls commit every key", async () => {
 });
 
 test("FileWriteQueue serializes same-path tasks but lets distinct paths run", async () => {
+  const dir = await makeTmpDir("resilience-queue-");
   const queue = new FileWriteQueue();
   const order: number[] = [];
 
   await Promise.all([
-    queue.enqueue("/tmp/shared/p", async () => {
+    queue.enqueue(path.join(dir, "p"), async () => {
       await new Promise((r) => setTimeout(r, 30));
       order.push(1);
     }),
-    queue.enqueue("/tmp/shared/p", async () => {
+    queue.enqueue(path.join(dir, "p"), async () => {
       order.push(2);
     }),
   ]);

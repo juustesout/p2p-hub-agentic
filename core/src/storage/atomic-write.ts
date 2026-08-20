@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { withFileLock } from "./file-lock";
 
 /**
  * Thrown when an existing storage file is present on disk but could not be
@@ -55,14 +56,21 @@ export interface AtomicWriteFileHandle {
  *
  * `mode` defaults to `0o600`: vault and identity data are secrets, and there
  * is no reason plugin storage should be world-readable either.
+ *
+ * The write runs under the cross-process lock for `filePath`, so a direct
+ * writer (e.g. the core-server settings file, which does not go through the
+ * shared write queue) cannot interleave with another process's write to the
+ * same file. Callers that already run inside the queue hold the same lock —
+ * the reentrancy guard in {@link withFileLock} makes that a no-op.
  */
 export async function atomicWriteFile(
   filePath: string,
   data: string,
   mode: number = 0o600,
 ): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  return atomicWriteFileWith(filePath, data, mode, fs);
+  return withFileLock(filePath, () =>
+    atomicWriteFileWith(filePath, data, mode, fs),
+  );
 }
 
 /**
