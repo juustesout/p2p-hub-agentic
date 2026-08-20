@@ -13,8 +13,9 @@ the repo from scratch. Keep it updated at the end of every task.
   - `a74963d` docs(peersite): add design plan and record Fase 0 status
   - `21762e7` feat(sdk): add peersite settings flags and risk rules
   - `ef59164` docs(handoff): record smartbase and security-coherence work
-- Test suite: **358 tests, 0 failures** (`npm run build && npm test` from root).
-- Working tree is **dirty**: PeerSite Fase 3 (below) is implemented and tested
+- Test suite: **378 tests, 0 failures** (`npm run build && npm test` from root).
+- Working tree is **dirty**: PeerSite Fase 4A (ENS, `plugins/ens`) and Fase 4B
+  (access passes + native peer-access confirmation) are implemented and tested
   but NOT yet committed/pushed (commit only when asked).
 
 ## What exists / is done
@@ -430,6 +431,91 @@ creator workflow.
   `apps/core-server/src/peersite.test.ts` now loads only the peersite plugin
   (copied + a `node_modules` symlink) and configures the root via the bridge.
   Total suite now **358 tests, 0 failures**.
+
+## PeerSite — Fase 4A: ENS → verified peerId (plugins/ens, NOT yet committed)
+
+Fifth phase: map an ENS name to a *verified* peer identity. All Web3
+dependencies (`viem`) are isolated in a new `plugins/ens` plugin — `core` and
+`sdk` stay free of any Web3 code. No live network in tests (RPC fully mocked).
+
+- **New plugin `plugins/ens`** (`generic`, entry `./dist/index.js`):
+  - `ens.setConfig` / `ens.getConfig` — persist the ENS config (name + RPC) in
+    `ctx.storage`. `ens.resolve(name)` — the lookup.
+  - **Cross-sign authorization** (EIP-191 `personal_sign`, NOT EIP-712): the
+    resolver must prove the ENS name's owner signed the exact statement
+    `I authorize peer ${peerId} for name ${normalizedEnsName}`. The name's
+    owner is read via `ENS Registry.owner(namehash(name))` and compared
+    lowercased. `recoverMessageAddress` verifies the signature.
+  - **`verified:false` never exposes `peerId`** — the result carries only
+    `claimedPeerId`; the `peerId` field is physically absent until the
+    cross-signature and owner match both hold.
+  - **Homograph warning is UX-only** (not a security boundary): it runs on the
+    *raw* input before `ens_normalize`, so normalized lookalikes (e.g. fullwidth
+    `Ｏ` → `o`) are still flagged. Authorisation stays the cross-signature.
+  - **1h verified-only cache**; `EnsDeps.ensClient` is the injected test seam.
+  - `unicode-confusables@0.1.1` ships a misnamed types file (`index.ts.d`), so
+    `plugins/ens/src/unicode-confusables.d.ts` provides ambient types (fixes
+    TS7016).
+- **`sdk/src/settings-risk.ts`**: `EffectiveSettings` gained `ensEnabled?: boolean`,
+  read *raw* by `evaluateSettingsRisk` (`.ensEnabled === true` →
+  `WARN_ENS_RESOLUTION_ENABLED`, medium) and deliberately NOT emitted by
+  `normalizeSettings` (emitting it broke the core-server settings deep-equal).
+- Tests: `plugins/ens/src/ens.test.ts` (8, RPC mocked, no live network) +
+  `sdk/src/settings-risk.test.ts` cases for the ENS rule. Root `tsconfig.json`
+  gained a `./plugins/ens` reference.
+
+## PeerSite — Fase 4B: access passes + native peer-access confirmation (NOT yet committed)
+
+Sixth phase: let a *non-verified* peer request read-only site access with a
+single, standalone proof-of-possession ("knock"), resolved through a native
+tier-2 confirmation. `execute-skill` stays completely outside this mechanism.
+
+- **`TrustConfirmation.confirmTier2` is now a discriminated union**
+  (`core/src/security/trust-gate.ts`):
+  - `{ kind: "critical-settings"; summary: string }`
+  - `{ kind: "peer-access-request"; peerId: string; claim: string; expiresInMs: number }`
+  - `TrustTierGate.confirmPeerAccess(peerId, claim, expiresInMs)` wraps the
+    peer-access kind and fails closed (no confirmer / throw / user denial →
+    `false`).
+- **Knock proof** (`core/src/identity/peer-auth.ts`): `PEERSITE_KNOCK_CONTEXT =
+  "p2p-hub:peersite:knock:v1:"` + `buildKnockMessage(peerId, claim, timestamp)`.
+  New domain string; never shared with `PEERSITE_AUTH_CONTEXT`.
+- **`plugins/peersite`** new surface:
+  - `peersite.requestAccess` (`localOnly: false`, manifest permission
+    `network:skill:peersite.requestAccess`): payload `{ peerId, claim,
+    timestamp, signature }`, verified against the claimed `peerId` itself (raw
+    public-key hex) — no contacts lookup, no prior handshake, no transport
+    identity. Rejects: invalid peerId/claim/signature, `|now - timestamp| >
+    5 min` (replay window), and >1 accepted knock/peerId/hour (in-memory rate
+    limit, recorded only after a valid proof). A valid knock creates a
+    *pending* request and emits `peersite:accessRequested`.
+  - `peersite.setAcceptIncomingRequests` (`localOnly: true, httpExposed: true`),
+    default **off** — knocks are denied (`not accepting`) until enabled.
+  - `resolveAccessRequest(requestId, approved)` (plugin method, called by the
+    host): on approval mints an ephemeral in-memory `AccessPass`
+    (`scope: "site-read-only"`, 1h TTL) keyed by peerId — never persisted,
+    never a bearer token.
+  - `fetchAsset` pass-check: now proves key possession first
+    (challenge-response via `signAuthChallenge`), then allows either a *verified
+    contact* **or** a valid access pass. A pass only lifts the contact gate; it
+    never touches `execute-skill`.
+- **core-server** (`apps/core-server/src/app.ts`): `registerPeerAccessHandler()`
+  listens for `peersite:accessRequested` → `trustGate.confirmPeerAccess(...)` →
+  `peersite.resolveAccessRequest(...)` (duck-typed via the `PeerSitePlugin`
+  interface). No-confirmer and any confirmation failure are fail-closed.
+- **Desktop shell / Tauri**: `services/trust-confirm.ts` now types
+  `confirmTier2(request: ConfirmationRequest)` (the shape is declared locally —
+  the shell only depends on `@p2p-hub/sdk`, not `@p2p-hub/core`).
+  `SettingsWindow.tsx` passes `{ kind: "critical-settings", summary }`.
+  `src-tauri/src/lib.rs` `request_tier2_confirmation` takes a `#[serde(tag =
+  "kind", rename_all = "kebab-case")]` `ConfirmationRequest` enum and renders
+  the right dialog per kind. **UNVERIFIED**: no Rust toolchain in this
+  environment — needs `cargo build`.
+- Tests: `core/src/security/trust-gate.test.ts` +3 (peer-access kind + fail
+  closed); `plugins/peersite/src/peersite.test.ts` +8 (valid knock + emit, bad
+  signature, stale timestamp, rate limit, default-deny, approved pass serves a
+  non-contact peer, denied request grants nothing, unknown request id).
+  Total suite now **378 tests, 0 failures**.
 
 ## Tests added in this pass
 

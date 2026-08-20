@@ -7,6 +7,7 @@
   "permissions": [
     "network:skill:peersite.status",
     "network:skill:peersite.fetchAsset",
-    "network:skill:peersite.signAuthChallenge"
+    "network:skill:peersite.signAuthChallenge",
+    "network:skill:peersite.requestAccess"
   ]
 }

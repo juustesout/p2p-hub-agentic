@@ -25,12 +25,37 @@ import type { ContactTrustState } from "@p2p-hub/sdk";
 /** Domain-separation context for PeerSite auth. Never reuse in another protocol. */
 export const PEERSITE_AUTH_CONTEXT = "p2p-hub:peersite:auth:v1:";
 
+/**
+ * Domain-separation context for a PeerSite *access request* ("knock") proof.
+ * Distinct from {@link PEERSITE_AUTH_CONTEXT} (the challenge-response path) and
+ * from every other domain in the repo; never reuse in another protocol.
+ */
+export const PEERSITE_KNOCK_CONTEXT = "p2p-hub:peersite:knock:v1:";
+
 /** A peerId is a 64-char hex Ed25519 public key — same rule contacts enforces. */
 export const PEER_ID_RE = /^[0-9a-f]{64}$/;
 
 /** The exact bytes a peer must sign to prove possession: `CONTEXT || nonce`. */
 export function buildAuthMessage(nonce: Buffer): Buffer {
   return Buffer.concat([Buffer.from(PEERSITE_AUTH_CONTEXT, "utf8"), nonce]);
+}
+
+/**
+ * The exact bytes a peer signs to request site access in a single, standalone
+ * round-trip: `PEERSITE_KNOCK_CONTEXT || peerId || ":" || claim || ":" ||
+ * timestamp`. The peerId is the claimed identity (and the verification key);
+ * the timestamp bounds replay to a small window. Never signs caller-chosen
+ * bytes verbatim — the domain prefix makes the message unambiguous.
+ */
+export function buildKnockMessage(
+  peerId: string,
+  claim: string,
+  timestamp: number,
+): Buffer {
+  return Buffer.from(
+    `${PEERSITE_KNOCK_CONTEXT}${peerId}:${claim}:${timestamp}`,
+    "utf8",
+  );
 }
 
 /**

@@ -5,7 +5,26 @@
 
 use std::fs;
 use std::path::PathBuf;
+use serde::Deserialize;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+
+/// A native tier-2 confirmation request. Mirrors the `ConfirmationRequest`
+/// discriminated union in `@p2p-hub/core`; the `kind` tag selects which dialog
+/// to render and which fields are meaningful.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum ConfirmationRequest {
+    CriticalSettings {
+        summary: String,
+    },
+    PeerAccessRequest {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        claim: String,
+        #[serde(rename = "expiresInMs")]
+        expires_in_ms: u64,
+    },
+}
 
 /// Return the per-boot token the core-server writes to `<data-dir>/boot-token`.
 /// The frontend sends it as an `Authorization` header on `/api/*` requests and
@@ -26,27 +45,47 @@ fn get_boot_token() -> Result<String, String> {
         .map_err(|e| format!("failed to read boot token: {e}"))
 }
 
-/// Native tier-2 confirmation for high-risk security settings.
+/// Native tier-2 confirmation for high-risk security changes.
 ///
-/// A `critical` settings change may only be applied after a fresh, explicit
-/// host-level prompt — the JavaScript layer has no `window.confirm` fallback
-/// (the frontend wrapper fails closed if this command is unavailable). The
-/// command is additionally scoped to the main window: plugin panels are iframes
-/// inside the main window, not separate Tauri webviews, and cannot reach this
-/// command in the first place, but the label is re-checked defensively.
+/// A `critical` change (settings or an incoming peer-access request) may only be
+/// applied after a fresh, explicit host-level prompt — the JavaScript layer has
+/// no `window.confirm` fallback (the frontend wrapper fails closed if this
+/// command is unavailable). The command is additionally scoped to the main
+/// window: plugin panels are iframes inside the main window, not separate Tauri
+/// webviews, and cannot reach this command in the first place, but the label is
+/// re-checked defensively.
 #[tauri::command]
 fn request_tier2_confirmation(
     window: tauri::Window,
-    summary: String,
+    request: ConfirmationRequest,
 ) -> Result<bool, String> {
     if window.label() != "main" {
         return Err("tier-2 confirmation is only available from the main window".into());
     }
 
+    let (message, title) = match request {
+        ConfirmationRequest::CriticalSettings { summary } => {
+            (summary, "Apply high-risk security settings?".to_string())
+        }
+        ConfirmationRequest::PeerAccessRequest {
+            peer_id,
+            claim,
+            expires_in_ms,
+        } => {
+            let seconds = expires_in_ms / 1000;
+            (
+                format!(
+                    "Peer {peer_id} requests access ({claim}).\n\nGrant access for {seconds} seconds?"
+                ),
+                "Allow peer access to your site?".to_string(),
+            )
+        }
+    };
+
     let confirmed = window
         .dialog()
-        .message(summary)
-        .title("Apply high-risk security settings?")
+        .message(message)
+        .title(title)
         .buttons(MessageDialogButtons::OkCancel)
         .blocking_show();
 

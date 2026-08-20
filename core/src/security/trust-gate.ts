@@ -23,13 +23,27 @@ export class TrustConfirmationDeniedError extends Error {
 }
 
 /**
+ * A single native-confirmation prompt, discriminated by `kind` so the host can
+ * render the right dialog with exactly the fields it needs — never guessing
+ * which loose positional parameters belong together.
+ */
+export type ConfirmationRequest =
+  | { kind: "critical-settings"; summary: string }
+  | {
+      kind: "peer-access-request";
+      peerId: string;
+      claim: string;
+      expiresInMs: number;
+    };
+
+/**
  * Out-of-band confirmation capability, injected by the host. The only
  * implementation that matters is the desktop shell's native (Tauri host)
  * prompt; there is deliberately no JavaScript fallback (`window.confirm`) here.
  */
 export interface TrustConfirmation {
-  /** Ask the host for a fresh, explicit native confirmation of a tier-2 change. */
-  confirmTier2?(summary: string): Promise<boolean>;
+  /** Ask the host for a fresh, explicit native confirmation. */
+  confirmTier2?(request: ConfirmationRequest): Promise<boolean>;
 }
 
 /** What the gate already knows about the caller before asking for more. */
@@ -88,7 +102,10 @@ export class TrustTierGate {
 
     let confirmed: boolean;
     try {
-      confirmed = await this.confirmation.confirmTier2(summary);
+      confirmed = await this.confirmation.confirmTier2({
+        kind: "critical-settings",
+        summary,
+      });
     } catch {
       throw new TrustConfirmationDeniedError(tier, "confirmation failed");
     }
@@ -98,5 +115,34 @@ export class TrustTierGate {
     }
 
     return tier;
+  }
+
+  /**
+   * Ask the host to confirm an incoming peer-access request (tier 2). Unlike
+   * {@link authorize}, this is not driven by a settings risk severity — a
+   * peer-access request is its own tier-2 prompt — so the gate is consulted
+   * directly for a `peer-access-request` confirmation.
+   *
+   * Fails closed: no confirmer, a confirmer that throws, or a user denial all
+   * resolve to `false`. The caller treats `false` as "deny the request".
+   */
+  async confirmPeerAccess(
+    peerId: string,
+    claim: string,
+    expiresInMs: number,
+  ): Promise<boolean> {
+    if (!this.confirmation.confirmTier2) {
+      return false;
+    }
+    try {
+      return await this.confirmation.confirmTier2({
+        kind: "peer-access-request",
+        peerId,
+        claim,
+        expiresInMs,
+      });
+    } catch {
+      return false;
+    }
   }
 }

@@ -79,16 +79,65 @@ test("a confirmer that throws fails closed", async () => {
   );
 });
 
-test("the confirmer receives the human-readable summary", async () => {
-  let seen = "";
+test("the confirmer receives the critical-settings request", async () => {
+  let seen: unknown = null;
   const gate = new TrustTierGate({
-    confirmTier2: async (summary) => {
-      seen = summary;
+    confirmTier2: async (request) => {
+      seen = request;
       return true;
     },
   });
   await gate.authorize("critical", "expose hub beyond loopback", {
     authenticated: true,
   });
-  assert.equal(seen, "expose hub beyond loopback");
+  assert.deepEqual(seen, {
+    kind: "critical-settings",
+    summary: "expose hub beyond loopback",
+  });
+});
+
+test("confirmPeerAccess forwards the peer-access-request kind and returns true on approval", async () => {
+  let seen: unknown = null;
+  const gate = new TrustTierGate({
+    confirmTier2: async (request) => {
+      seen = request;
+      return true;
+    },
+  });
+  const approved = await gate.confirmPeerAccess(
+    "00".repeat(32),
+    "read your site",
+    3_600_000,
+  );
+  assert.equal(approved, true);
+  assert.deepEqual(seen, {
+    kind: "peer-access-request",
+    peerId: "00".repeat(32),
+    claim: "read your site",
+    expiresInMs: 3_600_000,
+  });
+});
+
+test("confirmPeerAccess fails closed with no confirmer, a denial, or a throw", async () => {
+  const noConfirmer = new TrustTierGate();
+  assert.equal(
+    await noConfirmer.confirmPeerAccess("00".repeat(32), "c", 1_000),
+    false,
+  );
+
+  const denied = new TrustTierGate({ confirmTier2: async () => false });
+  assert.equal(
+    await denied.confirmPeerAccess("00".repeat(32), "c", 1_000),
+    false,
+  );
+
+  const throwing = new TrustTierGate({
+    confirmTier2: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(
+    await throwing.confirmPeerAccess("00".repeat(32), "c", 1_000),
+    false,
+  );
 });

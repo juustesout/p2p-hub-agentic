@@ -120,8 +120,8 @@ test("critical settings are denied by default (no native confirmer)", async () =
 test("critical settings are applied when the native confirmer approves", async () => {
   let summary = "";
   const confirmer: TrustConfirmation = {
-    confirmTier2: async (s) => {
-      summary = s;
+    confirmTier2: async (request) => {
+      summary = request.kind === "critical-settings" ? request.summary : "";
       return true;
     },
   };

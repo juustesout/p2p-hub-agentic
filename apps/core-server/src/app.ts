@@ -107,6 +107,7 @@ interface ExecuteBody {
  */
 interface PeerSitePlugin {
   getSiteRoot(): Promise<string | null>;
+  resolveAccessRequest?(requestId: string, approved: boolean): Promise<boolean>;
 }
 
 /**
@@ -156,6 +157,7 @@ export class CoreServer {
 
     this.registerCoreSkills();
     this.bridgeHookEvents();
+    this.registerPeerAccessHandler();
 
     const remoteSkills = this.broker
       .listSkills()
@@ -278,6 +280,48 @@ export class CoreServer {
       this.host.hookRegistry().on(event, (payload) => {
         this.broadcast(event, payload);
       });
+    }
+  }
+
+  /**
+   * Handle a `peersite:accessRequested` event emitted by the peersite plugin
+   * after it has verified a knock. The request is resolved through the host's
+   * native tier-2 confirmation (`confirmPeerAccess`, fail-closed), then passed
+   * back to the plugin via `resolveAccessRequest`.
+   */
+  private registerPeerAccessHandler(): void {
+    this.host
+      .hookRegistry()
+      .on("peersite:accessRequested", (payload) => {
+        void this.handlePeerAccessRequest(payload);
+      });
+  }
+
+  private async handlePeerAccessRequest(payload: unknown): Promise<void> {
+    const req = (payload ?? {}) as {
+      requestId?: unknown;
+      peerId?: unknown;
+      claim?: unknown;
+      expiresInMs?: unknown;
+    };
+    if (
+      typeof req.requestId !== "string" ||
+      typeof req.peerId !== "string" ||
+      typeof req.claim !== "string" ||
+      typeof req.expiresInMs !== "number"
+    ) {
+      return;
+    }
+
+    const approved = await this.trustGate.confirmPeerAccess(
+      req.peerId,
+      req.claim,
+      req.expiresInMs,
+    );
+
+    const plugin = this.peersite();
+    if (plugin?.resolveAccessRequest) {
+      await plugin.resolveAccessRequest(req.requestId, approved);
     }
   }
 

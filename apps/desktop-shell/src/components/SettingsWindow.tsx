@@ -113,7 +113,10 @@ export function SettingsWindow() {
   const save = async () => {
     setMessage(null);
     if (risk.aggregate === "critical") {
-      const confirmed = await confirmTier2(summaryFor(risk));
+      const confirmed = await confirmTier2({
+        kind: "critical-settings",
+        summary: summaryFor(risk),
+      });
       if (!confirmed) {
         // Roll back any optimistic toggles to the last server-confirmed state.
         setSettings(lastSaved);

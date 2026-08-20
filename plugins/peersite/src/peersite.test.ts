@@ -21,7 +21,7 @@ import type {
   TaskRequest,
   TaskResult,
 } from "@p2p-hub/sdk";
-import { buildAuthMessage } from "@p2p-hub/core";
+import { buildAuthMessage, buildKnockMessage } from "@p2p-hub/core";
 import type { PeerSitePlugin } from "./index";
 
 const pluginDir = path.resolve(__dirname, "..");
@@ -44,6 +44,7 @@ interface LoadOptions {
   trustState?: ContactTrustState | null;
   trustEnabled?: boolean;
   networking?: boolean;
+  hooks?: HookRegistry;
 }
 
 async function loadPeerSite(opts: LoadOptions = {}): Promise<{
@@ -51,6 +52,8 @@ async function loadPeerSite(opts: LoadOptions = {}): Promise<{
   dataDir: string;
   storage: StorageManager;
   peerId: string;
+  privateKey: crypto.KeyObject;
+  hooks: HookRegistry;
 }> {
   const dataDir =
     opts.dataDir ?? (await fs.mkdtemp(path.join(os.tmpdir(), "peersite-data-")));
@@ -63,6 +66,7 @@ async function loadPeerSite(opts: LoadOptions = {}): Promise<{
   const peer = makeKeypair();
   const trustEnabled = opts.trustEnabled ?? true;
   const networking = opts.networking ?? true;
+  const hooks = opts.hooks ?? new HookRegistry();
 
   let registry: NetworkRegistry | null = null;
   if (networking) {
@@ -87,7 +91,7 @@ async function loadPeerSite(opts: LoadOptions = {}): Promise<{
   const plugin = (await loadPlugin(
     pluginDir,
     storage,
-    new HookRegistry(),
+    hooks,
     new TaskBroker(),
     vault,
     undefined,
@@ -96,7 +100,7 @@ async function loadPeerSite(opts: LoadOptions = {}): Promise<{
     trustEnabled ? () => trust : null,
   )) as PeerSitePlugin;
 
-  return { plugin, dataDir, storage, peerId: peer.publicKeyHex };
+  return { plugin, dataDir, storage, peerId: peer.publicKeyHex, privateKey: peer.privateKey, hooks };
 }
 
 function fakeProvider(
@@ -289,4 +293,142 @@ test("fetchAsset and resolveAndContainFile accept/reject exactly the same paths"
       `parity mismatch for ${JSON.stringify(p)}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// requestAccess — inline knock proof-of-possession (phase 4B)
+// ---------------------------------------------------------------------------
+
+function knockInput(
+  peerId: string,
+  privateKey: crypto.KeyObject,
+  claim = "read your site",
+  timestamp = Date.now(),
+) {
+  return {
+    peerId,
+    claim,
+    timestamp,
+    signature: crypto
+      .sign(null, buildKnockMessage(peerId, claim, timestamp), privateKey)
+      .toString("hex"),
+  };
+}
+
+test("requestAccess accepts a valid knock and emits a pending request", async () => {
+  const { plugin, peerId, privateKey, hooks } = await loadPeerSite();
+  await plugin.setAcceptIncomingRequests(true);
+
+  const emitted: unknown[] = [];
+  hooks.on("peersite:accessRequested", (payload) => {
+    emitted.push(payload);
+  });
+
+  const result = await plugin.requestAccess(knockInput(peerId, privateKey));
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.status, "pending");
+    assert.equal(typeof result.requestId, "string");
+  }
+  assert.equal(emitted.length, 1);
+  const payload = emitted[0] as { peerId: string; claim: string };
+  assert.equal(payload.peerId, peerId);
+  assert.equal(payload.claim, "read your site");
+});
+
+test("requestAccess rejects a bad signature", async () => {
+  const { plugin, peerId } = await loadPeerSite();
+  await plugin.setAcceptIncomingRequests(true);
+
+  const result = await plugin.requestAccess({
+    peerId,
+    claim: "read your site",
+    timestamp: Date.now(),
+    signature: "ff".repeat(64),
+  });
+  assert.deepEqual(result, { ok: false, error: "unauthorized" });
+});
+
+test("requestAccess rejects a stale timestamp outside the replay window", async () => {
+  const { plugin, peerId, privateKey } = await loadPeerSite();
+  await plugin.setAcceptIncomingRequests(true);
+
+  const stale = Date.now() - 6 * 60 * 1000;
+  const result = await plugin.requestAccess(
+    knockInput(peerId, privateKey, "c", stale),
+  );
+  assert.deepEqual(result, { ok: false, error: "unauthorized" });
+});
+
+test("requestAccess rate-limits a second knock within the hour", async () => {
+  const { plugin, peerId, privateKey } = await loadPeerSite();
+  await plugin.setAcceptIncomingRequests(true);
+
+  const first = await plugin.requestAccess(knockInput(peerId, privateKey));
+  assert.equal(first.ok, true);
+
+  const second = await plugin.requestAccess(knockInput(peerId, privateKey));
+  assert.deepEqual(second, { ok: false, error: "rate limited" });
+});
+
+test("requestAccess is denied by default when not accepting incoming requests", async () => {
+  const { plugin, peerId, privateKey } = await loadPeerSite();
+
+  const result = await plugin.requestAccess(knockInput(peerId, privateKey));
+  assert.deepEqual(result, { ok: false, error: "not accepting" });
+});
+
+// ---------------------------------------------------------------------------
+// Access pass — fetchAsset pass-check (phase 4B)
+// ---------------------------------------------------------------------------
+
+test("an approved access pass lets a non-contact peer fetch assets read-only", async () => {
+  const { plugin, peerId, privateKey } = await loadPeerSite({
+    trustState: null,
+  });
+  const { root } = await makeSite();
+  await plugin.setSiteRoot(root);
+  await plugin.setAcceptIncomingRequests(true);
+
+  // Unknown peer is denied before any pass exists.
+  const before = await plugin.fetchAsset({ peerId, path: "index.html" });
+  assert.deepEqual(before, { ok: false, error: "unauthorized" });
+
+  const request = await plugin.requestAccess(knockInput(peerId, privateKey));
+  assert.equal(request.ok, true);
+  const requestId = (request as { requestId: string }).requestId;
+
+  await plugin.resolveAccessRequest(requestId, true);
+
+  const after = await plugin.fetchAsset({ peerId, path: "index.html" });
+  assert.equal(after.ok, true);
+  if (after.ok) {
+    assert.equal(
+      Buffer.from(after.data, "base64").toString("utf8"),
+      "<h1>hello</h1>",
+    );
+  }
+});
+
+test("a denied access request does not grant a pass", async () => {
+  const { plugin, peerId, privateKey } = await loadPeerSite({
+    trustState: null,
+  });
+  const { root } = await makeSite();
+  await plugin.setSiteRoot(root);
+  await plugin.setAcceptIncomingRequests(true);
+
+  const request = await plugin.requestAccess(knockInput(peerId, privateKey));
+  assert.equal(request.ok, true);
+  const requestId = (request as { requestId: string }).requestId;
+
+  await plugin.resolveAccessRequest(requestId, false);
+
+  const result = await plugin.fetchAsset({ peerId, path: "index.html" });
+  assert.deepEqual(result, { ok: false, error: "unauthorized" });
+});
+
+test("resolveAccessRequest returns false for an unknown request id", async () => {
+  const { plugin } = await loadPeerSite();
+  assert.equal(await plugin.resolveAccessRequest("does-not-exist", true), false);
 });
