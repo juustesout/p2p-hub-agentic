@@ -19,6 +19,13 @@ import {
 } from "@p2p-hub/sdk";
 
 const SERVICE_TYPE = "p2p-hub";
+/**
+ * Protocol version announced in the mDNS TXT record. mDNS is discovery only —
+ * a peer is found by identity/address, the wire protocol is negotiated on the
+ * authenticated connection (Fase 1A). The version lets a peer refuse to talk
+ * to a future-incompatible neighbour before any bytes are exchanged.
+ */
+const PROTOCOL_VERSION = "1";
 const RESPONSE_TIMEOUT_MS = 10_000;
 /** Peers silent this long are treated as gone even without an mDNS "down". */
 const HEARTBEAT_TTL_MS = 30_000;
@@ -143,12 +150,13 @@ export class NetworkLightProvider implements NetworkProvider {
   }
 
   /**
-   * The skills this instance advertises over mDNS. This is exactly the
-   * constructor-provided set (already filtered by the caller to exclude
-   * local-only skills); exposed read-only so tests can assert the transport
-   * never leaks a local-only skill name onto the LAN.
+   * The skills this instance is configured to serve. This is the caller-provided
+   * capability set (already filtered to exclude local-only skills). It is NOT
+   * broadcast over mDNS (Fase 0C) — capabilities are only exchanged after an
+   * authenticated connection (Fase 1A). Exposed read-only so tests and
+   * inspectors can see the configured set.
    */
-  get advertisedSkills(): string[] {
+  get capabilities(): string[] {
     return [...this.skills];
   }
 
@@ -185,7 +193,11 @@ export class NetworkLightProvider implements NetworkProvider {
       port: this.boundPort,
       txt: {
         id: this.instanceId,
-        skills: JSON.stringify(this.skills),
+        // Fase 0C: mDNS is discovery/bootstrap only. No skill names are
+        // announced — an unauthenticated LAN listener must not learn which
+        // capabilities exist. Capabilities are exchanged after an
+        // authenticated connection (Fase 1A).
+        version: PROTOCOL_VERSION,
         certFingerprint: this.certFingerprint,
         ...(this.identity ? { peerId: this.identity.peerId } : {}),
       },
@@ -244,17 +256,20 @@ export class NetworkLightProvider implements NetworkProvider {
     this.taskHandler = null;
   }
 
-  async discover(skill: string): Promise<NetworkPeer[]> {
+  async discover(_skill: string): Promise<NetworkPeer[]> {
+    // Fase 0C: mDNS no longer announces skills and the post-connection
+    // capability handshake does not exist yet (Fase 1A), so a peer's offered
+    // skills are unknown at discovery time. Return every discovered peer; a
+    // caller that targets a peer without the requested skill gets a clean
+    // rejection from the remote broker.
     const peers: NetworkPeer[] = [];
     for (const peer of this.discovered.values()) {
-      if (peer.skills.includes(skill)) {
-        peers.push({
-          id: peer.id,
-          address: peer.address,
-          skills: peer.skills,
-          name: peer.name,
-        });
-      }
+      peers.push({
+        id: peer.id,
+        address: peer.address,
+        skills: [],
+        name: peer.name,
+      });
     }
     return peers;
   }
@@ -418,20 +433,14 @@ export class NetworkLightProvider implements NetworkProvider {
     if (!address) {
       return;
     }
-    let skills: string[] = [];
-    try {
-      const rawSkills = service.txt?.skills ?? "[]";
-      validateJsonNestingDepth(rawSkills);
-      skills = JSON.parse(rawSkills) as string[];
-    } catch {
-      skills = [];
-    }
     const certFingerprint = service.txt?.certFingerprint as string | undefined;
     const peerId = service.txt?.peerId as string | undefined;
     this.discovered.set(id, {
       id,
       address,
-      skills,
+      // mDNS carries no capabilities (Fase 0C); filled in after the Fase 1A
+      // authenticated capability handshake.
+      skills: [],
       name: service.name,
       certFingerprint,
       peerId,

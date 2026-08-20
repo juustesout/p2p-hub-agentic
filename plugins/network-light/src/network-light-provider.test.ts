@@ -101,7 +101,13 @@ test("two local instances discover each other and exchange a task", async () => 
     });
 
     assert.equal(peers.length, 1);
-    assert.equal(peers[0].skills.includes("echo"), true);
+    // Fase 0C: mDNS must not leak skill names — a discovered peer's skills are
+    // unknown until the post-connection capability handshake (Fase 1A).
+    assert.equal(
+      peers[0].skills.length,
+      0,
+      "mDNS discovery must not reveal any skill names",
+    );
 
     const result = await alice.sendTask(peers[0], {
       id: "task-1",

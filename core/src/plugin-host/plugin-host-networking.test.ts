@@ -147,7 +147,7 @@ test("two hosts reach each other's network-exposed skill via ctx.network", async
   }
 });
 
-test("network-light advertises only network-exposed skills, never local-only ones", async () => {
+test("network-light's capability set excludes local-only skills and is not broadcast", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "host-net-adv-"));
   await writeMixedPlugin(root);
 
@@ -162,17 +162,20 @@ test("network-light advertises only network-exposed skills, never local-only one
 
     const provider = host.networkRegistry().selectActive();
     assert.ok(provider, "network provider should be active after boot");
-    const advertised = (provider as { advertisedSkills?: string[] })
-      .advertisedSkills;
-    assert.ok(advertised, "provider should expose advertisedSkills");
+    const capabilities = (provider as { capabilities?: string[] }).capabilities;
+    assert.ok(capabilities, "provider should expose its configured capabilities");
     assert.ok(
-      advertised.includes("mixed.public"),
-      "network-exposed skill should be advertised",
+      capabilities.includes("mixed.public"),
+      "network-exposed skill should be in the capability set",
     );
     assert.ok(
-      !advertised.includes("mixed.secret"),
-      "local-only skill must never be advertised over mDNS",
+      !capabilities.includes("mixed.secret"),
+      "local-only skill must never be in the capability set",
     );
+    // Fase 0C: the capability set is configured, but it is never broadcast —
+    // mDNS announces identity/address only. What actually reaches the wire is
+    // covered by the network-light provider tests (discovered peers expose no
+    // skills).
   } finally {
     await host.stop();
   }

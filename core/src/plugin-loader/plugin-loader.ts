@@ -367,13 +367,16 @@ function buildNetworkCapability(
     return null;
   }
   return {
-    async discover(skill: string): Promise<NetworkPeer[]> {
+    async discover(_skill: string): Promise<NetworkPeer[]> {
+      // Fase 0C: mDNS announces no capabilities and the post-connection
+      // capability handshake does not exist yet (Fase 1A), so every discovered
+      // peer is returned regardless of skill. The remote broker rejects calls
+      // to skills a peer does not offer.
       const active = registry.selectActive();
       if (!active) {
         return [];
       }
-      const peers = active.listPeers ? active.listPeers() : [];
-      return peers.filter((peer) => peer.skills.includes(skill));
+      return active.listPeers ? active.listPeers() : [];
     },
     async sendTask(peerId: string, task: TaskRequest): Promise<TaskResult> {
       const active = registry.selectActive();
