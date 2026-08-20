@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import type { TaskRequest, TaskResult } from "@p2p-hub/sdk";
 import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
 
@@ -35,19 +36,43 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  *
  * ```
  * hello      client → server
- *   body: { "versions": number[], "capabilities": string[] }
+ *   body: { "versions": number[], "capabilities": string[], "nonce"?: string }
  *   `versions` = the client's supported protocol versions, descending
  *   preference. `capabilities` = the skills the client offers for remote
- *   invocation. `hello` MUST be the first message on a connection.
+ *   invocation. `nonce` = a client-chosen hex nonce (16 bytes) that anchors
+ *   the identity binding (Fase 1B); optional — a peer without an identity may
+ *   omit it and connect anonymously. `hello` MUST be the first message on a
+ *   connection.
  *
  * hello_ack  server → client
- *   body: { "version": number, "capabilities": string[], "limits"?: { "maxPayloadBytes": number } }
+ *   body: { "version": number, "capabilities": string[], "limits"?:
+ *   { "maxPayloadBytes": number }, "nonce"?: string, "identity"?:
+ *   { "peerId": string, "certFingerprint": string, "signature": string } }
  *   The server picks the highest version from the client's `versions` that it
  *   also supports; no intersection ⇒ close the connection. `capabilities` =
  *   the skills the server offers. `limits.maxPayloadBytes` bounds the
  *   serialized envelope length (frame body) the server will accept — a
  *   compliant client refuses to send a larger task without putting it on the
- *   wire.
+ *   wire. `nonce` = a server-chosen hex nonce (16 bytes). `identity` proves
+ *   the server holds the Ed25519 private key behind the claimed `peerId` AND
+ *   that this claim is bound to the TLS transport: `signature` is an Ed25519
+ *   signature over `IDENTITY_BINDING_CONTEXT || clientNonce || ":" ||
+ *   serverNonce || ":" || certFingerprint`, where `certFingerprint` is the
+ *   SHA-256 fingerprint of the certificate actually presented on this
+ *   connection. A client MUST close the connection when a present identity
+ *   fails verification (peerId format, fingerprint mismatch, bad signature).
+ *
+ * auth       client → server
+ *   body: { "peerId": string, "certFingerprint": string, "signature": string }
+ *   Optional proof-of-possession, the mirror image of `hello_ack.identity`:
+ *   sent after `hello_ack`, before any `task`, to bind the client's claimed
+ *   `peerId` to the certificate it presented on this connection. The server
+ *   verifies it exactly like a client verifies `hello_ack.identity`, with the
+ *   `clientNonce`/`serverNonce` exchanged in this connection's handshake. A
+ *   client that sends `auth` but fails verification is closed (default-deny);
+ *   a client that never sends `auth` stays anonymous. A `task` on a
+ *   connection whose `auth` already failed is impossible — the connection is
+ *   already gone.
  *
  * task       client → server
  *   body: { "id": string, "skill": string, "payload": unknown }
@@ -58,12 +83,24 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  *   `error`.
  * ```
  *
+ * ## Identity binding (Fase 1B)
+ *
+ * The `identity`/`auth` fields make the chain "claimed peerId ↔ Ed25519
+ * identity ↔ transport certificate" verifiable in one step. Because the
+ * signed bytes include BOTH nonces AND the certificate fingerprint actually
+ * presented on the wire, a signature recorded on one connection can never be
+ * replayed on another (different cert/nonce), and a peer that claims an id it
+ * does not hold cannot produce a valid signature at all. mDNS remains
+ * bootstrap-only: the `peerId` and `certFingerprint` announced there are
+ * *claims* — this handshake is where they get proven.
+ *
  * ## Default-deny rules
  *
  * - Envelope with unknown protocol / unsupported version → close.
  * - `task` before `hello` → close.
  * - Message type that does not fit the current phase (e.g. `result` sent to a
  *   server, `hello_ack` after the handshake) → close.
+ * - `auth` or `hello_ack.identity` that fails verification → close.
  * - Any message whose body fails structural validation → close.
  */
 
@@ -79,17 +116,54 @@ export const MAX_VERSIONS = 16;
 /** Upper bound on the number of capabilities in `hello`/`hello_ack`. */
 export const MAX_CAPABILITIES = 256;
 
-export type WireMessageType = "hello" | "hello_ack" | "task" | "result";
+/**
+ * Domain-separation context for the Fase 1B identity binding. Signatures over
+ * `CONTEXT || clientNonce || ":" || serverNonce || ":" || certFingerprint` can
+ * never be replayed as signatures in any other domain (contacts, peersite,
+ * chat, …). Deliberately distinct from every other context in the repo; never
+ * reuse.
+ */
+export const IDENTITY_BINDING_CONTEXT = "p2p-hub:network:identity-binding:v1:";
+
+/** A handshake nonce is 16 random bytes, hex-encoded (32 hex chars). */
+export const NONCE_BYTES = 16;
+
+/** A peerId is a 64-char hex Ed25519 public key — same rule contacts enforces. */
+export const PEER_ID_RE = /^[0-9a-f]{64}$/;
+/** A normalized SHA-256 certificate fingerprint is 64 hex chars. */
+export const CERT_FINGERPRINT_RE = /^[0-9a-f]{64}$/;
+/** An Ed25519 signature is 64 bytes, hex-encoded (128 hex chars). */
+export const SIGNATURE_RE = /^[0-9a-f]{128}$/;
+
+export type WireMessageType = "hello" | "hello_ack" | "task" | "result" | "auth";
+
+/**
+ * Proof that the holder of the Ed25519 private key behind `peerId` also owns
+ * the transport certificate with fingerprint `certFingerprint` on this
+ * connection. `signature` verifies under `peerId` over
+ * {@link buildIdentityBindingMessage}.
+ */
+export interface IdentityBinding {
+  peerId: string;
+  certFingerprint: string;
+  signature: string;
+}
 
 export interface HelloBody {
   versions: number[];
   capabilities: string[];
+  /** Client-chosen hex nonce anchoring the identity binding (optional). */
+  nonce?: string;
 }
 
 export interface HelloAckBody {
   version: number;
   capabilities: string[];
   limits?: { maxPayloadBytes?: number };
+  /** Server-chosen hex nonce anchoring the identity binding (optional). */
+  nonce?: string;
+  /** Server identity proof (optional; absent for anonymous servers). */
+  identity?: IdentityBinding;
 }
 
 export interface TaskBody {
@@ -109,7 +183,7 @@ export interface WireEnvelope {
   protocol: string;
   version: number;
   type: WireMessageType;
-  body: HelloBody | HelloAckBody | TaskBody | ResultBody;
+  body: HelloBody | HelloAckBody | TaskBody | ResultBody | IdentityBinding;
 }
 
 function isPositiveInt(value: unknown): value is number {
@@ -131,6 +205,40 @@ function isStringArray(value: unknown, maxLen: number): value is string[] {
     value.length <= maxLen &&
     value.every((s) => typeof s === "string")
   );
+}
+
+/** A handshake nonce: hex, 1..32 bytes (2..64 hex chars). */
+const NONCE_RE = /^[0-9a-f]{2,64}$/;
+
+function isNonce(value: unknown): value is string {
+  return typeof value === "string" && NONCE_RE.test(value);
+}
+
+/**
+ * Strictly validate an identity binding. Returns `null` on any violation so
+ * the caller can default-deny (close) instead of trusting a malformed claim.
+ */
+export function parseIdentityBinding(value: unknown): IdentityBinding | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const b = value as Record<string, unknown>;
+  if (
+    !isHexString(b.peerId, PEER_ID_RE) ||
+    !isHexString(b.certFingerprint, CERT_FINGERPRINT_RE) ||
+    !isHexString(b.signature, SIGNATURE_RE)
+  ) {
+    return null;
+  }
+  return {
+    peerId: b.peerId as string,
+    certFingerprint: b.certFingerprint as string,
+    signature: b.signature as string,
+  };
+}
+
+function isHexString(value: unknown, pattern: RegExp): value is string {
+  return typeof value === "string" && pattern.test(value);
 }
 
 /**
@@ -164,7 +272,8 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
     type !== "hello" &&
     type !== "hello_ack" &&
     type !== "task" &&
-    type !== "result"
+    type !== "result" &&
+    type !== "auth"
   ) {
     return null;
   }
@@ -182,11 +291,18 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
       if (!isStringArray(b.capabilities, MAX_CAPABILITIES)) {
         return null;
       }
+      if (b.nonce !== undefined && !isNonce(b.nonce)) {
+        return null;
+      }
       return {
         protocol: NETWORK_PROTOCOL_ID,
         version: NETWORK_PROTOCOL_VERSION,
         type,
-        body: { versions: b.versions, capabilities: b.capabilities },
+        body: {
+          versions: b.versions,
+          capabilities: b.capabilities,
+          ...(b.nonce !== undefined ? { nonce: b.nonce } : {}),
+        },
       };
     }
     case "hello_ack": {
@@ -194,6 +310,9 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
         return null;
       }
       if (!isStringArray(b.capabilities, MAX_CAPABILITIES)) {
+        return null;
+      }
+      if (b.nonce !== undefined && !isNonce(b.nonce)) {
         return null;
       }
       let limits: { maxPayloadBytes?: number } | undefined;
@@ -218,6 +337,14 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
             : {}),
         };
       }
+      let identity: IdentityBinding | undefined;
+      if (b.identity !== undefined) {
+        const parsed = parseIdentityBinding(b.identity);
+        if (!parsed) {
+          return null;
+        }
+        identity = parsed;
+      }
       return {
         protocol: NETWORK_PROTOCOL_ID,
         version: NETWORK_PROTOCOL_VERSION,
@@ -226,6 +353,8 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
           version: b.version,
           capabilities: b.capabilities,
           limits,
+          ...(b.nonce !== undefined ? { nonce: b.nonce } : {}),
+          ...(identity !== undefined ? { identity } : {}),
         },
       };
     }
@@ -244,6 +373,18 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
         version: NETWORK_PROTOCOL_VERSION,
         type,
         body: { id: b.id, skill: b.skill, payload: b.payload },
+      };
+    }
+    case "auth": {
+      const identity = parseIdentityBinding(body);
+      if (!identity) {
+        return null;
+      }
+      return {
+        protocol: NETWORK_PROTOCOL_ID,
+        version: NETWORK_PROTOCOL_VERSION,
+        type,
+        body: identity,
       };
     }
     case "result": {
@@ -278,12 +419,17 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
 export function encodeHello(
   versions: number[],
   capabilities: string[],
+  nonce?: string,
 ): string {
+  const body: Record<string, unknown> = { versions, capabilities };
+  if (nonce !== undefined) {
+    body.nonce = nonce;
+  }
   return JSON.stringify({
     protocol: NETWORK_PROTOCOL_ID,
     version: NETWORK_PROTOCOL_VERSION,
     type: "hello",
-    body: { versions, capabilities },
+    body,
   });
 }
 
@@ -291,16 +437,33 @@ export function encodeHelloAck(
   version: number,
   capabilities: string[],
   limits?: { maxPayloadBytes?: number },
+  nonce?: string,
+  identity?: IdentityBinding,
 ): string {
   const body: Record<string, unknown> = { version, capabilities };
   if (limits !== undefined && limits.maxPayloadBytes !== undefined) {
     body.limits = { maxPayloadBytes: limits.maxPayloadBytes };
+  }
+  if (nonce !== undefined) {
+    body.nonce = nonce;
+  }
+  if (identity !== undefined) {
+    body.identity = identity;
   }
   return JSON.stringify({
     protocol: NETWORK_PROTOCOL_ID,
     version: NETWORK_PROTOCOL_VERSION,
     type: "hello_ack",
     body,
+  });
+}
+
+export function encodeAuth(identity: IdentityBinding): string {
+  return JSON.stringify({
+    protocol: NETWORK_PROTOCOL_ID,
+    version: NETWORK_PROTOCOL_VERSION,
+    type: "auth",
+    body: identity,
   });
 }
 
@@ -330,6 +493,78 @@ export function encodeResult(result: TaskResult): string {
     type: "result",
     body,
   });
+}
+
+// --- Identity binding (Fase 1B) ------------------------------------------------
+
+/**
+ * The exact bytes a peer signs to bind its claimed identity to this
+ * connection: `CONTEXT || clientNonce || ":" || serverNonce || ":" ||
+ * certFingerprint`. Both nonces are hex as exchanged in the handshake (empty
+ * string when a side has no identity and therefore no nonce); `certFingerprint`
+ * is the normalized (lowercase, colon-stripped) SHA-256 fingerprint of the
+ * certificate the signing side actually presented on this connection. The
+ * context prefix is required — never sign caller-chosen bytes verbatim.
+ */
+export function buildIdentityBindingMessage(
+  clientNonce: string,
+  serverNonce: string,
+  certFingerprint: string,
+): Buffer {
+  return Buffer.from(
+    `${IDENTITY_BINDING_CONTEXT}${clientNonce}:${serverNonce}:${certFingerprint}`,
+    "utf8",
+  );
+}
+
+/** Generate a fresh handshake nonce (hex-encoded {@link NONCE_BYTES}). */
+export function randomNonce(): string {
+  return crypto.randomBytes(NONCE_BYTES).toString("hex");
+}
+
+/**
+ * Verify an identity binding: `signature` must be a valid Ed25519 signature
+ * under the Ed25519 public key `peerId` over
+ * {@link buildIdentityBindingMessage}. Shape is validated first (regexes), so
+ * malformed claims fail fast without touching crypto. Returns `false` (never
+ * throws) on any invalid input.
+ */
+export function verifyIdentityBinding(
+  peerId: string,
+  clientNonce: string,
+  serverNonce: string,
+  certFingerprint: string,
+  signature: string,
+): boolean {
+  if (
+    !isHexString(peerId, PEER_ID_RE) ||
+    !isHexString(certFingerprint, CERT_FINGERPRINT_RE) ||
+    !isHexString(signature, SIGNATURE_RE)
+  ) {
+    return false;
+  }
+  try {
+    const raw = Buffer.from(peerId, "hex");
+    const publicKey = crypto.createPublicKey({
+      key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") },
+      format: "jwk",
+    });
+    return crypto.verify(
+      null,
+      buildIdentityBindingMessage(clientNonce, serverNonce, certFingerprint),
+      publicKey,
+      Buffer.from(signature, "hex"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Normalize a certificate fingerprint for comparison and signing. */
+export function normalizeFingerprint(
+  fingerprint: string | undefined | null,
+): string {
+  return (fingerprint ?? "").replace(/:/g, "").toLowerCase();
 }
 
 export { MAX_PAYLOAD_BYTES };

@@ -11,22 +11,34 @@ import type {
   TaskRequest,
   TaskResult,
 } from "@p2p-hub/sdk";
-import { validateJsonNestingDepth, validateObjectDepth } from "@p2p-hub/sdk";
+import { validateJsonNestingDepth, validateObjectDepth, validatePayloadSize } from "@p2p-hub/sdk";
 import {
   HANDSHAKE_TIMEOUT_MS,
   MAX_CAPABILITIES,
   MAX_PAYLOAD_BYTES,
   NETWORK_PROTOCOL_VERSION,
+  buildIdentityBindingMessage,
+  encodeAuth,
   encodeHello,
   encodeHelloAck,
   encodeResult,
   encodeTask,
   mDNS_PROTOCOL_VERSION,
   negotiateVersion,
+  normalizeFingerprint,
   parseEnvelope,
+  randomNonce,
+  verifyIdentityBinding,
   type HelloAckBody,
+  type HelloBody,
+  type IdentityBinding,
   type TaskBody,
 } from "./wire-contract";
+import {
+  DEFAULT_PEER_LIMITS,
+  PeerLimiter,
+  type PeerLimitConfig,
+} from "./peer-limiter";
 
 const SERVICE_TYPE = "p2p-hub";
 const RESPONSE_TIMEOUT_MS = 10_000;
@@ -48,9 +60,24 @@ export interface NetworkLightOptions {
   /**
    * Optional persistent identity. When present, its `peerId` is advertised in
    * the mDNS TXT record alongside (not instead of) the session
-   * `certFingerprint`. Informational in this stage — no logic depends on it.
+   * `certFingerprint`. The claim is proven over the wire: see
+   * {@link NetworkLightOptions.identitySigner}.
    */
   identity?: PeerIdentity;
+  /**
+   * Capability that signs bytes with the Ed25519 private key behind
+   * {@link NetworkLightOptions.identity}. Required to take part in the Fase 1B
+   * identity binding (client `auth` and server `hello_ack.identity`). The
+   * private key stays with the caller (typically core's `IdentityManager`) —
+   * the provider only ever receives signed bytes. Omit to run anonymous.
+   */
+  identitySigner?: (data: Buffer) => Promise<Buffer>;
+  /**
+   * Per-peer abuse limits (Fase 1C). When provided, keys are merged over
+   * {@link DEFAULT_PEER_LIMITS}. A peer that exceeds any limit is refused,
+   * never queued.
+   */
+  peerLimits?: Partial<PeerLimitConfig>;
   /**
    * Maximum serialized envelope length this instance accepts on a single
    * incoming message. Advertised in the handshake as `limits.maxPayloadBytes`
@@ -70,8 +97,19 @@ export interface DiscoveredPeer extends NetworkPeer {
   name?: string;
   /** SHA-256 fingerprint of the peer's self-signed cert, announced via mDNS. */
   certFingerprint?: string;
-  /** Persistent peer identity, announced via mDNS (optional). */
+  /**
+   * Persistent peer identity. Filled from the mDNS TXT claim at discovery
+   * time, but only trusted once the Fase 1B handshake verified it — see
+   * {@link DiscoveredPeer.peerIdVerified}.
+   */
   peerId?: string;
+  /**
+   * True when `peerId` was cryptographically verified over the handshake
+   * (identity binding: Ed25519 signature bound to the presented certificate).
+   * False/absent for a peer that never authenticated or that only claims an id
+   * over unauthenticated mDNS.
+   */
+  peerIdVerified?: boolean;
   /** Protocol version announced via mDNS (informational; the wire handshake gates). */
   protocolVersion?: string;
   /** Last time this peer was heard from (epoch ms). Internal only. */
@@ -82,6 +120,8 @@ export interface DiscoveredPeer extends NetworkPeer {
 interface PeerCapabilities {
   skills: string[];
   limits: { maxPayloadBytes?: number } | null;
+  /** Peer identity verified over the Fase 1B handshake (if it has one). */
+  peerId?: string;
   fetchedAt: number;
 }
 
@@ -131,12 +171,14 @@ export class NetworkLightProvider implements NetworkProvider {
   readonly priority = 10;
 
   private readonly host: string;
-  private readonly port: number;
+  private readonly configuredPort: number;
   private readonly name: string;
   private readonly skills: string[];
   private readonly maxPayloadBytes: number;
   private readonly instanceId: string;
   private readonly identity: PeerIdentity | null;
+  private readonly identitySigner: ((data: Buffer) => Promise<Buffer>) | null;
+  private readonly limiter: PeerLimiter;
   private readonly heartbeatTtlMs: number;
   private readonly sweepIntervalMs: number;
   private readonly onPeerDisconnected: ((peer: DiscoveredPeer) => void) | null;
@@ -146,6 +188,8 @@ export class NetworkLightProvider implements NetworkProvider {
   private browser: Browser | null = null;
   private boundPort = 0;
   private ready = false;
+  private tlsKey = "";
+  private tlsCert = "";
   private certFingerprint = "";
   private taskHandler: TaskHandler | null = null;
   private readonly discovered = new Map<string, DiscoveredPeer>();
@@ -156,13 +200,15 @@ export class NetworkLightProvider implements NetworkProvider {
 
   constructor(options: NetworkLightOptions = {}) {
     this.host = options.host ?? "0.0.0.0";
-    this.port = options.port ?? 0;
+    this.configuredPort = options.port ?? 0;
     this.name =
       options.name ?? `p2p-hub-${crypto.randomBytes(4).toString("hex")}`;
     this.skills = [...(options.skills ?? [])];
     this.maxPayloadBytes = options.maxPayloadBytes ?? MAX_PAYLOAD_BYTES;
     this.instanceId = crypto.randomUUID();
     this.identity = options.identity ?? null;
+    this.identitySigner = options.identitySigner ?? null;
+    this.limiter = new PeerLimiter({ ...DEFAULT_PEER_LIMITS, ...options.peerLimits });
     this.heartbeatTtlMs = options.heartbeatTtlMs ?? HEARTBEAT_TTL_MS;
     this.sweepIntervalMs =
       options.sweepIntervalMs ??
@@ -172,6 +218,11 @@ export class NetworkLightProvider implements NetworkProvider {
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  /** Bound listening port (0 before `start()`, or when using port 0). */
+  get port(): number {
+    return this.boundPort;
   }
 
   /**
@@ -191,22 +242,32 @@ export class NetworkLightProvider implements NetworkProvider {
     }
 
     const { key, cert } = generateSelfSignedCert();
+    this.tlsKey = key;
+    this.tlsCert = cert;
     const certInfo = new crypto.X509Certificate(cert);
     this.certFingerprint = certInfo.fingerprint256;
 
-    this.server = tls.createServer({ key, cert }, (socket) => {
-      this.handleConnection(socket);
-    });
+    // requestCert + rejectUnauthorized:false (Fase 1B): ask every client for its
+    // certificate but do not fail the handshake when it has none (anonymous
+    // peers stay possible). When a cert is presented, its fingerprint is used to
+    // verify the client's `auth` identity binding. Never flip rejectUnauthorized
+    // on: pinning is done via the mDNS fingerprint + identity signature instead.
+    this.server = tls.createServer(
+      { key, cert, requestCert: true, rejectUnauthorized: false },
+      (socket) => {
+        this.handleConnection(socket);
+      },
+    );
 
     this.boundPort = await new Promise<number>((resolve, reject) => {
       const server = this.server!;
       server.once("error", reject);
-      server.listen(this.port, this.host, () => {
+      server.listen(this.configuredPort, this.host, () => {
         const address = server.address();
         resolve(
           typeof address === "object" && address !== null
             ? address.port
-            : this.port,
+            : this.configuredPort,
         );
       });
     });
@@ -281,6 +342,7 @@ export class NetworkLightProvider implements NetworkProvider {
     this.peerCapabilities.clear();
     this.capabilityProbes.clear();
     this.probeFailures.clear();
+    this.limiter.clear();
     this.taskHandler = null;
   }
 
@@ -302,6 +364,7 @@ export class NetworkLightProvider implements NetworkProvider {
           address: peer.address,
           skills: [...caps.skills],
           name: peer.name,
+          peerId: caps.peerId,
         };
       }),
     );
@@ -318,13 +381,18 @@ export class NetworkLightProvider implements NetworkProvider {
     const peers: DiscoveredPeer[] = [];
     for (const peer of this.discovered.values()) {
       const caps = this.peerCapabilities.get(peer.id);
+      // A verified identity (from the handshake) overrides the unverified
+      // mDNS claim; a peer that never completed a handshake keeps its mDNS
+      // claim but is marked unverified.
+      const verifiedPeerId = caps?.peerId;
       peers.push({
         id: peer.id,
         address: peer.address,
         skills: caps ? [...caps.skills] : [],
         name: peer.name,
         certFingerprint: peer.certFingerprint,
-        peerId: peer.peerId,
+        peerId: verifiedPeerId ?? peer.peerId,
+        peerIdVerified: verifiedPeerId !== undefined,
         protocolVersion: peer.protocolVersion,
       });
     }
@@ -346,6 +414,9 @@ export class NetworkLightProvider implements NetworkProvider {
   async sendTask(peer: NetworkPeer, task: TaskRequest): Promise<TaskResult> {
     const { host, port } = parseAddress(peer.address);
     const expectedFingerprint = this.discovered.get(peer.id)?.certFingerprint;
+    // Fase 1B: our identity proof (auth message) is only sent when we have a
+    // signer; the handshake nonce anchors it.
+    const clientNonce = this.canProveIdentity() ? randomNonce() : "";
 
     return new Promise<TaskResult>((resolve) => {
       let settled = false;
@@ -359,7 +430,14 @@ export class NetworkLightProvider implements NetworkProvider {
       };
 
       const socket = tls.connect(
-        { host, port, rejectUnauthorized: false },
+        {
+          host,
+          port,
+          rejectUnauthorized: false,
+          // Present our own certificate so the server can verify our `auth`
+          // identity binding against the certificate it actually saw (Fase 1B).
+          ...(this.tlsKey && this.tlsCert ? { key: this.tlsKey, cert: this.tlsCert } : {}),
+        },
         () => {
           if (!expectedFingerprint) {
             socket.destroy();
@@ -381,7 +459,13 @@ export class NetworkLightProvider implements NetworkProvider {
             return;
           }
           socket.write(
-            encodeFrame(encodeHello([NETWORK_PROTOCOL_VERSION], this.skills)),
+            encodeFrame(
+              encodeHello(
+                [NETWORK_PROTOCOL_VERSION],
+                this.skills,
+                clientNonce || undefined,
+              ),
+            ),
           );
         },
       );
@@ -400,7 +484,7 @@ export class NetworkLightProvider implements NetworkProvider {
         });
       }, RESPONSE_TIMEOUT_MS);
 
-      socket.on("data", (chunk: Buffer) => {
+      socket.on("data", async (chunk: Buffer) => {
         buffer = Buffer.concat([buffer, chunk]);
         try {
           for (;;) {
@@ -431,9 +515,35 @@ export class NetworkLightProvider implements NetworkProvider {
                 });
                 return;
               }
+              // Fase 1B: if the server claims an identity, it must prove it —
+              // a valid Ed25519 signature over the binding message AND a cert
+              // fingerprint matching the certificate actually presented.
+              let verifiedServerPeerId: string | undefined;
+              if (body.identity) {
+                const presentedCertFp = normalizeFingerprint(
+                  socket.getPeerCertificate().fingerprint256 ?? "",
+                );
+                const validBinding = this.verifyIdentity(
+                  body.identity,
+                  clientNonce,
+                  body.nonce ?? "",
+                  presentedCertFp,
+                );
+                if (!validBinding) {
+                  socket.destroy();
+                  finish({
+                    taskId: task.id,
+                    status: "error",
+                    error: "peer failed identity binding",
+                  });
+                  return;
+                }
+                verifiedServerPeerId = body.identity.peerId;
+              }
               this.peerCapabilities.set(peer.id, {
                 skills: [...body.capabilities].slice(0, MAX_CAPABILITIES),
                 limits: body.limits ?? null,
+                peerId: verifiedServerPeerId,
                 fetchedAt: Date.now(),
               });
 
@@ -460,6 +570,14 @@ export class NetworkLightProvider implements NetworkProvider {
                 return;
               }
               phase = "result";
+              // Prove our identity to the server (Fase 1B) before the task.
+              const authFrame = await this.buildAuthFrame(
+                clientNonce,
+                body.nonce ?? "",
+              );
+              if (authFrame) {
+                socket.write(encodeFrame(authFrame));
+              }
               socket.write(encodeFrame(taskFrame));
               continue;
             }
@@ -504,17 +622,82 @@ export class NetworkLightProvider implements NetworkProvider {
     });
   }
 
+  /** Whether this instance can prove a claimed identity over the wire. */
+  private canProveIdentity(): boolean {
+    return this.identity !== null && this.identitySigner !== null;
+  }
+
+  /**
+   * Verify an identity binding: the signature must be valid under the claimed
+   * `peerId` AND the bound certificate fingerprint must equal the certificate
+   * this socket actually presented. Verification needs no local signer — the
+   * claimed `peerId` is itself the public key.
+   */
+  private verifyIdentity(
+    binding: IdentityBinding,
+    clientNonce: string,
+    serverNonce: string,
+    presentedCertFingerprint: string,
+  ): boolean {
+    return (
+      binding.certFingerprint === presentedCertFingerprint &&
+      verifyIdentityBinding(
+        binding.peerId,
+        clientNonce,
+        serverNonce,
+        binding.certFingerprint,
+        binding.signature,
+      )
+    );
+  }
+
+  /**
+   * Build the `auth` frame proving our identity, or `null` when we have
+   * nothing to prove. The signature binds both handshake nonces AND our own
+   * certificate fingerprint to the claimed `peerId`.
+   */
+  private async buildAuthFrame(
+    clientNonce: string,
+    serverNonce: string,
+  ): Promise<string | null> {
+    if (!this.canProveIdentity()) {
+      return null;
+    }
+    const certFingerprint = normalizeFingerprint(this.certFingerprint);
+    const signature = await this.identitySigner!(
+      buildIdentityBindingMessage(clientNonce, serverNonce, certFingerprint),
+    );
+    return encodeAuth({
+      peerId: this.identity!.peerId,
+      certFingerprint,
+      signature: signature.toString("hex"),
+    });
+  }
+
   private handleConnection(socket: tls.TLSSocket): void {
+    const ip = socket.remoteAddress ?? "unknown";
+    // Fase 1C: refuse the connection outright when this IP already holds its
+    // full connection budget — before any bytes are parsed.
+    if (!this.limiter.tryAcquireConnection(ip)) {
+      socket.destroy();
+      return;
+    }
+
     let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let handshakeDone = false;
+    let clientNonce = "";
+    let serverNonce = "";
+    let authenticatedPeerId: string | null = null;
+    let sawTask = false;
     const handshakeTimer = setTimeout(() => {
       socket.destroy();
     }, HANDSHAKE_TIMEOUT_MS);
     socket.once("close", () => {
       clearTimeout(handshakeTimer);
+      this.limiter.releaseConnection(ip);
     });
 
-    socket.on("data", (chunk: Buffer) => {
+    socket.on("data", async (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       try {
         for (;;) {
@@ -533,29 +716,88 @@ export class NetworkLightProvider implements NetworkProvider {
               socket.destroy();
               return;
             }
-            const hello = envelope.body as { versions: number[] };
+            // Every handshake + task counts against this IP's request budget.
+            if (!this.limiter.allowRequest(ip)) {
+              socket.destroy();
+              return;
+            }
+            const hello = envelope.body as HelloBody;
             if (negotiateVersion(hello.versions) === null) {
               socket.destroy();
               return;
             }
             clearTimeout(handshakeTimer);
             handshakeDone = true;
+            clientNonce = hello.nonce ?? "";
+            serverNonce = this.canProveIdentity() ? randomNonce() : "";
+            const identity = await this.buildServerIdentity(
+              clientNonce,
+              serverNonce,
+            );
             socket.write(
               encodeFrame(
                 encodeHelloAck(
                   NETWORK_PROTOCOL_VERSION,
                   this.skills,
                   { maxPayloadBytes: this.maxPayloadBytes },
+                  serverNonce || undefined,
+                  identity,
                 ),
               ),
             );
+            continue;
+          }
+          if (envelope.type === "auth") {
+            // Only one auth per connection, and never after the first task.
+            if (authenticatedPeerId !== null || sawTask) {
+              socket.destroy();
+              return;
+            }
+            const binding = envelope.body as IdentityBinding;
+            const presentedCertFp = normalizeFingerprint(
+              socket.getPeerCertificate().fingerprint256 ?? "",
+            );
+            if (
+              !this.verifyIdentity(
+                binding,
+                clientNonce,
+                serverNonce,
+                presentedCertFp,
+              )
+            ) {
+              socket.destroy();
+              return;
+            }
+            authenticatedPeerId = binding.peerId;
             continue;
           }
           if (envelope.type !== "task") {
             socket.destroy();
             return;
           }
-          void this.handleMessage(socket, envelope.body as TaskBody);
+          sawTask = true;
+          if (!this.limiter.allowRequest(ip)) {
+            socket.destroy();
+            return;
+          }
+          if (!this.limiter.tryAcquireTask(ip)) {
+            socket.write(
+              encodeFrame(
+                encodeResult({
+                  taskId: (envelope.body as TaskBody).id,
+                  status: "error",
+                  error: "too many concurrent tasks",
+                }),
+              ),
+            );
+            continue;
+          }
+          void this.handleMessage(
+            socket,
+            envelope.body as TaskBody,
+            authenticatedPeerId,
+            ip,
+          );
         }
       } catch {
         socket.destroy();
@@ -566,16 +808,47 @@ export class NetworkLightProvider implements NetworkProvider {
     });
   }
 
+  /**
+   * Our identity proof for `hello_ack`, or `undefined` when anonymous. The
+   * signature binds both handshake nonces AND our certificate fingerprint to
+   * our claimed `peerId`, so the client can verify the full
+   * "claimed id ↔ Ed25519 key ↔ transport cert" chain in one step.
+   */
+  private async buildServerIdentity(
+    clientNonce: string,
+    serverNonce: string,
+  ): Promise<IdentityBinding | undefined> {
+    if (!this.canProveIdentity()) {
+      return undefined;
+    }
+    const certFingerprint = normalizeFingerprint(this.certFingerprint);
+    const signature = await this.identitySigner!(
+      buildIdentityBindingMessage(clientNonce, serverNonce, certFingerprint),
+    );
+    return {
+      peerId: this.identity!.peerId,
+      certFingerprint,
+      signature: signature.toString("hex"),
+    };
+  }
+
   private async handleMessage(
     socket: tls.TLSSocket,
     task: TaskBody,
+    authenticatedPeerId: string | null,
+    ip: string,
   ): Promise<void> {
-    const result = await this.dispatchTask({
-      id: task.id,
-      skill: task.skill,
-      payload: task.payload,
-    });
-    socket.write(encodeFrame(encodeResult(result)));
+    try {
+      const result = await this.dispatchTask({
+        id: task.id,
+        skill: task.skill,
+        payload: task.payload,
+        ...(authenticatedPeerId ? { peerId: authenticatedPeerId } : {}),
+      });
+      socket.write(encodeFrame(encodeResult(result)));
+    } finally {
+      this.limiter.releaseTask(ip);
+    }
   }
 
   private async dispatchTask(task: TaskRequest): Promise<TaskResult> {
@@ -631,6 +904,7 @@ export class NetworkLightProvider implements NetworkProvider {
   ): Promise<PeerCapabilities | null> {
     const { host, port } = parseAddress(peer.address);
     const expectedFingerprint = peer.certFingerprint;
+    const clientNonce = this.canProveIdentity() ? randomNonce() : "";
 
     return new Promise<PeerCapabilities | null>((resolve) => {
       let settled = false;
@@ -647,7 +921,12 @@ export class NetworkLightProvider implements NetworkProvider {
       };
 
       const socket = tls.connect(
-        { host, port, rejectUnauthorized: false },
+        {
+          host,
+          port,
+          rejectUnauthorized: false,
+          ...(this.tlsKey && this.tlsCert ? { key: this.tlsKey, cert: this.tlsCert } : {}),
+        },
         () => {
           const presented = socket.getPeerCertificate().fingerprint256 ?? "";
           if (
@@ -659,7 +938,13 @@ export class NetworkLightProvider implements NetworkProvider {
             return;
           }
           socket.write(
-            encodeFrame(encodeHello([NETWORK_PROTOCOL_VERSION], this.skills)),
+            encodeFrame(
+              encodeHello(
+                [NETWORK_PROTOCOL_VERSION],
+                this.skills,
+                clientNonce || undefined,
+              ),
+            ),
           );
         },
       );
@@ -684,9 +969,31 @@ export class NetworkLightProvider implements NetworkProvider {
             return;
           }
           const body = ack.body as HelloAckBody;
+          // Fase 1B: a claimed server identity must verify, or the peer is
+          // treated as untrustworthy (default-deny) — never probed further.
+          let verifiedServerPeerId: string | undefined;
+          if (body.identity) {
+            const presentedCertFp = normalizeFingerprint(
+              socket.getPeerCertificate().fingerprint256 ?? "",
+            );
+            if (
+              !this.verifyIdentity(
+                body.identity,
+                clientNonce,
+                body.nonce ?? "",
+                presentedCertFp,
+              )
+            ) {
+              socket.destroy();
+              finish(null);
+              return;
+            }
+            verifiedServerPeerId = body.identity.peerId;
+          }
           const caps: PeerCapabilities = {
             skills: [...body.capabilities].slice(0, MAX_CAPABILITIES),
             limits: body.limits ?? null,
+            peerId: verifiedServerPeerId,
             fetchedAt: Date.now(),
           };
           this.peerCapabilities.set(peer.id, caps);
@@ -795,16 +1102,21 @@ function tryDecodeFrame(buffer: Buffer): DecodedFrame | null {
     return null;
   }
   const length = buffer.readUInt32BE(0);
-  if (length > MAX_PAYLOAD_BYTES) {
-    throw new Error(
-      `frame exceeds maximum allowed size (${length} > ${MAX_PAYLOAD_BYTES})`,
-    );
-  }
   if (buffer.length < 4 + length) {
+    // A declared length beyond the cap is malformed no matter how much of the
+    // frame has arrived — reject before waiting for bytes that can never be
+    // valid (default-deny, fail fast).
+    if (length > MAX_PAYLOAD_BYTES) {
+      throw new Error(
+        `frame exceeds maximum allowed size (${length} > ${MAX_PAYLOAD_BYTES})`,
+      );
+    }
     return null;
   }
   const body = buffer.subarray(4, 4 + length);
   const rest = buffer.subarray(4 + length);
+  // Fase 1C: reuse the SDK's canonical payload-size guard on the real bytes.
+  validatePayloadSize(body, MAX_PAYLOAD_BYTES);
   const raw = body.toString("utf8");
   validateJsonNestingDepth(raw);
   const value = JSON.parse(raw) as unknown;
@@ -823,10 +1135,6 @@ function parseAddress(address: string): { host: string; port: number } {
     throw new Error(`invalid peer address: ${address}`);
   }
   return { host, port };
-}
-
-function normalizeFingerprint(fingerprint: string | undefined | null): string {
-  return (fingerprint ?? "").replace(/:/g, "").toLowerCase();
 }
 
 function fingerprintsMatch(expected: string, presented: string): boolean {

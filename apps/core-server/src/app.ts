@@ -259,6 +259,9 @@ export class CoreServer {
       port: 0,
       skills: remoteSkills,
       identity,
+      // Fase 1B: prove this identity on the wire. The private key stays in
+      // IdentityManager; the provider only receives signed bytes.
+      identitySigner: (data) => this.host.identityManager().sign(data),
     });
     this.registry.register(this.provider);
     wireNetworkToBroker(this.provider, this.broker);

@@ -75,6 +75,12 @@ export interface NetworkProviderFactoryInput {
   skills: string[];
   identity: PeerIdentity;
   onPeerDisconnected: (peer: NetworkPeer) => void;
+  /**
+   * Fase 1B identity binding: signs bytes with the Ed25519 private key behind
+   * `identity`. The key stays with the host; the provider only gets signed
+   * bytes back.
+   */
+  identitySigner: (data: Buffer) => Promise<Buffer>;
 }
 
 export type NetworkProviderFactory = (
@@ -225,6 +231,7 @@ export class PluginHost {
         port: this.options.networkPort ?? 0,
         skills: remoteSkills,
         identity,
+        identitySigner: (data) => this.identity.sign(data),
         onPeerDisconnected: (peer) => {
           this.hooks.emit("peer:disconnected", peer);
         },
@@ -317,6 +324,7 @@ const defaultNetworkProviderFactory: NetworkProviderFactory = (input) =>
     port: input.port,
     skills: input.skills,
     identity: input.identity,
+    identitySigner: input.identitySigner,
     onPeerDisconnected: input.onPeerDisconnected,
   });
 

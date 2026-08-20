@@ -28,6 +28,14 @@ export interface TaskRequest {
   skill: string;
   /** Arbitrary serialisable payload. */
   payload: unknown;
+  /**
+   * Persistent identity of the peer that sent this task, when the transport
+   * *verified* it (Fase 1B identity binding). Transport-dependent and optional:
+   * a task from an anonymous peer has no `peerId`. Never trust a caller-
+   * supplied `peerId` — only the transport may set it, and it must have been
+   * proven over the connection (never echo a value from the untrusted wire).
+   */
+  peerId?: string;
 }
 
 export type TaskStatus = "ok" | "error";
