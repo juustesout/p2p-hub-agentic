@@ -7,6 +7,17 @@ import { NetworkLightProvider } from "./network-light-provider";
 import type { DiscoveredPeer } from "./network-light-provider";
 import type { NetworkPeer, PeerIdentity } from "@p2p-hub/sdk";
 
+function framePayload(json: string): Buffer {
+  const body = Buffer.from(json, "utf8");
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(body.length, 0);
+  return Buffer.concat([header, body]);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function waitFor<T>(
   check: () => Promise<T | null | undefined>,
   timeoutMs = 10_000,
@@ -101,12 +112,14 @@ test("two local instances discover each other and exchange a task", async () => 
     });
 
     assert.equal(peers.length, 1);
-    // Fase 0C: mDNS must not leak skill names — a discovered peer's skills are
-    // unknown until the post-connection capability handshake (Fase 1A).
-    assert.equal(
-      peers[0].skills.length,
-      0,
-      "mDNS discovery must not reveal any skill names",
+    // Fase 0C: mDNS must not leak skill names. Fase 1A: the authenticated
+    // handshake reveals what the peer offers, so the peer's skills are now
+    // known and populated — but they arrived over the TLS connection, never
+    // via the mDNS advertisement.
+    assert.deepEqual(
+      peers[0].skills,
+      ["echo"],
+      "skills are learned via the authenticated handshake, not mDNS",
     );
 
     const result = await alice.sendTask(peers[0], {
@@ -231,6 +244,240 @@ test("task to a peer with a mismatched certificate fingerprint is rejected", asy
     if (malloryServer) {
       await close(malloryServer);
     }
+    await alice.stop();
+    await bob.stop();
+  }
+});
+
+test("discover filters by handshake-negotiated capabilities", async () => {
+  const alice = new NetworkLightProvider({ port: 0, skills: ["echo", "ping"] });
+  const bob = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  await bob.start();
+  await alice.start();
+
+  try {
+    const echoPeers = await waitFor<NetworkPeer[]>(async () => {
+      const found = await alice.discover("echo");
+      return found.length > 0 ? found : null;
+    });
+
+    assert.equal(echoPeers.length, 1);
+    assert.deepEqual(
+      echoPeers[0].skills,
+      ["echo"],
+      "capabilities come from the authenticated handshake, not mDNS",
+    );
+
+    const pingPeers = await alice.discover("ping");
+    assert.equal(
+      pingPeers.length,
+      0,
+      "bob does not offer ping — capability probing must filter it out",
+    );
+  } finally {
+    await alice.stop();
+    await bob.stop();
+  }
+});
+
+test("a peer's advertised maxPayloadBytes limit is honored before sending", async () => {
+  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    maxPayloadBytes: 128,
+  });
+  let handled = false;
+  bob.onTask(async (task) => {
+    handled = true;
+    return { taskId: task.id, status: "ok", result: `pong:${String(task.payload)}` };
+  });
+
+  await alice.start();
+  await bob.start();
+
+  try {
+    const peers = await waitFor<NetworkPeer[]>(async () => {
+      const found = await alice.discover("echo");
+      return found.length > 0 ? found : null;
+    });
+
+    const big = await alice.sendTask(peers[0], {
+      id: "big",
+      skill: "echo",
+      payload: "x".repeat(512),
+    });
+    assert.equal(big.status, "error");
+    assert.match(big.error ?? "", /exceeds peer's limit/);
+    assert.equal(handled, false, "oversized task must never reach the remote handler");
+
+    const ok = await alice.sendTask(peers[0], {
+      id: "ok",
+      skill: "echo",
+      payload: "hi",
+    });
+    assert.equal(ok.status, "ok");
+    assert.equal(ok.result, "pong:hi");
+  } finally {
+    await alice.stop();
+    await bob.stop();
+  }
+});
+
+test("a server denies an unsupported protocol version and closes the connection", async () => {
+  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: STABLE_IDENTITY,
+  });
+  let handled = false;
+  bob.onTask(async (task) => {
+    handled = true;
+    return { taskId: task.id, status: "ok", result: "pong" };
+  });
+
+  await alice.start();
+  await bob.start();
+
+  let raw: tls.TLSSocket | null = null;
+  try {
+    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bobPort = Number(bobPeer.address.split(":").pop());
+
+    raw = tls.connect(
+      { host: "127.0.0.1", port: bobPort, rejectUnauthorized: false },
+      () => {
+        // Version 2 is not supported by this server — default-deny.
+        raw!.write(
+          framePayload(
+            JSON.stringify({
+              protocol: "p2p-hub:network",
+              version: 2,
+              type: "hello",
+              body: { versions: [2], capabilities: [] },
+            }),
+          ),
+        );
+      },
+    );
+    raw.once("data", () => {
+      raw!.destroy();
+    });
+    const closed = new Promise<void>((resolve) => {
+      raw!.once("close", () => resolve());
+    });
+
+    await Promise.race([
+      closed,
+      delay(3_000).then(() => {
+        throw new Error("server did not close the connection for an unsupported version");
+      }),
+    ]);
+    assert.equal(handled, false, "nothing may be dispatched to an unsupported peer");
+  } finally {
+    raw?.destroy();
+    await alice.stop();
+    await bob.stop();
+  }
+});
+
+test("a server closes the connection when a task arrives before the handshake", async () => {
+  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: STABLE_IDENTITY,
+  });
+  let handled = false;
+  bob.onTask(async (task) => {
+    handled = true;
+    return { taskId: task.id, status: "ok", result: "pong" };
+  });
+
+  await alice.start();
+  await bob.start();
+
+  let raw: tls.TLSSocket | null = null;
+  try {
+    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bobPort = Number(bobPeer.address.split(":").pop());
+
+    raw = tls.connect(
+      { host: "127.0.0.1", port: bobPort, rejectUnauthorized: false },
+      () => {
+        // A task without a preceding hello violates the contract.
+        raw!.write(
+          framePayload(
+            JSON.stringify({
+              protocol: "p2p-hub:network",
+              version: 1,
+              type: "task",
+              body: { id: "early", skill: "echo", payload: "hi" },
+            }),
+          ),
+        );
+      },
+    );
+    const closed = new Promise<void>((resolve) => {
+      raw!.once("close", () => resolve());
+    });
+
+    await Promise.race([
+      closed,
+      delay(3_000).then(() => {
+        throw new Error("server did not close a task-before-hello connection");
+      }),
+    ]);
+    assert.equal(handled, false, "task-before-hello must never be dispatched");
+  } finally {
+    raw?.destroy();
+    await alice.stop();
+    await bob.stop();
+  }
+});
+
+test("a server closes the connection on a malformed frame", async () => {
+  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: STABLE_IDENTITY,
+  });
+  let handled = false;
+  bob.onTask(async (task) => {
+    handled = true;
+    return { taskId: task.id, status: "ok", result: "pong" };
+  });
+
+  await alice.start();
+  await bob.start();
+
+  let raw: tls.TLSSocket | null = null;
+  try {
+    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bobPort = Number(bobPeer.address.split(":").pop());
+
+    raw = tls.connect(
+      { host: "127.0.0.1", port: bobPort, rejectUnauthorized: false },
+      () => {
+        // A length prefix far beyond the allowed maximum.
+        raw!.write(Buffer.from([0xff, 0xff, 0xff, 0xff, 0x00]));
+      },
+    );
+    const closed = new Promise<void>((resolve) => {
+      raw!.once("close", () => resolve());
+    });
+
+    await Promise.race([
+      closed,
+      delay(3_000).then(() => {
+        throw new Error("server did not close the connection on a malformed frame");
+      }),
+    ]);
+    assert.equal(handled, false, "malformed input must never be dispatched");
+  } finally {
+    raw?.destroy();
     await alice.stop();
     await bob.stop();
   }
