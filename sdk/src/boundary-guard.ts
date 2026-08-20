@@ -73,7 +73,7 @@ export function validatePayloadSize(
 ): void {
   const bytes =
     typeof data === "string"
-      ? Buffer.byteLength(data, "utf8")
+      ? new TextEncoder().encode(data).byteLength
       : data.byteLength;
   if (bytes > maxBytes) {
     throw new PayloadTooLargeError(bytes, maxBytes);

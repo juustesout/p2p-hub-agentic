@@ -1,3 +1,4 @@
+import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -7,6 +8,18 @@ import react from "@vitejs/plugin-react";
 // are applied at the deployment layer.
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      // Consume @p2p-hub/sdk from its TypeScript source so both dev (esbuild)
+      // and build (Rollup) treat it as ESM. The compiled SDK is CommonJS whose
+      // `__exportStar` barrel has no statically-analyzable named exports, so
+      // Vite otherwise fails with "doesn't provide an export named:
+      // 'evaluateSettingsRisk'". The SDK is browser-safe (no Node built-ins).
+      "@p2p-hub/sdk": fileURLToPath(
+        new URL("../../sdk/src/index.ts", import.meta.url),
+      ),
+    },
+  },
   server: {
     port: 5173,
     host: true,
@@ -25,11 +38,7 @@ export default defineConfig({
   },
   build: {
     commonjsOptions: {
-      // @p2p-hub/sdk is a CommonJS workspace package symlinked out of
-      // node_modules; include its dist so Rollup resolves the named exports
-      // (e.g. `evaluateSettingsRisk`) instead of treating the barrel as an
-      // empty ES module.
-      include: [/node_modules/, /sdk\/dist/],
+      include: [/node_modules/],
     },
   },
 });
