@@ -185,9 +185,12 @@ When asked to review or verify security-relevant work in this repo:
 
 - ~~HTTP bridge authentication~~ — resolved: the per-boot shared token now
   guards `/api/*` and `/ws` (see "Core-server boot token" above).
-- `P2P_HUB_HOST=0.0.0.0` widens the HTTP bridge beyond localhost with no
-  extra warning/gate — should probably require an explicit, separate
-  opt-in rather than just an env var value.
+- ~~`P2P_HUB_HOST=0.0.0.0` widens the HTTP bridge beyond localhost with no
+  extra warning/gate~~ — resolved: `decideBindHost` requires an explicit
+  `P2P_HUB_EXPOSE=1` for any non-loopback bind, with a loud warning at startup.
+  Since Fase 0D there is also `P2P_HUB_NETWORKING=0` for a fully local-only
+  core-server (no P2P transport, no identity created — the vault is never
+  touched, so a corrupt vault cannot fail a local-only boot).
 - `network-light` advertises all local skill names via mDNS regardless of
   `localOnly`/`httpExposed` — rejected correctly at the broker, but still
   leaks which skills exist to anything listening on the LAN.

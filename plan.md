@@ -129,7 +129,7 @@ publieke webserver hoef te draaien."
   - 0B Testlab — `apps/testlab`, A↔B↔C mesh + direct + chained call, test + manual runner. GEDONE.
   - Windows-only test failures opgelost (`d095571`): symlink-EPERM via `canCreateSymlinksSync`-probe (skip alleen als de omgeving geen symlinks kan maken), NTFS-mode-asserties (0600 exact op POSIX, owner-writeable op Windows), core-server peersite harness zonder node_modules-symlink (temp dirs onder `node_modules/.cache`, plugin deps resolven via walk-up), test-MITM-cert naar 2048-bit. (Opgelost.)
   - 0C mDNS-lek — nog niet gestart.
-  - 0D Exposure — `decideBindHost`/`P2P_HUB_EXPOSE` bestaat; local-only core-server nog niet.
+  - 0D Exposure — GEDONE: `P2P_HUB_EXPOSE=1` (bestaand) + nieuw `P2P_HUB_NETWORKING=0` voor een volledig local-only core-server (geen P2P-transport, geen identity, vault wordt nooit aangeraakt — corrupte vault faalt niet op een local-only boot); `CoreServerOptions.networking` default aan.
   - 0E Storage locking — nog niet gestart.
 - **Fase 1** — nog niet gestart.
 - **Fase 2** — nog niet gestart.

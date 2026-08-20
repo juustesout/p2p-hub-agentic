@@ -46,6 +46,7 @@ function resolveHost(): string {
 
 async function main(): Promise<void> {
   const host = resolveHost();
+  const networking = process.env.P2P_HUB_NETWORKING !== "0";
   const server = new CoreServer({
     pluginsDir: resolvePluginsDir(),
     dataDir: resolveDataDir(),
@@ -54,12 +55,16 @@ async function main(): Promise<void> {
       ? Number(process.env.P2P_HUB_PORT)
       : 8787,
     masterKey: process.env.P2P_HUB_VAULT_KEY,
+    networking,
   });
 
   await server.start();
 
   const port = process.env.P2P_HUB_PORT ? Number(process.env.P2P_HUB_PORT) : 8787;
-  console.log(`[core-server] listening on http://${host}:${port}`);
+  console.log(
+    `[core-server] listening on http://${host}:${port}` +
+      (networking ? "" : " (networking disabled: local-only)"),
+  );
 
   const shutdown = async () => {
     await server.stop();

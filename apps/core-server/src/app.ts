@@ -62,6 +62,15 @@ export interface CoreServerOptions {
    * default, which makes every tier-2 settings change fail closed (denied).
    */
   trustConfirmation?: TrustConfirmation;
+  /**
+   * Start the P2P network transport (LAN discovery + inbound capability calls).
+   * Default `true` — the core-server is by definition the P2P-capable backend.
+   * Set to `false` for a fully local-only server: no identity is created, no
+   * provider is started, nothing is advertised on the LAN. This mirrors the
+   * `PluginHost`'s lazy identity/networking gate — a local-only server must not
+   * fail hard on a corrupt vault.
+   */
+  networking?: boolean;
 }
 
 const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
@@ -159,21 +168,14 @@ export class CoreServer {
     this.bridgeHookEvents();
     this.registerPeerAccessHandler();
 
-    const remoteSkills = this.broker
-      .listSkills()
-      .filter((s) => !s.localOnly)
-      .map((s) => s.skill);
-
-    const identity = await this.host.identityManager().getOrCreateIdentity();
-    this.peerId = identity.peerId;
-    this.provider = new NetworkLightProvider({
-      port: 0,
-      skills: remoteSkills,
-      identity,
-    });
-    this.registry.register(this.provider);
-    wireNetworkToBroker(this.provider, this.broker);
-    await this.provider.start();
+    if (this.options.networking !== false) {
+      await this.startNetworking();
+    } else {
+      console.warn(
+        "[core-server] networking disabled: no LAN discovery, no inbound P2P " +
+          "calls, no peer identity is created. Local-only mode.",
+      );
+    }
 
     this.httpServer = http.createServer((req, res) => {
       void this.handleHttp(req, res);
@@ -236,6 +238,32 @@ export class CoreServer {
   // ---------------------------------------------------------------------
   // Core wiring
   // ---------------------------------------------------------------------
+
+  /**
+   * Start the P2P transport behind the same identity/vault gate as
+   * `PluginHost.startNetworking`. The core-server is *by definition* where
+   * network functionality is expected, so a corrupt vault fails loudly here
+   * (deliberate — see CLAUDE.md "Core-server identity/vault dependency").
+   * Callers that want a local-only server pass `networking: false` and this
+   * block is never reached.
+   */
+  private async startNetworking(): Promise<void> {
+    const remoteSkills = this.broker
+      .listSkills()
+      .filter((s) => !s.localOnly)
+      .map((s) => s.skill);
+
+    const identity = await this.host.identityManager().getOrCreateIdentity();
+    this.peerId = identity.peerId;
+    this.provider = new NetworkLightProvider({
+      port: 0,
+      skills: remoteSkills,
+      identity,
+    });
+    this.registry.register(this.provider);
+    wireNetworkToBroker(this.provider, this.broker);
+    await this.provider.start();
+  }
 
   private registerCoreSkills(): void {
     this.broker.registerSkill(
