@@ -126,7 +126,8 @@ publieke webserver hoef te draaien."
 
 - **Fase 0**
   - 0A CI — `.github/workflows/ci.yml` (Linux+Windows, Node 20/22, tsc -b, tests, cargo check). GEDONE.
-  - 0B Testlab — `apps/testlab`, A↔B↔C mesh + direct + chained call, test + manual runner. GEDONE (groen lokaal; CI-netwerkgedrag nog te bevestigen op runners).
+  - 0B Testlab — `apps/testlab`, A↔B↔C mesh + direct + chained call, test + manual runner. GEDONE.
+  - Windows-only test failures opgelost (`d095571`): symlink-EPERM via `canCreateSymlinksSync`-probe (skip alleen als de omgeving geen symlinks kan maken), NTFS-mode-asserties (0600 exact op POSIX, owner-writeable op Windows), core-server peersite harness zonder node_modules-symlink (temp dirs onder `node_modules/.cache`, plugin deps resolven via walk-up), test-MITM-cert naar 2048-bit. (Opgelost.)
   - 0C mDNS-lek — nog niet gestart.
   - 0D Exposure — `decideBindHost`/`P2P_HUB_EXPOSE` bestaat; local-only core-server nog niet.
   - 0E Storage locking — nog niet gestart.
