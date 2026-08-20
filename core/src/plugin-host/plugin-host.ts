@@ -1,7 +1,12 @@
 import * as fs from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import * as path from "node:path";
-import type { PluginManifest } from "@p2p-hub/sdk";
+import type {
+  NetworkPeer,
+  NetworkProvider,
+  PeerIdentity,
+  PluginManifest,
+} from "@p2p-hub/sdk";
 import { asContactLookup } from "@p2p-hub/sdk";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
@@ -55,7 +60,26 @@ export interface PluginHostOptions {
    * {@link DEFAULT_ACTIVATION_TIMEOUT_MS}.
    */
   activationTimeoutMs?: number;
+  /**
+   * Test-only seam: constructs the network transport instead of the default
+   * `NetworkLightProvider`. Tests inject a provider whose `start()` rejects so
+   * they can verify a network failure never blocks plugin boot, without
+   * depending on OS-specific port-collision behaviour.
+   */
+  networkProviderFactory?: NetworkProviderFactory;
 }
+
+/** Input handed to a {@link NetworkProviderFactory}. */
+export interface NetworkProviderFactoryInput {
+  port: number;
+  skills: string[];
+  identity: PeerIdentity;
+  onPeerDisconnected: (peer: NetworkPeer) => void;
+}
+
+export type NetworkProviderFactory = (
+  input: NetworkProviderFactoryInput,
+) => NetworkProvider;
 
 /**
  * Orchestrates every installed plugin: scans `pluginsDir`, loads each
@@ -75,7 +99,7 @@ export class PluginHost {
   private readonly vault: VaultManager;
   private readonly identity: IdentityManager;
   private readonly networks: NetworkRegistry;
-  private provider: NetworkLightProvider | null = null;
+  private provider: NetworkProvider | null = null;
   private readonly activated = new Map<string, unknown>();
   private readonly disposers = new Map<string, DisposerBag>();
   private readonly plugins: PluginManifest[] = [];
@@ -195,7 +219,9 @@ export class PluginHost {
         .filter((skill) => !skill.localOnly)
         .map((skill) => skill.skill);
 
-      const provider = new NetworkLightProvider({
+      const factory =
+        this.options.networkProviderFactory ?? defaultNetworkProviderFactory;
+      const provider = factory({
         port: this.options.networkPort ?? 0,
         skills: remoteSkills,
         identity,
@@ -284,6 +310,15 @@ export class PluginHost {
     return [...this.plugins];
   }
 }
+
+/** Default transport factory: build a {@link NetworkLightProvider}. */
+const defaultNetworkProviderFactory: NetworkProviderFactory = (input) =>
+  new NetworkLightProvider({
+    port: input.port,
+    skills: input.skills,
+    identity: input.identity,
+    onPeerDisconnected: input.onPeerDisconnected,
+  });
 
 /**
  * Resolve with `promise`'s result, or reject with `makeError()` if it has not

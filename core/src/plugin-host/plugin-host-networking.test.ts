@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as net from "node:net";
 import { PluginHost } from "./plugin-host";
 
 const ECHO_MANIFEST = {
@@ -180,12 +179,6 @@ test("network-light advertises only network-exposed skills, never local-only one
 });
 
 test("a network start failure does not block plugin boot", async () => {
-  const blocker = net.createServer();
-  await new Promise<void>((resolve) =>
-    blocker.listen(0, "127.0.0.1", () => resolve()),
-  );
-  const port = (blocker.address() as net.AddressInfo).port;
-
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "host-net-fail-"));
   await writeTestNodePlugin(root);
 
@@ -199,7 +192,20 @@ test("a network start failure does not block plugin boot", async () => {
     pluginsDir: path.join(root, "plugins"),
     dataDir: path.join(root, "data"),
     enableNetworking: true,
-    networkPort: port,
+    networkProviderFactory: () => ({
+      id: "failing-transport",
+      priority: 0,
+      start: async () => {
+        throw new Error("simulated transport failure");
+      },
+      stop: async () => {},
+      isReady: () => false,
+      discover: async () => [],
+      sendTask: async () => {
+        throw new Error("unreachable");
+      },
+      onTask: () => {},
+    }),
   });
 
   try {
@@ -212,6 +218,5 @@ test("a network start failure does not block plugin boot", async () => {
     assert.equal(host.networkRegistry().selectActive(), null);
   } finally {
     console.error = original;
-    await new Promise<void>((resolve) => blocker.close(() => resolve()));
   }
 });
