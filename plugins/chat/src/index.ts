@@ -107,6 +107,10 @@ export interface ChatPlugin {
  * The canonical signed payload, byte-for-byte. Field order is significant:
  * sender and receiver must build this object with the exact same key order or
  * the signature will not verify. `action` is included only when present.
+ *
+ * The signing/verifying path applies the {@link MESSAGE_CONTEXT} domain
+ * structurally via the identity capability — the plugin never builds the
+ * `MESSAGE_CONTEXT || canonical` buffer itself.
  */
 function canonicalMessage(fields: {
   toPeerId: string;
@@ -128,17 +132,14 @@ function canonicalMessage(fields: {
   return JSON.stringify(obj);
 }
 
-/** The full buffer signed by `sendMessage` and verified by `receiveMessage`. */
-function signBuffer(fields: {
+/** The canonical payload bytes signed by `sendMessage` and verified by `receiveMessage`. */
+function canonicalBuffer(fields: {
   toPeerId: string;
   text: string;
   sentAt: string;
   action?: PBXReference;
 }): Buffer {
-  return Buffer.concat([
-    Buffer.from(MESSAGE_CONTEXT, "utf8"),
-    Buffer.from(canonicalMessage(fields), "utf8"),
-  ]);
+  return Buffer.from(canonicalMessage(fields), "utf8");
 }
 
 interface WireMessage {
@@ -267,9 +268,9 @@ export default function activate(ctx: PluginContext): ChatPlugin {
       sentAt,
       ...(action !== undefined ? { action: action as PBXReference } : {}),
     };
-    const signature = (await ctx.identity.sign(signBuffer(fields))).toString(
-      "hex",
-    );
+    const signature = (
+      await ctx.identity.sign(MESSAGE_CONTEXT, canonicalBuffer(fields))
+    ).toString("hex");
 
     const message: WireMessage = {
       fromPeerId,
@@ -383,7 +384,8 @@ export default function activate(ctx: PluginContext): ChatPlugin {
 
     const valid = ctx.identity.verify(
       contact.publicKeyHex,
-      signBuffer({
+      MESSAGE_CONTEXT,
+      canonicalBuffer({
         toPeerId: msg.toPeerId,
         text: msg.text,
         sentAt: msg.sentAt,

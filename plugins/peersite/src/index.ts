@@ -3,12 +3,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { PluginContext } from "@p2p-hub/core";
 import {
-  buildKnockMessage,
+  buildKnockData,
   contentTypeForPath,
   PEER_ID_RE,
+  PEERSITE_KNOCK_CONTEXT,
   resolveAndContainFile,
+  resolveSiteRootOutsideDataDir,
   signAuthChallenge,
-  validateSiteRoot,
 } from "@p2p-hub/core";
 
 /**
@@ -17,8 +18,9 @@ import {
  * P2P network (`peersite.fetchAsset`).
  *
  * This plugin owns the site-root configuration: the user-chosen directory is
- * stored here (`ctx.storage`), validated with the shared
- * {@link validateSiteRoot}, and read back by the core-server HTTP handler via
+ * stored here (`ctx.storage`), validated against the host data directory via
+ * {@link ctx.isPathInsideDataDir} (the plugin never sees the data dir's path,
+ * only the boolean answer), and read back by the core-server HTTP handler via
  * `host.getActivated("peersite")`. The HTTP and P2P surfaces both resolve
  * files through the same {@link resolveAndContainFile}, so they accept and
  * reject exactly the same paths.
@@ -137,7 +139,9 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
         // Re-validate at load: a root that has since moved or been deleted is
         // treated as unconfigured, never as a dangling path to serve from.
         try {
-          siteRootReal = validateSiteRoot(stored, ctx.dataDir);
+          siteRootReal = resolveSiteRootOutsideDataDir(stored, (real) =>
+            ctx.isPathInsideDataDir(real),
+          );
         } catch {
           siteRootReal = null;
         }
@@ -148,7 +152,9 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
   }
 
   async function setSiteRoot(siteRoot: string): Promise<string> {
-    const real = validateSiteRoot(siteRoot, ctx.dataDir);
+    const real = resolveSiteRootOutsideDataDir(siteRoot, (real) =>
+      ctx.isPathInsideDataDir(real),
+    );
     siteRootReal = real;
     rootLoaded = true;
     await ctx.storage.set(SITE_ROOT_KEY, siteRoot);
@@ -231,10 +237,12 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
 
     // Verify against the claimed peerId itself — the raw public key, not a
     // contacts lookup. A bad signature is indistinguishable from "unauthorized".
-    const message = buildKnockMessage(peerId, claim, timestamp);
+    // The knock domain is applied structurally by the identity capability, so
+    // the plugin only supplies the data portion (peerId:claim:timestamp).
     const valid = ctx.identity.verify(
       peerId,
-      message,
+      PEERSITE_KNOCK_CONTEXT,
+      buildKnockData(peerId, claim, timestamp),
       Buffer.from(signature, "hex"),
     );
     if (!valid) {
@@ -399,9 +407,9 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
         throw new Error("signAuthChallenge expects { nonce: string(hex) }");
       }
       // Domain-separated signature (PEERSITE_AUTH_CONTEXT || nonce), never
-      // caller-chosen bytes.
+      // caller-chosen bytes — the domain is applied by the identity capability.
       const signature = await signAuthChallenge(
-        (data) => ctx.identity.sign(data),
+        (domain, data) => ctx.identity.sign(domain, data),
         Buffer.from(nonce, "hex"),
       );
       return { signature: signature.toString("hex") };

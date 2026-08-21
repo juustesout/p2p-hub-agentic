@@ -99,6 +99,20 @@ miss, not boilerplate to skim.
    never read as data (reads are always by exact path) and are not
    auto-cleaned.
 
+10. **A capability token is granted to whatever code can read it.** Never put a
+    token that authorizes sensitive endpoints (the boot token) in a URL that
+    untrusted code can observe. An iframe `src="...?token=<boot-token>"` hands
+    the token to the iframe's own JavaScript — which, in the plugin-UI model,
+    *is* the untrusted code. This is why `/ui/<pluginId>/*` is served without
+    the boot token (the plugin's own public UI assets are not secrets), and
+    why the plugin bridge relies on an origin-pinned `postMessage` allowlist
+    instead of the shell sharing its token. When a surface has to be
+    reachable by code that must not hold the boot token, give it a *scoped*
+    credential (site token) or no credential plus loopback + containment +
+    CSP — never the boot token. The same reasoning applies in reverse: the
+    `/ws` `?token=` in the query string is an accepted risk precisely because
+    no third-party code observes it.
+
 ### Remote-access authorization (Fase 2A — don't re-learn this either)
 
 Since Fase 2A the **TaskBroker is the single enforcement point** for "who may
@@ -215,6 +229,17 @@ When asked to review or verify security-relevant work in this repo:
 - `birthday-cards` title matching (`/verjaardag|birthday/i`) has no word
   boundaries — false-positives on titles like "Birthday Films". Non-urgent,
   noted for whenever that plugin gets revisited.
+- **Plugin UI residuals (Fase 2B, accepted):** (a) `/ui/*` responses set no
+  `frame-ancestors`, so any page can embed a plugin's UI in an iframe — inert
+  for an attacker, because the UI is sandboxed, origin-pinned to the core-server
+  and its bridge calls are allowlisted and denied for non-core origins. (b) The
+  plugin UI's *own* outbound `window.parent.postMessage(..., "*")` is their
+  code and cannot be pinned from the shell; a hostile page that embeds the UI
+  can receive (but never answer) those calls. Revisit if the bridge protocol
+  gains outbound capabilities beyond skill invocation.
+- **Fase 2B scope decision:** capability-matrix tightening without process
+  isolation (Optie 1). OS-level plugin sandboxing is a documented accepted risk
+  deferred to Fase 3 — the Ed25519 key holder is the trust boundary today.
 - Plugin `id` values are allowed to contain `.`, so two plugins with
   colliding dotted ids (e.g. `"a.b"` and `"a"` registering skill `"b.x"`)
   can produce the same broker skill key. Theoretical today (single

@@ -11,11 +11,24 @@ export type {
   RiskSeverity,
 } from "@p2p-hub/sdk";
 
+export interface CapabilityPluginUi {
+  entry: string;
+  defaultWidth?: number;
+  defaultHeight?: number;
+  /**
+   * Manifest-declared bridge allowlist: the only skills this plugin's UI may
+   * invoke through the postMessage bridge. Never derived from the full skill
+   * list — a plugin declares exactly what its UI is allowed to call.
+   */
+  skills: string[];
+}
+
 export interface CapabilityPlugin {
   id: string;
   name: string;
   kind: string;
   version: string;
+  ui: CapabilityPluginUi | null;
 }
 
 export interface CapabilitySkill {

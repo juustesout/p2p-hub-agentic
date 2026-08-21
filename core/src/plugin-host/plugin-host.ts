@@ -120,6 +120,7 @@ export class PluginHost {
   private readonly activated = new Map<string, unknown>();
   private readonly disposers = new Map<string, DisposerBag>();
   private readonly plugins: PluginManifest[] = [];
+  private readonly pluginDirs = new Map<string, string>();
   private readonly states = new Map<string, PluginState>();
   private readonly signatures = new Map<string, "signed" | "unsigned">();
   private readonly activationTimeoutMs: number;
@@ -217,6 +218,7 @@ export class PluginHost {
         this.activated.set(manifest.id, instance);
         this.disposers.set(manifest.id, disposers);
         this.plugins.push(manifest);
+        this.pluginDirs.set(manifest.id, path.resolve(pluginDir));
         this.states.set(manifest.id, "ACTIVE");
         this.signatures.set(manifest.id, signed ? "signed" : "unsigned");
       } catch (err) {
@@ -313,6 +315,7 @@ export class PluginHost {
     this.activated.delete(pluginId);
     this.states.delete(pluginId);
     this.signatures.delete(pluginId);
+    this.pluginDirs.delete(pluginId);
     const idx = this.plugins.findIndex((p) => p.id === pluginId);
     if (idx !== -1) {
       this.plugins.splice(idx, 1);
@@ -374,6 +377,32 @@ export class PluginHost {
   /** Metadata for every successfully activated plugin. */
   listPlugins(): PluginManifest[] {
     return [...this.plugins];
+  }
+
+  /**
+   * Fase 2B: canonical root directory from which the plugin's UI assets are
+   * served (`/ui/<pluginId>/` in the core-server). This is the *directory
+   * containing* `ui.entry`, resolved to its realpath, or `null` when the
+   * plugin has no UI, its entry does not exist on disk, or the entry escaped
+   * the plugin directory (already rejected by the loader). `null` is the
+   * quiet, deny-by-default answer — callers map it to 404.
+   */
+  async pluginUiRoot(pluginId: string): Promise<string | null> {
+    const dir = this.pluginDirs.get(pluginId);
+    if (!dir) {
+      return null;
+    }
+    const manifest = this.plugins.find((p) => p.id === pluginId);
+    const entry = manifest?.ui?.entry;
+    if (typeof entry !== "string") {
+      return null;
+    }
+    const uiRoot = path.dirname(path.resolve(dir, entry));
+    try {
+      return await fs.realpath(uiRoot);
+    } catch {
+      return null;
+    }
   }
 }
 

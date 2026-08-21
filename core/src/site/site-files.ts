@@ -47,13 +47,54 @@ export function contentTypeForPath(filePath: string): string {
 }
 
 /**
- * Validate a configured site root at configuration time and return its
- * canonical realpath. This is the *loud* boundary: a bad root (missing,
- * unresolvable, or equal to / inside the agent data directory) throws, because
- * the caller explicitly asked for a specific directory and should hear about
- * it immediately rather than silently serving nothing.
+ * True when `candidatePath` resolves to `dataDir` itself or a path inside it.
+ * The containment check is prefix-anchored on the trailing separator
+ * (CLAUDE.md principle #2), so `/data/site` never matches `/data/site-evil`.
+ * Both sides are canonicalized to a realpath when possible; a missing
+ * `dataDir` (fresh install) falls back to a lexical resolve so the structural
+ * check still holds. This is the single containment predicate used by both the
+ * core-server and plugin-facing surfaces — they cannot drift apart.
  */
-export function validateSiteRoot(siteRoot: string, dataDir: string): string {
+export function isPathInsideDataDir(
+  candidatePath: string,
+  dataDir: string,
+): boolean {
+  let candidateReal: string;
+  try {
+    candidateReal = fs.realpathSync(path.resolve(candidatePath));
+  } catch {
+    candidateReal = path.resolve(candidatePath);
+  }
+
+  // The data directory may not exist yet (fresh install); fall back to a
+  // lexical resolve so the containment check still holds structurally.
+  let dataReal: string;
+  try {
+    dataReal = fs.realpathSync(dataDir);
+  } catch {
+    dataReal = path.resolve(dataDir);
+  }
+
+  return candidateReal === dataReal || candidateReal.startsWith(dataReal + path.sep);
+}
+
+/**
+ * Resolve a configured site root to its canonical realpath, rejecting it when
+ * `isInsideDataDir` reports the root is the agent data directory or a path
+ * inside it. This is the *loud* boundary: a bad root (missing, unresolvable,
+ * or inside the data directory) throws, because the caller explicitly asked
+ * for a specific directory and should hear about it immediately rather than
+ * silently serving nothing.
+ *
+ * `isInsideDataDir` is supplied so a plugin can validate a user-chosen root
+ * against the *real* agent data directory through a capability (the plugin
+ * never sees the data dir's path, only the boolean answer) while core-server
+ * passes {@link isPathInsideDataDir} bound to its known data dir.
+ */
+export function resolveSiteRootOutsideDataDir(
+  siteRoot: string,
+  isInsideDataDir: (candidateReal: string) => boolean,
+): string {
   if (typeof siteRoot !== "string" || siteRoot.length === 0) {
     throw new Error("PeerSite siteRoot must be a non-empty string");
   }
@@ -67,22 +108,24 @@ export function validateSiteRoot(siteRoot: string, dataDir: string): string {
     );
   }
 
-  // The data directory may not exist yet (fresh install); fall back to a
-  // lexical resolve so the containment check still holds structurally.
-  let dataReal: string;
-  try {
-    dataReal = fs.realpathSync(dataDir);
-  } catch {
-    dataReal = path.resolve(dataDir);
-  }
-
-  if (rootReal === dataReal || rootReal.startsWith(dataReal + path.sep)) {
+  if (isInsideDataDir(rootReal)) {
     throw new Error(
       "PeerSite siteRoot must not be the agent data directory or a path inside it",
     );
   }
 
   return rootReal;
+}
+
+/**
+ * Validate a configured site root against a known data directory. Thin wrapper
+ * over {@link resolveSiteRootOutsideDataDir} for callers that hold the data
+ * dir path directly (core-server, tests).
+ */
+export function validateSiteRoot(siteRoot: string, dataDir: string): string {
+  return resolveSiteRootOutsideDataDir(siteRoot, (candidateReal) =>
+    isPathInsideDataDir(candidateReal, dataDir),
+  );
 }
 
 /**

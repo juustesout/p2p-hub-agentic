@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveAndContainFile, validateSiteRoot } from "./site-files";
+import { isPathInsideDataDir, resolveAndContainFile, validateSiteRoot } from "./site-files";
 import { canCreateSymlinksSync } from "../test-support";
 
 const SYMLINKS_OK = canCreateSymlinksSync();
@@ -42,6 +42,33 @@ test("validateSiteRoot rejects a root inside the data directory (prefix-anchored
   const sibling = `${dataDir}-evil`;
   await fsp.mkdir(sibling, { recursive: true });
   assert.equal(validateSiteRoot(sibling, dataDir), fs.realpathSync(sibling));
+});
+
+test("Fase 2B: isPathInsideDataDir anchors on the trailing separator", async () => {
+  const dataDir = await makeDir("sitefiles-data-");
+
+  assert.equal(isPathInsideDataDir(dataDir, dataDir), true);
+  assert.equal(isPathInsideDataDir(path.join(dataDir, "nested"), dataDir), true);
+
+  const sibling = `${dataDir}-evil`;
+  await fsp.mkdir(sibling, { recursive: true });
+  assert.equal(isPathInsideDataDir(sibling, dataDir), false);
+  assert.equal(isPathInsideDataDir("/tmp", dataDir), false);
+});
+
+test("Fase 2B: isPathInsideDataDir is realpath-aware (symlink escapes the data dir)", {
+  skip: !SYMLINKS_OK && "symlinks unavailable in this environment",
+}, async () => {
+  const dataDir = await makeDir("sitefiles-data-");
+  const outside = await makeDir("sitefiles-out-");
+  await fsp.writeFile(path.join(outside, "secret.txt"), "top secret");
+  const link = path.join(dataDir, "leak");
+  await fsp.symlink(outside, link, "dir");
+
+  // A path that lexically lives inside the data dir but realpaths outside it
+  // must be reported as NOT inside — the check must see through the symlink.
+  assert.equal(isPathInsideDataDir(link, dataDir), false);
+  assert.equal(isPathInsideDataDir(path.join(link, "secret.txt"), dataDir), false);
 });
 
 test("resolveAndContainFile resolves nested files and directories to index.html", async () => {

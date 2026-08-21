@@ -11,6 +11,8 @@
     "network:skill:peersite.requestAccess",
     "network:public:peersite.status",
     "network:public:peersite.signAuthChallenge",
-    "network:public:peersite.requestAccess"
+    "network:public:peersite.requestAccess",
+    "network:http:peersite.setSiteRoot",
+    "network:http:peersite.setAcceptIncomingRequests"
   ]
 }

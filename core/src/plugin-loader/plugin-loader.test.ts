@@ -5,6 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadManifest, loadPlugin } from "./plugin-loader";
+import { IdentityManager } from "../identity/identity-manager";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
@@ -192,6 +193,70 @@ test("storage keys are not interpreted as filesystem paths", async () => {
   await assert.rejects(() => fs.access(escaped));
 });
 
+test("Fase 2B: plugin dataDir is scoped to its own subfolder, not the host data dir", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginD = await writePlugin(
+    root,
+    "d",
+    { id: "d", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      return { dataDir: ctx.dataDir, inside: ctx.isPathInsideDataDir(ctx.dataDir) };
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const result = (await loadPlugin(
+    pluginD,
+    storageManager,
+    new HookRegistry(),
+  )) as { dataDir: string; inside: boolean };
+
+  const scoped = path.join(dataDir, "plugins", "d");
+  assert.equal(result.dataDir, scoped);
+  assert.equal(result.inside, true);
+
+  // The scoped folder must exist so the plugin can write into it directly.
+  await fs.access(scoped);
+
+  // The host data dir itself, and any sibling plugin folder, must never be
+  // reachable through the scoped dataDir.
+  assert.notEqual(result.dataDir, dataDir);
+  assert.ok(!result.dataDir.startsWith(path.join(dataDir, "plugins", "e")));
+});
+
+test("Fase 2B: isPathInsideDataDir checks the host data dir, not the plugin scoped folder", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const outside = path.join(root, "outside");
+  await fs.mkdir(outside);
+
+  const pluginD = await writePlugin(
+    root,
+    "d",
+    { id: "d", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      return {
+        hostInside: ctx.isPathInsideDataDir(ctx.dataDir),
+        siblingInside: ctx.isPathInsideDataDir(${JSON.stringify(path.join(dataDir, "plugins", "other"))}),
+        outside: ctx.isPathInsideDataDir(${JSON.stringify(outside)}),
+      };
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const result = (await loadPlugin(
+    pluginD,
+    storageManager,
+    new HookRegistry(),
+  )) as { hostInside: boolean; siblingInside: boolean; outside: boolean };
+
+  assert.equal(result.hostInside, true);
+  assert.equal(result.siblingInside, true);
+  assert.equal(result.outside, false);
+});
+
 test("plugin cannot emit on another plugin's namespace", async () => {
   const root = await makeTmpRoot();
   const dataDir = path.join(root, "data");
@@ -283,6 +348,80 @@ test("cross-namespace filter requires permission and enriches calendar save", as
 
   const saved = await calendar.addEvent({ title: "Lunch", date: "2026-08-19" });
   assert.equal(saved.location, "unknown");
+});
+
+test("Fase 2B: cross-namespace hooks.on requires an explicit hooks:on permission", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const hookRegistry = new HookRegistry();
+  const storageManager = new StorageManager(dataDir);
+
+  const bNoPerm = await writePlugin(
+    root,
+    "b-noperm",
+    { id: "b-noperm", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.hooks.on("calendar:eventAdded", () => {});
+      return {};
+    }`,
+  );
+  await assert.rejects(
+    () => loadPlugin(bNoPerm, storageManager, hookRegistry),
+    /hooks:on:calendar:eventAdded/,
+  );
+
+  const bWithPerm = await writePlugin(
+    root,
+    "b-perm",
+    { id: "b-perm", version: "1.0.0", kind: "generic", permissions: ["hooks:on:calendar:eventAdded"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      let seen = null;
+      ctx.hooks.on("calendar:eventAdded", (payload) => { seen = payload; });
+      return { seen: () => seen };
+    }`,
+  );
+  const bResult = (await loadPlugin(
+    bWithPerm,
+    storageManager,
+    hookRegistry,
+  )) as { seen: () => unknown };
+
+  const calendarDir = path.resolve(__dirname, "../../../plugins/calendar");
+  const calendar = (await loadPlugin(
+    calendarDir,
+    storageManager,
+    hookRegistry,
+  )) as {
+    addEvent(event: { title: string; date: string }): Promise<Record<string, unknown>>;
+  };
+
+  await calendar.addEvent({ title: "Meeting", date: "2026-08-20" });
+  const seen = await bResult.seen();
+  assert.ok(seen !== null, "cross-namespace listener should have received the event");
+});
+
+test("Fase 2B: own-namespace hooks.on needs no permission (delimiter-anchored)", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginH = await writePlugin(
+    root,
+    "h",
+    { id: "h", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      // Own namespace: free. The prefix must be delimiter-anchored so a
+      // plugin named "h" does not accidentally match event "h-evil:x".
+      ctx.hooks.on("h:ownEvent", () => {});
+      ctx.hooks.on("h-evil:x", () => {});
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(pluginH, storageManager, new HookRegistry()),
+    /hooks:on:h-evil:x/,
+  );
 });
 
 test("skills are registered under the plugin's own prefix", async () => {
@@ -421,6 +560,74 @@ test("Fase 2A: a skill gated 'any' loads when the network:public permission is p
   const skill = skills.find((s) => s.skill === "g.x");
   assert.ok(skill, "g.x should be registered");
   assert.deepEqual(skill.remote, { gate: "any" });
+});
+
+test("Fase 2B: exposing a skill to the HTTP bridge requires a network:http permission", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { httpExposed: true });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(pluginG, storageManager, new HookRegistry(), new TaskBroker()),
+    /network:http:g\.x/,
+  );
+});
+
+test("Fase 2B: an httpExposed skill loads when the network:http permission is present", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const taskBroker = new TaskBroker();
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: ["network:http:g.x"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { httpExposed: true });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await loadPlugin(pluginG, storageManager, new HookRegistry(), taskBroker);
+
+  const skills = taskBroker.listSkills();
+  const skill = skills.find((s) => s.skill === "g.x");
+  assert.ok(skill, "g.x should be registered");
+  assert.equal(skill.httpExposed, true);
+});
+
+test("Fase 2B: httpExposed and network exposure permissions are independent", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  // A skill that is both http-exposed and network-exposed needs both
+  // permissions; the network:http permission alone must not open the network.
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: ["network:http:g.x"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { localOnly: false, httpExposed: true });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(pluginG, storageManager, new HookRegistry(), new TaskBroker()),
+    /network:skill:g\.x/,
+  );
 });
 
 test("Fase 2A: ctx.access is exposed and backed by the shared pass store", async () => {
@@ -571,6 +778,157 @@ test("a signed manifest without a files map is refused at load", async () => {
     () => loadPlugin(dir, storageManager, new HookRegistry()),
     /unhashed file/,
   );
+});
+
+test("identity capability signs `domain || data`, never raw caller-chosen bytes", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const dir = await writePlugin(
+    root,
+    "sig-domain",
+    { id: "sig-domain", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default async function activate(ctx) {
+      const peerId = await ctx.identity.peerId();
+      const signature = await ctx.identity.sign("my-protocol:v1:", Buffer.from("payload"));
+      return { peerId, signature: signature.toString("hex") };
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const result = (await loadPlugin(dir, storageManager, new HookRegistry())) as {
+    peerId: string;
+    signature: string;
+  };
+
+  const peerId = result.peerId;
+  const signature = Buffer.from(result.signature, "hex");
+
+  // Signature must verify against the domain-prefixed bytes ...
+  assert.equal(
+    IdentityManager.verify(
+      peerId,
+      Buffer.concat([Buffer.from("my-protocol:v1:", "utf8"), Buffer.from("payload")]),
+      signature,
+    ),
+    true,
+  );
+
+  // ... and must NOT verify against the bare payload (a raw signer would pass
+  // this check — structural domain separation must prevent it).
+  assert.equal(
+    IdentityManager.verify(peerId, Buffer.from("payload"), signature),
+    false,
+  );
+
+  // A signature minted under one domain never verifies under another.
+  assert.equal(
+    IdentityManager.verify(
+      peerId,
+      Buffer.concat([Buffer.from("other-protocol:v1:", "utf8"), Buffer.from("payload")]),
+      signature,
+    ),
+    false,
+  );
+});
+
+test("Fase 2B: loadPlugin rejects a ui.entry that escapes the plugin directory", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const dir = await writePlugin(
+    root,
+    "ui-escape",
+    {
+      id: "ui-escape",
+      version: "1.0.0",
+      kind: "generic",
+      permissions: [],
+      entry: "./index.mjs",
+      ui: { entry: "../../outside/index.html" },
+    },
+    `export default function activate() {}`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(dir, storageManager, new HookRegistry()),
+    /ui.entry.*escapes/,
+  );
+});
+
+test("Fase 2B: ui.skills entries must live in the plugin's own namespace", async () => {
+  const root = await makeTmpRoot();
+
+  const dir = await writePlugin(
+    root,
+    "ui-ns",
+    {
+      id: "ui-ns",
+      version: "1.0.0",
+      kind: "generic",
+      permissions: [],
+      entry: "./index.mjs",
+      ui: { entry: "ui/index.html", skills: ["calendar:eventAdded", "other.x"] },
+    },
+    `export default function activate() {}`,
+  );
+
+  await assert.rejects(() => loadManifest(dir), /own namespace/);
+});
+
+test("Fase 2B: ui.skills entries must have a matching network:http permission", async () => {
+  const root = await makeTmpRoot();
+
+  const dir = await writePlugin(
+    root,
+    "ui-http",
+    {
+      id: "ui-http",
+      version: "1.0.0",
+      kind: "generic",
+      permissions: [],
+      entry: "./index.mjs",
+      ui: { entry: "ui/index.html", skills: ["ui-http.list"] },
+    },
+    `export default function activate() {}`,
+  );
+
+  await assert.rejects(() => loadManifest(dir), /network:http:ui-http\.list/);
+});
+
+test("Fase 2B: a UI with a matching skills allowlist loads and exposes it", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const taskBroker = new TaskBroker();
+
+  const dir = await writePlugin(
+    root,
+    "ui-ok",
+    {
+      id: "ui-ok",
+      version: "1.0.0",
+      kind: "generic",
+      permissions: ["network:http:ui-ok.list"],
+      entry: "./index.mjs",
+      ui: {
+        entry: "ui/index.html",
+        skills: ["ui-ok.list"],
+        defaultWidth: 500,
+      },
+    },
+    `export default function activate(ctx) {
+      ctx.skills.register("list", async () => ["a"], { httpExposed: true });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const manifest = await loadManifest(dir);
+  await loadPlugin(dir, storageManager, new HookRegistry(), taskBroker);
+
+  assert.deepEqual(manifest.ui?.skills, ["ui-ok.list"]);
+  assert.equal(taskBroker.hasSkill("ui-ok.list"), true);
 });
 
 

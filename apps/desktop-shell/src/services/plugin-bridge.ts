@@ -16,10 +16,26 @@ interface OutboundResult extends TaskResult {
 }
 
 /**
+ * Origin the plugin UI iframes are loaded from. The core-server is reached
+ * directly (never through the shell's own origin): keeping the iframe
+ * cross-origin with the shell means a sandboxed plugin UI can never reach the
+ * shell DOM, and `event.origin` stays an exact, verifiable value.
+ */
+export const CORE_ORIGIN =
+  (import.meta as unknown as { env?: { VITE_CORE_ORIGIN?: string } }).env
+    ?.VITE_CORE_ORIGIN ?? "http://127.0.0.1:8787";
+
+/**
  * Secure postMessage bridge for plugin UI panels rendered in iframes. A plugin
  * iframe never talks to the core HTTP endpoints directly — it posts a call to
- * the shell, which checks the call against the plugin's registered skills and
- * routes it through the CoreBridge.
+ * the shell, which checks the call against the plugin's manifest-declared
+ * skill allowlist and routes it through the CoreBridge.
+ *
+ * Fase 2B hardening: both directions are origin-pinned. Inbound messages are
+ * only accepted from {@link CORE_ORIGIN} (an exact `event.origin` equality,
+ * never a prefix or `"*"`), and responses are posted back with the same
+ * origin as `targetOrigin` — so a hostile page on any other origin cannot
+ * forge a bridge call, and the response never leaks to one.
  */
 export class PluginBridge {
   private readonly allowedSkills = new Map<string, Set<string>>();
@@ -34,6 +50,11 @@ export class PluginBridge {
     this.allowedSkills.delete(pluginId);
   }
 
+  /** Drop every registered capability (called when capabilities refresh). */
+  clearCapabilities(): void {
+    this.allowedSkills.clear();
+  }
+
   attach(): void {
     if (this.attached) {
       return;
@@ -45,6 +66,9 @@ export class PluginBridge {
   }
 
   private async onMessage(event: MessageEvent): Promise<void> {
+    if (event.origin !== CORE_ORIGIN || !event.source) {
+      return;
+    }
     const data = event.data as Partial<InboundCall>;
     if (data?.source !== "p2p-hub-plugin") {
       return;
@@ -93,12 +117,10 @@ export class PluginBridge {
   }
 
   private respond(
-    target: MessageEventSource | null,
+    target: MessageEventSource,
     result: OutboundResult,
   ): void {
-    if (target && "postMessage" in target) {
-      (target as WindowProxy).postMessage(result, "*");
-    }
+    (target as WindowProxy).postMessage(result, CORE_ORIGIN);
   }
 }
 

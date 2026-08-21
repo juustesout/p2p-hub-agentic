@@ -4,10 +4,31 @@
   "version": "1.0.0",
   "kind": "generic",
   "entry": "./dist/index.js",
-  "permissions": ["storage:read:paint"],
+  "permissions": [
+    "storage:read:paint",
+    "network:http:paint.createCanvas",
+    "network:http:paint.listCanvases",
+    "network:http:paint.getCanvas",
+    "network:http:paint.addLayer",
+    "network:http:paint.updateLayer",
+    "network:http:paint.deleteLayer",
+    "network:http:paint.aiGenerateImage",
+    "network:http:paint.embedObject",
+    "network:http:paint.exportPNG"
+  ],
   "exposedEvents": ["paint:canvasCreated", "paint:layerAdded"],
   "ui": {
     "entry": "dist/index.html",
+    "skills": [
+      "paint.createCanvas",
+      "paint.listCanvases",
+      "paint.addLayer",
+      "paint.updateLayer",
+      "paint.deleteLayer",
+      "paint.aiGenerateImage",
+      "paint.embedObject",
+      "paint.exportPNG"
+    ],
     "defaultWidth": 1000,
     "defaultHeight": 700
   }

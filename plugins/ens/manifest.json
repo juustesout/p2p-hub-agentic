@@ -4,5 +4,8 @@
   "version": "0.1.0",
   "kind": "generic",
   "entry": "./dist/index.js",
-  "permissions": []
+  "permissions": [
+    "network:http:ens.setConfig",
+    "network:http:ens.resolve"
+  ]
 }

@@ -1,13 +1,14 @@
 import { useMemo, useState } from "react";
 import { useApp } from "../state/AppState";
-import type { CapabilitySkill, RemotePeer } from "../types";
-import { Search, KeyRound, Network, Puzzle, Settings } from "lucide-react";
+import type { CapabilityPlugin, CapabilitySkill, RemotePeer } from "../types";
+import { Search, KeyRound, Network, Puzzle, Settings, Monitor } from "lucide-react";
 
 interface StartMenuProps {
   onClose: () => void;
   onOpenVault: () => void;
   onOpenInspector: () => void;
   onOpenSettings: () => void;
+  onOpenPlugin: (plugin: CapabilityPlugin) => void;
 }
 
 export function StartMenu({
@@ -15,6 +16,7 @@ export function StartMenu({
   onOpenVault,
   onOpenInspector,
   onOpenSettings,
+  onOpenPlugin,
 }: StartMenuProps) {
   const { capabilities, execute } = useApp();
   const [query, setQuery] = useState("");
@@ -67,22 +69,42 @@ export function StartMenu({
         <div className="max-h-[420px] overflow-y-auto p-3">
           <SectionLabel icon={<Puzzle size={14} />} label="Local plugins" />
           <div className="grid grid-cols-2 gap-1">
-            {plugins.map((plugin) => (
-              <div
-                key={plugin.id}
-                className="flex items-center gap-3 rounded-xl px-3 py-2 text-left glass-hover"
-              >
-                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/20 text-sky-300">
-                  <Puzzle size={16} />
-                </span>
-                <div className="min-w-0">
-                  <p className="truncate text-sm text-slate-100">{plugin.name}</p>
-                  <p className="truncate text-xs text-slate-500">
-                    {plugin.id} · v{plugin.version}
-                  </p>
-                </div>
-              </div>
-            ))}
+            {plugins.map((plugin) => {
+              const openable = plugin.ui !== null;
+              const entry = (
+                <>
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/20 text-sky-300">
+                    {openable ? <Monitor size={16} /> : <Puzzle size={16} />}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm text-slate-100">{plugin.name}</p>
+                    <p className="truncate text-xs text-slate-500">
+                      {plugin.id} · v{plugin.version}
+                      {openable ? " · open UI" : ""}
+                    </p>
+                  </div>
+                </>
+              );
+              if (!openable) {
+                return (
+                  <div
+                    key={plugin.id}
+                    className="flex items-center gap-3 rounded-xl px-3 py-2 text-left glass-hover"
+                  >
+                    {entry}
+                  </div>
+                );
+              }
+              return (
+                <button
+                  key={plugin.id}
+                  onClick={() => onOpenPlugin(plugin)}
+                  className="flex items-center gap-3 rounded-xl px-3 py-2 text-left glass-hover"
+                >
+                  {entry}
+                </button>
+              );
+            })}
           </div>
 
           <SectionLabel icon={<Network size={14} />} label="Local skills" />

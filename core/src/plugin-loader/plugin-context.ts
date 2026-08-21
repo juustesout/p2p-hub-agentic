@@ -64,12 +64,25 @@ export interface VaultContext {
  * bytes with its persistent identity key and can verify a peer's signature,
  * but can never read or extract the private key. This mirrors `ctx.ai` (a
  * capability over `CoreAIProvider`) and `ctx.vault` (no `getSecret`).
+ *
+ * Fase 2B: domain separation is *structural*, not a convention. Both `sign`
+ * and `verify` take a mandatory `domain` string that the core prepends to
+ * `data` before signing/verifying — a plugin can never produce (or accept) a
+ * signature over raw caller-chosen bytes without a domain context. A signature
+ * minted in one domain (e.g. `p2p-hub:chat:message:v1:`) is structurally
+ * meaningless in every other domain. Callers pick a distinctive domain
+ * constant per protocol and never reuse another protocol's constant.
  */
 export interface IdentityCapability {
-  /** Sign arbitrary bytes with the local persistent identity key. */
-  sign(data: Buffer): Promise<Buffer>;
-  /** Verify a signature against a peer's public key. Never throws. */
-  verify(publicKeyHex: string, data: Buffer, signature: Buffer): boolean;
+  /** Sign `domain || data` with the local persistent identity key. */
+  sign(domain: string, data: Buffer): Promise<Buffer>;
+  /** Verify a signature over `domain || data` against a peer's public key. Never throws. */
+  verify(
+    publicKeyHex: string,
+    domain: string,
+    data: Buffer,
+    signature: Buffer,
+  ): boolean;
   /**
    * The local node's persistent `peerId` (hex Ed25519 public key). The
    * narrowest possible "who am I" accessor — deliberately not `getIdentity()`,
@@ -145,11 +158,20 @@ export interface PluginContext {
     list(prefix?: string): Promise<string[]>;
   } | null;
   /**
-   * Absolute path of the host data directory. Read-only; exposed so a plugin
-   * can validate a user-supplied path against it (e.g. the PeerSite site root
-   * must not live inside the agent data directory). Never a secret.
+   * Absolute path of this plugin's own data subfolder
+   * (`<dataDir>/plugins/<pluginId>`). Created on load. A plugin may read and
+   * write files here freely, but it can never reach the host data directory,
+   * other plugins' folders, the vault or the boot-token through this path.
    */
   dataDir: string;
+  /**
+   * True when `candidatePath` resolves to the *host* data directory itself or
+   * a path inside it. The containment basis is the real agent data directory,
+   * NOT the plugin's own scoped {@link dataDir} subfolder — so a plugin can
+   * validate a user-supplied path (e.g. the PeerSite site root must not live
+   * inside the vault) without ever being handed the host data dir's path.
+   */
+  isPathInsideDataDir(candidatePath: string): boolean;
   hooks: HookContext;
   skills: SkillContext;
   ai: AIContext;

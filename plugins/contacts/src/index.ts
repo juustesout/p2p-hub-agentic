@@ -82,10 +82,6 @@ const SIGN_CHALLENGE_SKILL = "contacts.signChallenge";
 
 const PEER_ID_RE = /^[0-9a-f]{64}$/;
 
-function challengeMessage(nonce: Buffer): Buffer {
-  return Buffer.concat([Buffer.from(CHALLENGE_CONTEXT, "utf8"), nonce]);
-}
-
 export default function activate(ctx: PluginContext): ContactsPlugin {
   function newBook(): PBXDocument {
     return createDocument(CONTACT_BOOK_CLASS, { contacts: [] });
@@ -248,7 +244,8 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
 
     const valid = ctx.identity.verify(
       String(contact.publicKeyHex),
-      challengeMessage(nonce),
+      CHALLENGE_CONTEXT,
+      nonce,
       Buffer.from(signature, "hex"),
     );
     if (!valid) {
@@ -317,9 +314,11 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
       if (typeof nonce !== "string" || nonce.length === 0 || !/^[0-9a-f]+$/.test(nonce)) {
         throw new Error("signChallenge expects { nonce: string(hex) }");
       }
-      // Domain separation: sign CONTEXT || nonce, never caller-chosen bytes.
+      // Domain separation: the capability signs CHALLENGE_CONTEXT || nonce
+      // (the domain is applied structurally), never caller-chosen bytes.
       const signature = await ctx.identity.sign(
-        challengeMessage(Buffer.from(nonce, "hex")),
+        CHALLENGE_CONTEXT,
+        Buffer.from(nonce, "hex"),
       );
       return { signature: signature.toString("hex") };
     },

@@ -2,6 +2,8 @@
   "id": "birthday-cards",
   "version": "0.0.1",
   "kind": "generic",
-  "permissions": [],
+  "permissions": [
+    "hooks:on:calendar:eventAdded"
+  ],
   "entry": "./dist/index.js"
 }

@@ -24,6 +24,7 @@ import {
 } from "../network/retry";
 import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext, NetworkCapability } from "./plugin-context";
+import { isPathInsideDataDir } from "../site/site-files";
 import { verifyManifestSignature, verifyPluginFiles } from "@p2p-hub/sdk";
 
 /**
@@ -176,6 +177,44 @@ function validateManifest(
         `invalid plugin manifest at ${manifestPath}: "ui.defaultHeight" must be a number`,
       );
     }
+    // Fase 2B: the bridge allowlist is a structured contract, not free-form
+    // text. Every entry must be a full skill identifier in this plugin's own
+    // namespace (delimiter-anchored, so "a.x" never matches "a"), and it must
+    // have a matching `network:http:<entry>` permission — a UI can only be
+    // declared able to call a skill the plugin has deliberately exposed to the
+    // local HTTP bridge.
+    if (ui.skills !== undefined) {
+      if (
+        !Array.isArray(ui.skills) ||
+        !ui.skills.every((s) => typeof s === "string")
+      ) {
+        throw new InvalidManifestError(
+          `invalid plugin manifest at ${manifestPath}: "ui.skills" must be an array of strings`,
+        );
+      }
+      const permissions = Array.isArray(manifest.permissions)
+        ? (manifest.permissions as unknown[])
+        : [];
+      for (const skill of ui.skills) {
+        const fullName = skill as string;
+        if (
+          !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(fullName) ||
+          !fullName.startsWith(`${manifest.id}.`)
+        ) {
+          throw new InvalidManifestError(
+            `invalid plugin manifest at ${manifestPath}: "ui.skills" entry ` +
+              `"${fullName}" must be a full skill identifier in this plugin's ` +
+              `own namespace ("${manifest.id}.<skill>")`,
+          );
+        }
+        if (!permissions.includes(`network:http:${fullName}`)) {
+          throw new InvalidManifestError(
+            `invalid plugin manifest at ${manifestPath}: "ui.skills" entry ` +
+              `"${fullName}" lacks a matching "network:http:${fullName}" permission`,
+          );
+        }
+      }
+    }
   }
 }
 
@@ -213,6 +252,14 @@ export async function loadPlugin(
   const own = storageManager.getOrCreate(manifest.id);
   const aiProvider = new CoreAIProvider({ vault: vaultManager });
 
+  // Fase 2B: a plugin gets its own data subfolder, never the host data
+  // directory. `isPathInsideDataDir` still checks against the real host data
+  // dir so a plugin can validate user-supplied paths (PeerSite site root)
+  // against the vault/boot-token area it must never reach through this path.
+  const hostDataDir = storageManager.getDataDir();
+  const pluginDataDir = path.join(hostDataDir, "plugins", manifest.id);
+  await fs.mkdir(pluginDataDir, { recursive: true });
+
   const context: PluginContext = {
     storage: {
       get: (key) => own.get(key),
@@ -230,9 +277,25 @@ export async function loadPlugin(
         list: (prefix) => other.list(prefix),
       };
     },
-    dataDir: storageManager.getDataDir(),
+    dataDir: pluginDataDir,
+    isPathInsideDataDir: (candidatePath) =>
+      isPathInsideDataDir(candidatePath, hostDataDir),
     hooks: {
       on: (event, handler, priority = 10) => {
+        // Fase 2B: subscribing to another plugin's namespace (cross-namespace
+        // `on`) requires an explicit `hooks:on:<event>` permission, mirroring
+        // how cross-namespace `registerFilter` needs `hooks:filter:<event>`.
+        // Listening to your own namespace stays free. The delimiter-anchored
+        // prefix check prevents `"calendar:x"` from matching `"calendar"`.
+        if (
+          !event.startsWith(`${manifest.id}:`) &&
+          !manifest.permissions.includes(`hooks:on:${event}`)
+        ) {
+          throw new Error(
+            `plugin "${manifest.id}" lacks permission ` +
+              `"hooks:on:${event}" to subscribe to a cross-namespace event`,
+          );
+        }
         const subscription = hookRegistry.on(event, handler, priority);
         disposers.add(subscription);
         return subscription;
@@ -273,6 +336,9 @@ export async function loadPlugin(
         if (options?.localOnly === false) {
           assertNetworkSkillPermission(manifest, skillName);
         }
+        if (options?.httpExposed === true) {
+          assertHttpExposedPermission(manifest, skillName);
+        }
         if (assertsPublicRemote(options)) {
           assertPublicRemotePermission(manifest, skillName);
         }
@@ -305,9 +371,21 @@ export async function loadPlugin(
       },
     },
     identity: {
-      sign: (data) => identityManager.sign(data),
-      verify: (publicKeyHex, data, signature) =>
-        IdentityManager.verify(publicKeyHex, data, signature),
+      // Fase 2B: domain separation is structural. The domain is mandatory and
+      // prepended by the core, so a plugin can never sign (or verify) raw
+      // caller-chosen bytes without a domain context. Wire bytes are
+      // `domain || data` — identical to the historical `p2p-hub:*:v1:`-prefixed
+      // contexts — so verifier interoperability is preserved. A single shared
+      // domain prefix keeps every signature from every plugin domain-scoped
+      // without any plugin being able to mint a signature in another's domain.
+      sign: (domain, data) =>
+        identityManager.sign(Buffer.concat([Buffer.from(domain, "utf8"), data])),
+      verify: (publicKeyHex, domain, data, signature) =>
+        IdentityManager.verify(
+          publicKeyHex,
+          Buffer.concat([Buffer.from(domain, "utf8"), data]),
+          signature,
+        ),
       peerId: async () => (await identityManager.getOrCreateIdentity()).peerId,
     },
     network: buildNetworkCapability(networkRegistry),
@@ -363,6 +441,23 @@ export async function loadPlugin(
       `plugin "${manifest.id}" entry "${manifest.entry}" escapes its directory`,
     );
   }
+
+  // Fase 2B: `ui.entry` becomes a filesystem path when the core-server serves
+  // `/ui/<pluginId>/`. The UI root is the *directory containing* the entry, so
+  // it must be contained in the plugin directory the same way the backend
+  // entry is — a `../`-style escape would widen `/ui` serving beyond the
+  // plugin's own files.
+  if (manifest.ui) {
+    const uiPath = path.resolve(pluginDirResolved, manifest.ui.entry);
+    if (
+      uiPath !== pluginDirResolved &&
+      !uiPath.startsWith(pluginDirResolved + path.sep)
+    ) {
+      throw new Error(
+        `plugin "${manifest.id}" ui.entry "${manifest.ui.entry}" escapes its directory`,
+      );
+    }
+  }
   const module = await importEntry(pathToFileURL(entryPath).href);
   const activate = resolveActivate(module);
 
@@ -411,6 +506,28 @@ function assertNetworkSkillPermission(
     throw new Error(
       `plugin "${manifest.id}" exposes skill "${skillName}" to the network ` +
         `but lacks permission "${permission}"`,
+    );
+  }
+}
+
+/**
+ * Fase 2B: `httpExposed: true` routes a skill through the local HTTP bridge
+ * (`/api/execute`), where it is reachable by any HTTP client that presents the
+ * per-boot token (a browser page on the same host, the desktop shell, the
+ * PeerSite API). That is a distinct trust surface from the P2P network, so it
+ * needs its own explicit manifest permission — mirroring how `localOnly: false`
+ * needs `network:skill:*` and gate `any` needs `network:public:*`. A plugin
+ * author must deliberately opt a skill into the local HTTP bridge.
+ */
+function assertHttpExposedPermission(
+  manifest: PluginManifest,
+  skillName: string,
+): void {
+  const permission = `network:http:${manifest.id}.${skillName}`;
+  if (!manifest.permissions.includes(permission)) {
+    throw new Error(
+      `plugin "${manifest.id}" exposes skill "${skillName}" to the local ` +
+        `HTTP bridge but lacks permission "${permission}"`,
     );
   }
 }

@@ -4,10 +4,34 @@
   "version": "1.0.0",
   "kind": "generic",
   "entry": "./dist/index.js",
-  "permissions": ["storage:read:calc"],
+  "permissions": [
+    "storage:read:calc",
+    "network:http:calc.createSheet",
+    "network:http:calc.listSheets",
+    "network:http:calc.getSheet",
+    "network:http:calc.updateCell",
+    "network:http:calc.updateCells",
+    "network:http:calc.evaluateAIFormula",
+    "network:http:calc.embedObject",
+    "network:http:calc.aiFillColumn",
+    "network:http:calc.insertRows",
+    "network:http:calc.deleteRows",
+    "network:http:calc.insertCols",
+    "network:http:calc.deleteCols"
+  ],
   "exposedEvents": ["calc:sheetCreated", "calc:cellUpdated"],
   "ui": {
     "entry": "dist/index.html",
+    "skills": [
+      "calc.createSheet",
+      "calc.listSheets",
+      "calc.getSheet",
+      "calc.updateCell",
+      "calc.updateCells",
+      "calc.evaluateAIFormula",
+      "calc.embedObject",
+      "calc.aiFillColumn"
+    ],
     "defaultWidth": 1000,
     "defaultHeight": 700
   }

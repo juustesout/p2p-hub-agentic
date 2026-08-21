@@ -34,6 +34,14 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      // Plugin UI assets are normally loaded cross-origin (the shell iframe
+      // points at the core-server directly), but proxying /ui keeps manual
+      // testing from the shell origin working and is what a single-origin
+      // deployment would use.
+      "/ui": {
+        target: "http://127.0.0.1:8787",
+        changeOrigin: true,
+      },
     },
   },
   build: {

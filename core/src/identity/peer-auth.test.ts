@@ -19,8 +19,13 @@ function makeKeypair(): { privateKey: crypto.KeyObject; publicKeyHex: string } {
   };
 }
 
-function signWith(privateKey: crypto.KeyObject): (data: Buffer) => Promise<Buffer> {
-  return async (data) => crypto.sign(null, data, privateKey);
+function signWith(privateKey: crypto.KeyObject): (domain: string, data: Buffer) => Promise<Buffer> {
+  return async (domain, data) =>
+    crypto.sign(
+      null,
+      Buffer.concat([Buffer.from(domain, "utf8"), data]),
+      privateKey,
+    );
 }
 
 interface DepsResult {
@@ -49,8 +54,12 @@ function buildDeps(opts: {
       }
       return signAuthChallenge(signWith(signer), nonce);
     },
-    verify: (publicKeyHex, data, signature) =>
-      IdentityManager.verify(publicKeyHex, data, signature),
+    verify: (publicKeyHex, domain, data, signature) =>
+      IdentityManager.verify(
+        publicKeyHex,
+        Buffer.concat([Buffer.from(domain, "utf8"), data]),
+        signature,
+      ),
   };
   return { deps, requestCalls: () => requestCalls };
 }
@@ -148,8 +157,12 @@ test("rejects a signature made under a different domain prefix", async () => {
       ]);
       return crypto.sign(null, wrong, peer.privateKey);
     },
-    verify: (publicKeyHex, data, signature) =>
-      IdentityManager.verify(publicKeyHex, data, signature),
+    verify: (publicKeyHex, domain, data, signature) =>
+      IdentityManager.verify(
+        publicKeyHex,
+        Buffer.concat([Buffer.from(domain, "utf8"), data]),
+        signature,
+      ),
   };
 
   const result = await authenticateIncomingPeer(peer.publicKeyHex, deps);
@@ -175,4 +188,33 @@ test("buildAuthMessage anchors on the exact domain prefix", () => {
     PEERSITE_AUTH_CONTEXT,
   );
   assert.deepEqual(message.subarray(PEERSITE_AUTH_CONTEXT.length), nonce);
+});
+
+test("a signature minted under one domain never verifies under another (structural separation)", async () => {
+  const signer = makeKeypair();
+  const nonce = crypto.randomBytes(32);
+
+  // The domain-aware signer applies PEERSITE_AUTH_CONTEXT itself — the caller
+  // never chooses the bytes that get signed, only the data payload.
+  const signature = await signAuthChallenge(signWith(signer.privateKey), nonce);
+
+  const validUnderPeersite = IdentityManager.verify(
+    signer.publicKeyHex,
+    buildAuthMessage(nonce),
+    signature,
+  );
+  assert.equal(validUnderPeersite, true);
+
+  // The same signature must fail under the *contacts* domain even though the
+  // underlying key and nonce are identical — that is the point of structural
+  // domain separation.
+  const validUnderContacts = IdentityManager.verify(
+    signer.publicKeyHex,
+    Buffer.concat([
+      Buffer.from("p2p-hub:contacts:challenge:v1:", "utf8"),
+      nonce,
+    ]),
+    signature,
+  );
+  assert.equal(validUnderContacts, false);
 });

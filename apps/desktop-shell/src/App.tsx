@@ -8,7 +8,9 @@ import { HermesSidebar } from "./components/HermesSidebar";
 import { VaultModal } from "./components/VaultModal";
 import { SettingsWindow } from "./components/SettingsWindow";
 import { Toasts } from "./components/Toasts";
+import { PluginWindow } from "./components/PluginWindow";
 import { WindowManager, type ManagedWindow } from "./components/WindowManager";
+import type { CapabilityPlugin } from "./types";
 
 export default function App() {
   const { capabilities } = useApp();
@@ -17,24 +19,28 @@ export default function App() {
   const [vaultOpen, setVaultOpen] = useState(false);
   const [windows, setWindows] = useState<ManagedWindow[]>([]);
 
-  // Register each plugin's skills with the secure plugin bridge so a plugin
-  // iframe can only ever call its own declared capabilities.
+  // Register each plugin's *manifest-declared* UI skill allowlist with the
+  // secure plugin bridge so a plugin iframe can only ever call the skills its
+  // manifest explicitly opted into (`ui.skills`), never the full skill list.
   useEffect(() => {
+    pluginBridge.clearCapabilities();
     if (!capabilities) {
       return;
     }
-    const byPlugin = new Map<string, string[]>();
-    for (const skill of capabilities.local.skills) {
-      const list = byPlugin.get(skill.pluginId) ?? [];
-      list.push(skill.skill);
-      byPlugin.set(skill.pluginId, list);
-    }
-    for (const [pluginId, skills] of byPlugin) {
-      pluginBridge.registerCapability(pluginId, skills);
+    for (const plugin of capabilities.local.plugins) {
+      const skills = plugin.ui?.skills ?? [];
+      if (skills.length > 0) {
+        pluginBridge.registerCapability(plugin.id, skills);
+      }
     }
   }, [capabilities]);
 
-  const openWindow = (id: string, title: string, render: () => React.ReactNode) => {
+  const openWindow = (
+    id: string,
+    title: string,
+    render: () => React.ReactNode,
+    size?: { w?: number; h?: number },
+  ) => {
     setWindows((prev) => {
       if (prev.some((w) => w.id === id)) {
         return prev.map((w) => (w.id === id ? { ...w, minimized: false } : w));
@@ -47,8 +53,8 @@ export default function App() {
           title,
           x: 120 + (count % 4) * 40,
           y: 80 + (count % 4) * 32,
-          w: 720,
-          h: 480,
+          w: size?.w ?? 720,
+          h: size?.h ?? 480,
           minimized: false,
           render,
         },
@@ -63,6 +69,14 @@ export default function App() {
 
   const openSettings = () =>
     openWindow("settings", "Settings", () => <SettingsWindow />);
+
+  const openPluginWindow = (plugin: CapabilityPlugin) =>
+    openWindow(
+      `plugin:${plugin.id}`,
+      plugin.name,
+      () => <PluginWindow plugin={plugin} />,
+      { w: plugin.ui?.defaultWidth, h: plugin.ui?.defaultHeight },
+    );
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-950">
@@ -91,6 +105,10 @@ export default function App() {
           }}
           onOpenSettings={() => {
             openSettings();
+            setStartOpen(false);
+          }}
+          onOpenPlugin={(plugin) => {
+            openPluginWindow(plugin);
             setStartOpen(false);
           }}
         />

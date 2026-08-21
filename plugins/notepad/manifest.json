@@ -4,10 +4,23 @@
   "version": "1.0.0",
   "kind": "generic",
   "entry": "./dist/index.js",
-  "permissions": ["storage:read:notepad"],
+  "permissions": [
+    "storage:read:notepad",
+    "network:http:notepad.createNote",
+    "network:http:notepad.listNotes",
+    "network:http:notepad.getNote",
+    "network:http:notepad.aiTransformBlock",
+    "network:http:notepad.embedObject"
+  ],
   "exposedEvents": ["notepad:noteCreated", "notepad:noteUpdated"],
   "ui": {
     "entry": "dist/index.html",
+    "skills": [
+      "notepad.createNote",
+      "notepad.listNotes",
+      "notepad.aiTransformBlock",
+      "notepad.embedObject"
+    ],
     "defaultWidth": 800,
     "defaultHeight": 600
   }

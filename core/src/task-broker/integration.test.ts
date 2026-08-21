@@ -41,6 +41,9 @@ async function setupCalendarHost(): Promise<PluginHost> {
       permissions: [
         "network:skill:calendar.listEvents",
         "network:public:calendar.listEvents",
+        "network:http:calendar.listEvents",
+        "network:http:calendar.addEvent",
+        "network:http:calendar.removeEvent",
       ],
       entry: "./dist/index.js",
     }),

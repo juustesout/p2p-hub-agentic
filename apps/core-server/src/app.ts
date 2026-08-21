@@ -83,8 +83,14 @@ const PEER_ID_RE = /^[a-zA-Z0-9-]{1,128}$/;
 /** URL prefix under which the static site is served. */
 const SITE_PREFIX = "/site";
 
+/** URL prefix under which plugin UI assets are served. */
+const UI_PREFIX = "/ui";
+
 /** URL prefix under which the scoped PeerSite API is served. */
 const PEERSITE_PREFIX = "/peersite";
+
+/** Safe identifier for a plugin id (matches the manifest `id` rule). */
+const PLUGIN_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
 /** Max characters accepted in a `/peersite/message` body. */
 const PEERSITE_MESSAGE_MAX_LENGTH = 10_000;
@@ -98,6 +104,24 @@ const SITE_SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Content-Security-Policy":
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;",
+};
+
+/**
+ * Security headers applied to every `/ui/<pluginId>` response. Stricter than
+ * the site headers: the plugin UI runs in a sandboxed iframe and must make no
+ * network calls of its own — every capability goes through the shell bridge
+ * (postMessage, which CSP does not govern) — so `connect-src 'none'` blocks
+ * fetch/XHR/WebSocket outright. `'self'` here means the core-server origin,
+ * which is what the iframe document is served from.
+ */
+const UI_SECURITY_HEADERS: Record<string, string> = {
+  "X-Content-Type-Options": "nosniff",
+  "Content-Security-Policy":
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data:; worker-src 'self'; connect-src 'none'; " +
+    "base-uri 'none'; form-action 'none'; object-src 'none'",
+  "Cache-Control": "no-store",
+  "Referrer-Policy": "no-referrer",
 };
 
 interface ExecuteBody {
@@ -443,6 +467,9 @@ export class CoreServer {
       if (await this.tryServePeersite(req, res, path)) {
         return;
       }
+      if (await this.tryServeUi(req, res, path)) {
+        return;
+      }
       if (req.method === "GET" && path === "/api/health") {
         return this.sendJson(res, 200, { ok: true, uptime: process.uptime() });
       }
@@ -647,6 +674,129 @@ export class CoreServer {
   }
 
   // ---------------------------------------------------------------------
+  // Plugin UI serving (/ui/<pluginId>/*)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Attempt to serve a plugin's bundled UI document and assets. Returns `true`
+   * (and writes a response) when the request targeted the `/ui` prefix;
+   * returns `false` so the caller can continue routing when it did not.
+   *
+   * Deliberate deviation from the earlier plan note ("boot-token"): `/ui/*` is
+   * served WITHOUT the boot token, exactly like `/site/*`. The boot token must
+   * never appear in the sandboxed iframe's URL, because the plugin's own UI
+   * code can read `location.search` — giving a sandboxed plugin the full
+   * `/api/*` token would let it invoke *any* skill directly, defeating the
+   * shell bridge's allowlist entirely. `/ui` instead relies on the same
+   * controls as `/site`: loopback-only default bind, strict per-request
+   * containment, and a hardened CSP. It serves only the plugin's own public
+   * UI assets (already on the user's disk), and every capability request must
+   * still present the boot token elsewhere.
+   */
+  private async tryServeUi(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ): Promise<boolean> {
+    if (!this.lanSiteAllowed) {
+      return false;
+    }
+    if (pathname !== UI_PREFIX && !pathname.startsWith(UI_PREFIX + "/")) {
+      return false;
+    }
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      this.sendUiEmpty(res, 405, false);
+      return true;
+    }
+
+    // `/ui/<pluginId>/<subpath>` — the plugin id is the first segment after
+    // the prefix. It is only ever used as a Map key (never joined into a
+    // path), and it must still match the manifest id rule so an encoded or
+    // traversing segment is refused up front.
+    const rest = pathname.slice(UI_PREFIX.length);
+    if (!rest.startsWith("/")) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+    const rawSegments = rest.slice(1).split("/");
+    const pluginId = rawSegments[0];
+    if (typeof pluginId !== "string" || !PLUGIN_ID_RE.test(pluginId)) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    const uiRoot = await this.host.pluginUiRoot(pluginId);
+    if (!uiRoot) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    let rawSubpath = rawSegments.slice(1).join("/");
+    if (rawSubpath.length === 0) {
+      // Bare `/ui/<pluginId>/` serves the manifest entry document.
+      const manifest = this.host.listPlugins().find((p) => p.id === pluginId);
+      const entry = manifest?.ui?.entry;
+      if (typeof entry !== "string") {
+        this.sendUiEmpty(res, 404, false);
+        return true;
+      }
+      rawSubpath = path.basename(entry);
+    }
+
+    if (
+      /%2e/i.test(rawSubpath) ||
+      /%00/i.test(rawSubpath) ||
+      rawSubpath.includes("..") ||
+      rawSubpath.includes("\0")
+    ) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSubpath);
+    } catch {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    // Containment (dot-segments, dotfiles, symlinks, escapes) is decided once,
+    // in the shared helper — identical to the P2P fetchAsset and /site paths.
+    const resolved = resolveAndContainFile(uiRoot, decoded);
+    if (!resolved) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    let contents: Buffer;
+    try {
+      contents = await fsp.readFile(resolved);
+    } catch {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    const contentType = contentTypeForPath(resolved);
+    res.writeHead(200, {
+      ...UI_SECURITY_HEADERS,
+      "Content-Type": contentType,
+      "Content-Length": contents.length,
+    });
+    res.end(req.method === "HEAD" ? undefined : contents);
+    return true;
+  }
+
+  private sendUiEmpty(
+    res: http.ServerResponse,
+    status: number,
+    withHeaders: boolean,
+  ): void {
+    res.writeHead(status, withHeaders ? UI_SECURITY_HEADERS : {});
+    res.end();
+  }
+
+  // ---------------------------------------------------------------------
   // Scoped PeerSite API (/peersite/*)
   // ---------------------------------------------------------------------
 
@@ -766,6 +916,16 @@ export class CoreServer {
       name: p.name ?? p.id,
       kind: p.kind,
       version: p.version,
+      // Fase 2B: manifest-declared UI surface. `skills` is the bridge allowlist
+      // the shell must register — never derived from the full skill list.
+      ui: p.ui
+        ? {
+            entry: p.ui.entry,
+            defaultWidth: p.ui.defaultWidth,
+            defaultHeight: p.ui.defaultHeight,
+            skills: p.ui.skills ?? [],
+          }
+        : null,
     }));
 
     const skills = this.broker.listSkills().map((s) => ({

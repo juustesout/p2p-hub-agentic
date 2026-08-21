@@ -35,40 +35,58 @@ export const PEERSITE_KNOCK_CONTEXT = "p2p-hub:peersite:knock:v1:";
 /** A peerId is a 64-char hex Ed25519 public key — same rule contacts enforces. */
 export const PEER_ID_RE = /^[0-9a-f]{64}$/;
 
-/** The exact bytes a peer must sign to prove possession: `CONTEXT || nonce`. */
+/**
+ * The exact bytes a peer must sign to prove possession: `CONTEXT || nonce`.
+ * Kept as a wire-format builder for tests/raw-key signing; the plugin-facing
+ * sign path applies the domain structurally via the identity capability.
+ */
 export function buildAuthMessage(nonce: Buffer): Buffer {
   return Buffer.concat([Buffer.from(PEERSITE_AUTH_CONTEXT, "utf8"), nonce]);
 }
 
 /**
+ * The *data* portion of the knock message (the domain prefix is applied by the
+ * identity capability): `peerId || ":" || claim || ":" || timestamp`. The
+ * peerId is the claimed identity (and the verification key); the timestamp
+ * bounds replay to a small window.
+ */
+export function buildKnockData(
+  peerId: string,
+  claim: string,
+  timestamp: number,
+): Buffer {
+  return Buffer.from(`${peerId}:${claim}:${timestamp}`, "utf8");
+}
+
+/**
  * The exact bytes a peer signs to request site access in a single, standalone
- * round-trip: `PEERSITE_KNOCK_CONTEXT || peerId || ":" || claim || ":" ||
- * timestamp`. The peerId is the claimed identity (and the verification key);
- * the timestamp bounds replay to a small window. Never signs caller-chosen
- * bytes verbatim — the domain prefix makes the message unambiguous.
+ * round-trip: `PEERSITE_KNOCK_CONTEXT || buildKnockData(...)`. Kept as a
+ * wire-format builder for tests/raw-key signing; the plugin-facing verify path
+ * applies the domain structurally via the identity capability.
  */
 export function buildKnockMessage(
   peerId: string,
   claim: string,
   timestamp: number,
 ): Buffer {
-  return Buffer.from(
-    `${PEERSITE_KNOCK_CONTEXT}${peerId}:${claim}:${timestamp}`,
-    "utf8",
-  );
+  return Buffer.concat([
+    Buffer.from(PEERSITE_KNOCK_CONTEXT, "utf8"),
+    buildKnockData(peerId, claim, timestamp),
+  ]);
 }
 
 /**
  * The prover/signer side: sign a challenge nonce under the PeerSite auth
  * domain. This is what the peer being challenged runs (wired to a
- * `localOnly: false` skill in the PeerSite plugin). Never signs caller-chosen
- * bytes — only {@link PEERSITE_AUTH_CONTEXT} plus the nonce.
+ * `localOnly: false` skill in the PeerSite plugin). The signer is
+ * domain-aware (it applies {@link PEERSITE_AUTH_CONTEXT} itself), so the
+ * caller can never sign caller-chosen bytes without a domain context.
  */
 export async function signAuthChallenge(
-  sign: (data: Buffer) => Promise<Buffer>,
+  sign: (domain: string, data: Buffer) => Promise<Buffer>,
   nonce: Buffer,
 ): Promise<Buffer> {
-  return sign(buildAuthMessage(nonce));
+  return sign(PEERSITE_AUTH_CONTEXT, nonce);
 }
 
 /**
@@ -98,8 +116,13 @@ export interface PeerAuthDeps {
    * to the peer's auth-signing skill.
    */
   requestSignature(peerId: string, nonce: Buffer): Promise<Buffer | null>;
-  /** Stateless signature check (`ctx.identity.verify`). Never throws. */
-  verify(publicKeyHex: string, data: Buffer, signature: Buffer): boolean;
+  /** Stateless domain-aware signature check (`ctx.identity.verify`). Never throws. */
+  verify(
+    publicKeyHex: string,
+    domain: string,
+    data: Buffer,
+    signature: Buffer,
+  ): boolean;
 }
 
 /**
@@ -127,8 +150,9 @@ export async function authenticateIncomingPeer(
   }
 
   // In the identity layer publicKeyHex === peerId (enforced by contacts on
-  // add), so the claimed peerId IS the public key to verify against.
-  const valid = deps.verify(peerId, buildAuthMessage(nonce), signature);
+  // add), so the claimed peerId IS the public key to verify against. The
+  // domain is applied structurally by the capability (PEERSITE_AUTH_CONTEXT).
+  const valid = deps.verify(peerId, PEERSITE_AUTH_CONTEXT, nonce, signature);
   if (!valid) {
     return { authenticated: false, peerId, reason: "bad-signature" };
   }
