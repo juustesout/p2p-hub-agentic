@@ -131,6 +131,42 @@ payload field. Access passes are core-owned (`AccessPassManager` via `ctx.access
 ephemeral, scoped and expiring — never bearer tokens (the peer still proves
 possession over the transport).
 
+### Capability-level wire contracts & shared-origin surfaces (Fase 2-eindcriterium)
+
+The P2P static-website slice (`p2p-hub:website:v1`, `sdk/src/website-contract.ts`)
+added a second, capability-level versioned contract on top of the transport
+handshake. Lessons that generalize:
+
+1. **A capability payload is a versioned envelope, not a free-form object.** The
+   request `{protocol, version, path}` and the success/error responses have
+   fixed field sets, canonical key order and pinned serialized bytes; unknown
+   protocol/version and any shape mismatch (missing/extra keys, wrong types,
+   extra smuggled fields like a caller-supplied `peerId`) default to typed
+   errors. Parse/encode lives in the SDK so an independent implementation can
+   interoperate without sharing TypeScript.
+2. **Shared-origin surfaces need source-pinning, not just origin checks.** The
+   plugin UI (`/ui/*`) and the mirrored remote site (`/remote-site/*`) are both
+   served from the core-server origin, so a postMessage origin check alone
+   cannot tell them apart. The shell bridge therefore binds the *exact iframe
+   window* to a plugin id (`bindSource`) and accepts calls only from bound
+   windows — content that shares the origin but was never bound (the remote
+   site) can never reach the bridge. When two surfaces share a trust origin,
+   gate on the caller instance, not just the origin string.
+3. **Write-side containment mirrors read-side containment, minus the realpath
+   step.** `mirrorDestination` (write target validation) applies the same
+   segment rules as `resolveAndContainFile` (dot-segments/dotfiles/backslashes/NUL
+   deny, trailing-separator-anchored resolve-containment) but must NOT require a
+   realpath, because the file may legitimately not exist yet. The destination
+   filename is always derived from the consumer's own requested path, never from
+   a remote-supplied field (`name`), so a hostile peer can't control what
+   filename the consumer writes.
+4. **Binary assets stay byte-exact by writing bytes, not strings.** The wire
+   form is base64; the consumer decodes to bytes and writes via
+   `atomicWriteFile`, which now accepts `Uint8Array` and skips the utf8
+   interpretation. A per-asset byte cap is enforced *before* read on the serving
+   side and *after* decode on the consuming side — oversized assets fail with a
+   typed error, never silent truncation.
+
 ### JSON nesting depth (corrected finding — don't re-learn this)
 
 `JSON.parse` in current V8 (Node 22, V8 12.4) is **iterative**: it parses

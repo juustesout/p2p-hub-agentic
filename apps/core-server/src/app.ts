@@ -16,9 +16,11 @@ import {
   MAX_PAYLOAD_BYTES,
   ObjectDepthExceededError,
   PayloadTooLargeError,
+  buildWebsiteRequest,
   evaluateSettingsRisk,
   isPlainObject,
   normalizeSettings,
+  parseWebsiteResponse,
   sanitizeText,
   validateJsonNestingDepth,
   validateObjectDepth,
@@ -29,6 +31,7 @@ import type {
   EffectiveSettings,
   RiskAssessment,
   TaskResult,
+  WebsiteErrorCode,
 } from "@p2p-hub/sdk";
 import {
   CoreAIProvider,
@@ -39,6 +42,8 @@ import {
   TrustTierGate,
   atomicWriteFile,
   contentTypeForPath,
+  mirrorDestination,
+  mirrorFetchAndStore,
   readJsonFile,
   resolveAndContainFile,
   wireNetworkToBroker,
@@ -85,6 +90,15 @@ const SITE_PREFIX = "/site";
 
 /** URL prefix under which plugin UI assets are served. */
 const UI_PREFIX = "/ui";
+
+/**
+ * URL prefix under which a *remote peer's* mirrored P2P website is served:
+ * `/remote-site/<peerId>/*`. Assets are fetched over the P2P `p2p-hub:website:v1`
+ * capability on request and stored under `<dataDir>/sites/<peerId>`. This is
+ * the render side of the Fase-2 end criterion — it proves the site flow works
+ * with no public HTTP server on the *origin* peer.
+ */
+const REMOTE_SITE_PREFIX = "/remote-site";
 
 /** URL prefix under which the scoped PeerSite API is served. */
 const PEERSITE_PREFIX = "/peersite";
@@ -470,6 +484,9 @@ export class CoreServer {
       if (await this.tryServeUi(req, res, path)) {
         return;
       }
+      if (await this.tryServeRemoteSite(req, res, path)) {
+        return;
+      }
       if (req.method === "GET" && path === "/api/health") {
         return this.sendJson(res, 200, { ok: true, uptime: process.uptime() });
       }
@@ -794,6 +811,166 @@ export class CoreServer {
   ): void {
     res.writeHead(status, withHeaders ? UI_SECURITY_HEADERS : {});
     res.end();
+  }
+
+  // ---------------------------------------------------------------------
+  // Remote site mirror serving (/remote-site/<peerId>/*)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Attempt to serve a mirrored remote P2P site. Returns `true` (and writes a
+   * response) when the request targeted the `/remote-site` prefix.
+   *
+   * This is the render side of the Fase-2 end criterion: peer B renders peer
+   * A's `p2p-hub:website:v1` capability inside the same sandboxed-iframe model
+   * as `/ui`. A never runs a public HTTP server — B fetches assets over the
+   * P2P protocol on request and stores them in `<dataDir>/sites/<peerId>`.
+   *
+   * Hardening mirrors `/ui` (CLAUDE.md principle #10): served WITHOUT the boot
+   * token (the iframe is untrusted remote content and must never hold a token
+   * in its URL), loopback-gated, GET/HEAD-only, strict per-request containment
+   * (shared {@link mirrorDestination} on the write side, {@link resolveAndContainFile}
+   * semantics on the serve side), and the hardened UI CSP with `connect-src
+   * 'none'`. The peerId is validated as hex before it ever builds a path, so
+   * the mirror root is contained by construction. Every failure is a quiet 404.
+   */
+  private async tryServeRemoteSite(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ): Promise<boolean> {
+    if (!this.lanSiteAllowed) {
+      return false;
+    }
+    if (
+      pathname !== REMOTE_SITE_PREFIX &&
+      !pathname.startsWith(REMOTE_SITE_PREFIX + "/")
+    ) {
+      return false;
+    }
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      this.sendUiEmpty(res, 405, false);
+      return true;
+    }
+
+    const rest = pathname.slice(REMOTE_SITE_PREFIX.length);
+    if (!rest.startsWith("/")) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+    const rawSegments = rest.slice(1).split("/");
+    const peerId = rawSegments[0];
+    // The peerId is a directory name AND the remote task target. It must be a
+    // valid 64-hex identity before it is used for either.
+    if (typeof peerId !== "string" || !PEER_ID_RE.test(peerId)) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    let rawSubpath = rawSegments.slice(1).join("/");
+    if (rawSubpath.length === 0) {
+      rawSubpath = "index.html";
+    }
+
+    if (
+      /%2e/i.test(rawSubpath) ||
+      /%00/i.test(rawSubpath) ||
+      rawSubpath.includes("..") ||
+      rawSubpath.includes("\0")
+    ) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSubpath);
+    } catch {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+    // A directory URL (`/remote-site/<peerId>/sub/`) maps to its index, exactly
+    // as the origin peer's `resolveAndContainFile` would resolve it.
+    if (decoded.endsWith("/")) {
+      decoded += "index.html";
+    }
+
+    const mirrorRoot = path.join(this.options.dataDir, "sites", peerId);
+    const destination = mirrorDestination(mirrorRoot, decoded);
+    if (!destination) {
+      this.sendUiEmpty(res, 404, false);
+      return true;
+    }
+
+    let contents: Buffer;
+    try {
+      contents = await fsp.readFile(destination);
+    } catch {
+      // Miss: fetch the asset from the remote peer over P2P, then serve it.
+      const stored = await mirrorFetchAndStore({
+        fetcher: (pid, p) => this.fetchRemoteSiteAsset(pid, p),
+        mirrorRoot,
+        peerId,
+        path: decoded,
+      });
+      if (!stored) {
+        this.sendUiEmpty(res, 404, false);
+        return true;
+      }
+      try {
+        contents = await fsp.readFile(stored);
+      } catch {
+        this.sendUiEmpty(res, 404, false);
+        return true;
+      }
+    }
+
+    const contentType = contentTypeForPath(destination);
+    res.writeHead(200, {
+      ...UI_SECURITY_HEADERS,
+      "Content-Type": contentType,
+      "Content-Length": contents.length,
+    });
+    res.end(req.method === "HEAD" ? undefined : contents);
+    return true;
+  }
+
+  /**
+   * Outbound `p2p-hub:website:v1` asset request to a remote peer, wired to the
+   * platform's own network transport. Authorization is entirely the remote
+   * peer's platform decision (its broker gate on the transport-verified caller
+   * identity) — this side only formats the versioned envelope and validates the
+   * response. Every failure is mapped to a typed error code, never leaked.
+   */
+  private async fetchRemoteSiteAsset(
+    peerId: string,
+    assetPath: string,
+  ): Promise<
+    | { ok: true; contentType: string; data: string; name: string }
+    | { ok: false; code: WebsiteErrorCode }
+  > {
+    const result = await this.executeRemote(
+      peerId,
+      "peersite.fetchAsset",
+      randomUUID(),
+      buildWebsiteRequest(assetPath),
+    );
+    if (result.status !== "ok" || !result.result) {
+      return { ok: false, code: "not-found" };
+    }
+    const parsed = parseWebsiteResponse(result.result);
+    if (!parsed) {
+      return { ok: false, code: "malformed" };
+    }
+    if (parsed.status === "error") {
+      return { ok: false, code: parsed.code };
+    }
+    return {
+      ok: true,
+      contentType: parsed.contentType,
+      data: parsed.data,
+      name: parsed.name,
+    };
   }
 
   // ---------------------------------------------------------------------

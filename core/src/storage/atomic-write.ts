@@ -39,13 +39,15 @@ export interface AtomicWriteFs {
 }
 
 export interface AtomicWriteFileHandle {
-  writeFile(data: string, encoding: BufferEncoding): Promise<void>;
+  writeFile(data: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
   sync(): Promise<void>;
   close(): Promise<void>;
 }
 
 /**
- * Durably and atomically replace `filePath` with `data`.
+ * Durably and atomically replace `filePath` with `data`. `data` may be a UTF-8
+ * string or raw bytes (e.g. a mirrored site asset); the exact bytes are what
+ * gets written, so a binary payload survives a mirror round-trip untouched.
  *
  * The destination is never written in place: the payload goes to a temp file
  * in the *same directory*, is flushed to disk with `fsync`, and only then
@@ -65,7 +67,7 @@ export interface AtomicWriteFileHandle {
  */
 export async function atomicWriteFile(
   filePath: string,
-  data: string,
+  data: string | Uint8Array,
   mode: number = 0o600,
 ): Promise<void> {
   return withFileLock(filePath, () =>
@@ -80,7 +82,7 @@ export async function atomicWriteFile(
  */
 export async function atomicWriteFileWith(
   filePath: string,
-  data: string,
+  data: string | Uint8Array,
   mode: number,
   fsp: AtomicWriteFs,
 ): Promise<void> {
@@ -91,7 +93,7 @@ export async function atomicWriteFileWith(
   );
   const fd = await fsp.open(tmpPath, "w", mode);
   try {
-    await fd.writeFile(data, "utf8");
+    await fd.writeFile(data, typeof data === "string" ? "utf8" : undefined);
     await fd.sync(); // fsync before rename — otherwise "written" is a lie
   } finally {
     await fd.close();

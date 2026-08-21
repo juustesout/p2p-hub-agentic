@@ -9,6 +9,7 @@ interface StartMenuProps {
   onOpenInspector: () => void;
   onOpenSettings: () => void;
   onOpenPlugin: (plugin: CapabilityPlugin) => void;
+  onOpenSite: (peerId: string, title: string) => void;
 }
 
 export function StartMenu({
@@ -17,6 +18,7 @@ export function StartMenu({
   onOpenInspector,
   onOpenSettings,
   onOpenPlugin,
+  onOpenSite,
 }: StartMenuProps) {
   const { capabilities, execute } = useApp();
   const [query, setQuery] = useState("");
@@ -139,7 +141,18 @@ export function StartMenu({
             <div key={peer.id} className="mb-1 rounded-xl bg-white/5 px-3 py-2">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium text-slate-200">{peer.name}</span>
-                <span className="text-[10px] text-slate-500">{peer.transport}</span>
+                <span className="flex items-center gap-1">
+                  {peer.skills.some((s) => s === "peersite.fetchAsset") && (
+                    <button
+                      onClick={() => onOpenSite(peer.peerId ?? peer.id, `${peer.name} site`)}
+                      title="Open this peer's mirrored P2P website"
+                      className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300 hover:bg-emerald-500/30"
+                    >
+                      View site
+                    </button>
+                  )}
+                  <span className="text-[10px] text-slate-500">{peer.transport}</span>
+                </span>
               </div>
               <div className="mt-1 flex flex-wrap gap-1">
                 {peer.skills.map((skill) => (

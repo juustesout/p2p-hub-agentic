@@ -1,6 +1,13 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import {
+  MAX_WEBSITE_ASSET_BYTES,
+  encodeWebsiteError,
+  encodeWebsiteSuccess,
+  parseWebsiteRequest,
+} from "@p2p-hub/sdk";
+import type { WebsiteErrorCode } from "@p2p-hub/sdk";
 import type { PluginContext } from "@p2p-hub/core";
 import {
   buildKnockData,
@@ -122,6 +129,22 @@ interface PendingAccessRequest {
 /** Strip control characters (incl. newlines) so a claim can't break a dialog. */
 function sanitizeClaim(claim: string): string {
   return claim.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+}
+
+/** Map the in-process error string to the versioned wire error code. */
+function mapError(error: string): WebsiteErrorCode {
+  switch (error) {
+    case "unauthorized":
+      return "unauthorized";
+    case "site not configured":
+      return "site-not-configured";
+    case "not found":
+      return "not-found";
+    case "payload too large":
+      return "payload-too-large";
+    default:
+      return "malformed";
+  }
 }
 
 export default function activate(ctx: PluginContext): PeerSitePlugin {
@@ -346,6 +369,19 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
       return { ok: false, error: "not found" };
     }
 
+    // Deterministic per-asset cap (p2p-hub:website:v1 contract): reject an
+    // oversized asset with a typed error, never serve it truncated. The cap
+    // also guarantees the base64 wire form stays inside the transport frame.
+    let stat: { size: number };
+    try {
+      stat = await fs.stat(resolved);
+    } catch {
+      return { ok: false, error: "not found" };
+    }
+    if (stat.size > MAX_WEBSITE_ASSET_BYTES) {
+      return { ok: false, error: "payload too large" };
+    }
+
     let contents: Buffer;
     try {
       contents = await fs.readFile(resolved);
@@ -387,11 +423,28 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
       // Fase 2A: the authorized caller identity is the transport-verified
       // `invocation.peerId`, never a caller-supplied payload field. The broker
       // enforces the policy; the plugin re-checks for the in-process API.
-      const { path: requestedPath } = (payload ?? {}) as { path?: unknown };
-      return fetchAsset({
+      //
+      // Fase 2-eindcriterium: the wire payload is the versioned
+      // `p2p-hub:website:v1` request envelope. The version check runs here —
+      // after the broker gate, on the transport-verified caller — so unknown
+      // protocols/versions and malformed envelopes default to a typed error,
+      // never to a partial or silent success.
+      const parsed = parseWebsiteRequest(payload);
+      if (!parsed.ok) {
+        return encodeWebsiteError(parsed.code);
+      }
+      const res = await fetchAsset({
         peerId: invocation?.peerId ?? "",
-        path: requestedPath,
-      } as FetchAssetInput);
+        path: parsed.path,
+      });
+      if (!res.ok) {
+        return encodeWebsiteError(mapError(res.error));
+      }
+      return encodeWebsiteSuccess({
+        contentType: res.contentType,
+        data: res.data,
+        name: res.name,
+      });
     },
     {
       localOnly: false,

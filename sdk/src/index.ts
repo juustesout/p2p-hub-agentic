@@ -6,6 +6,7 @@ export * from "./pbx";
 export * from "./identity";
 export * from "./contact-lookup";
 export * from "./boundary-guard";
+export * from "./website-contract";
 export * from "./sanitizer";
 export * from "./settings-risk";
 export * from "./trust-tier";

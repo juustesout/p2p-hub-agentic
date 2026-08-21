@@ -18,6 +18,7 @@ export * from "./task-broker/remote-access";
 export * from "./task-broker/access-pass-manager";
 export * from "./identity/peer-auth";
 export * from "./site/site-files";
+export * from "./site/site-mirror";
 export * from "./test-support";
 
 import { IdentityManager } from "./identity/identity-manager";

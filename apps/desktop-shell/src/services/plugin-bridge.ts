@@ -39,11 +39,25 @@ export const CORE_ORIGIN =
  */
 export class PluginBridge {
   private readonly allowedSkills = new Map<string, Set<string>>();
+  /**
+   * Authorized `event.source` windows per pluginId. A bridge call is only
+   * accepted from an iframe the shell itself bound to a plugin (via
+   * {@link bindSource}); a plugin UI can never spoof another pluginId, and
+   * content that is served from the same core-server origin but was never
+   * bound — e.g. the `/remote-site/<peerId>` mirror viewer — can never reach
+   * the bridge at all. WeakMap so a closed window is collected.
+   */
+  private readonly boundSources = new WeakMap<object, string>();
   private attached = false;
 
   /** Allow `pluginId` to invoke exactly the listed full skill names. */
   registerCapability(pluginId: string, skills: string[]): void {
     this.allowedSkills.set(pluginId, new Set(skills));
+  }
+
+  /** Bind a specific iframe window as the authorized source for `pluginId`. */
+  bindSource(pluginId: string, source: MessageEventSource): void {
+    this.boundSources.set(source as object, pluginId);
   }
 
   unregisterCapability(pluginId: string): void {
@@ -69,13 +83,21 @@ export class PluginBridge {
     if (event.origin !== CORE_ORIGIN || !event.source) {
       return;
     }
+    // Source-pinning: the caller must be an iframe window this shell bound to
+    // a plugin. This is what keeps untrusted content that shares the
+    // core-server origin (the mirrored remote-site viewer) out of the bridge —
+    // an origin check alone is not enough when two surfaces share an origin.
+    const pluginId = this.boundSources.get(event.source as object);
+    if (!pluginId) {
+      return;
+    }
     const data = event.data as Partial<InboundCall>;
     if (data?.source !== "p2p-hub-plugin") {
       return;
     }
-    const { pluginId, requestId, serviceId, method } = data;
+    const { pluginId: claimedPluginId, requestId, serviceId, method } = data;
     if (
-      typeof pluginId !== "string" ||
+      typeof claimedPluginId !== "string" ||
       typeof requestId !== "string" ||
       typeof serviceId !== "string" ||
       typeof method !== "string"

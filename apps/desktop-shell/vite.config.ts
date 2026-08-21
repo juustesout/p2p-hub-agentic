@@ -42,6 +42,11 @@ export default defineConfig({
         target: "http://127.0.0.1:8787",
         changeOrigin: true,
       },
+      // Same for the mirrored remote P2P website viewer.
+      "/remote-site": {
+        target: "http://127.0.0.1:8787",
+        changeOrigin: true,
+      },
     },
   },
   build: {

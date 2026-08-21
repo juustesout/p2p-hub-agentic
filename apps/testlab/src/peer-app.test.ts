@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildKnockMessage, PluginHost } from "@p2p-hub/core";
+import { buildWebsiteRequest, parseWebsiteResponse } from "@p2p-hub/sdk";
 import { installBuiltPlugin, writeSiteCliPlugin, type SiteCliApi } from "./fixtures";
 
 /**
@@ -122,11 +123,15 @@ async function knock(
 }
 
 function assertAssetOk(result: TaskResultLike, expectedText: string): void {
+  // Fase 2-eindcriterium: the handler answers with the versioned
+  // `p2p-hub:website:v1` success envelope, which the consumer decodes with the
+  // shared `parseWebsiteResponse` contract helper.
   assert.equal(result.status, "ok");
-  const asset = result.result as { ok: boolean; contentType: string; data: string; name: string };
-  assert.equal(asset.ok, true);
-  assert.match(asset.contentType, /text\/html/);
-  assert.equal(Buffer.from(asset.data, "base64").toString("utf8"), expectedText);
+  const response = parseWebsiteResponse(result.result);
+  assert.ok(response, "a compliant peer must answer with a parseable envelope");
+  assert.equal(response.status, "ok");
+  assert.match(response.contentType, /text\/html/);
+  assert.equal(Buffer.from(response.data, "base64").toString("utf8"), expectedText);
 }
 
 test("Fase 2A toetssteen: a verified contact and an access-pass holder fetch a P2P static site; a stranger is denied", async () => {
@@ -156,14 +161,14 @@ test("Fase 2A toetssteen: a verified contact and an access-pass holder fetch a P
       throw new Error("stranger host has no sitecli plugin");
     }
     const strangerDenied = await c.api.sendTask(a.peerId, "peersite.fetchAsset", {
-      path: "index.html",
+      ...buildWebsiteRequest("index.html"),
     });
     assert.equal(strangerDenied.status, "error");
     assert.match(strangerDenied.error ?? "", /not authorized/);
 
     const spoofed = await c.api.sendTask(a.peerId, "peersite.fetchAsset", {
+      ...buildWebsiteRequest("index.html"),
       peerId: b.peerId,
-      path: "index.html",
     });
     assert.equal(spoofed.status, "error", "a caller-supplied peerId must not bypass the gate");
     assert.match(spoofed.error ?? "", /not authorized/);
@@ -180,12 +185,12 @@ test("Fase 2A toetssteen: a verified contact and an access-pass holder fetch a P
       throw new Error("consumer host has no sitecli plugin");
     }
     const contactFetch = await b.api.sendTask(a.peerId, "peersite.fetchAsset", {
-      path: "index.html",
+      ...buildWebsiteRequest("index.html"),
     });
     assertAssetOk(contactFetch, "<h1>hello from P2P</h1>");
 
     const nestedFetch = await b.api.sendTask(a.peerId, "peersite.fetchAsset", {
-      path: "sub/about.html",
+      ...buildWebsiteRequest("sub/about.html"),
     });
     assertAssetOk(nestedFetch, "<h1>about</h1>");
 
@@ -214,7 +219,7 @@ test("Fase 2A toetssteen: a verified contact and an access-pass holder fetch a P
       throw new Error("stranger host has no sitecli plugin");
     }
     const passFetch = await c.api.sendTask(a.peerId, "peersite.fetchAsset", {
-      path: "index.html",
+      ...buildWebsiteRequest("index.html"),
     });
     assertAssetOk(passFetch, "<h1>hello from P2P</h1>");
   } finally {

@@ -9,6 +9,7 @@ import { VaultModal } from "./components/VaultModal";
 import { SettingsWindow } from "./components/SettingsWindow";
 import { Toasts } from "./components/Toasts";
 import { PluginWindow } from "./components/PluginWindow";
+import { SiteViewer } from "./components/SiteViewer";
 import { WindowManager, type ManagedWindow } from "./components/WindowManager";
 import type { CapabilityPlugin } from "./types";
 
@@ -78,6 +79,14 @@ export default function App() {
       { w: plugin.ui?.defaultWidth, h: plugin.ui?.defaultHeight },
     );
 
+  const openSiteWindow = (peerId: string, title: string) =>
+    openWindow(
+      `site:${peerId}`,
+      title,
+      () => <SiteViewer peerId={peerId} />,
+      { w: 960, h: 640 },
+    );
+
   return (
     <div className="relative h-full w-full overflow-hidden bg-slate-950">
       {/* Desktop backdrop */}
@@ -109,6 +118,10 @@ export default function App() {
           }}
           onOpenPlugin={(plugin) => {
             openPluginWindow(plugin);
+            setStartOpen(false);
+          }}
+          onOpenSite={(peerId, title) => {
+            openSiteWindow(peerId, title);
             setStartOpen(false);
           }}
         />
