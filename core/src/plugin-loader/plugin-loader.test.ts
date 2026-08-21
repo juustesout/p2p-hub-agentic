@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +9,10 @@ import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
 import { VaultManager } from "../storage/vault-manager";
+import {
+  collectPluginFileHashes,
+  signManifest,
+} from "@p2p-hub/sdk";
 
 async function makeTmpRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "plugin-loader-"));
@@ -27,6 +32,23 @@ async function writePlugin(
   );
   await fs.writeFile(path.join(dir, "index.mjs"), entrySource);
   return dir;
+}
+
+function makeSigningKey(): string {
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const pem = privateKey.export({ type: "pkcs8", format: "pem" });
+  return typeof pem === "string" ? pem : pem.toString("utf8");
+}
+
+/** Sign a plugin dir: hash all shipped files, stamp signature + files map. */
+async function signPluginDir(dir: string, privateKeyPem: string): Promise<void> {
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(
+    await fs.readFile(manifestPath, "utf8"),
+  ) as Record<string, unknown>;
+  manifest.files = await collectPluginFileHashes(dir);
+  manifest.signature = signManifest(manifest, privateKeyPem);
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 }
 
 test("plugin without storage:read permission cannot read another plugin's storage", async () => {
@@ -352,6 +374,119 @@ test("exposing a skill to the network succeeds with the permission", async () =>
   await loadPlugin(pluginG, storageManager, new HookRegistry(), taskBroker);
 
   assert.equal(taskBroker.hasSkill("g.x"), true);
+});
+
+test("loadManifest rejects a dotted plugin id (Fase 2C namespace fix)", async () => {
+  const root = await makeTmpRoot();
+  const dir = await writePlugin(
+    root,
+    "a.b",
+    { id: "a.b", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate() {}`,
+  );
+
+  // A dotted id could collide with plugin "a"'s skill "b.x"; dots are reserved
+  // as the namespace delimiter and must be rejected structurally.
+  await assert.rejects(() => loadManifest(dir), /"id"/);
+});
+
+test("a signed plugin loads and activates", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const key = makeSigningKey();
+
+  const dir = await writePlugin(
+    root,
+    "signed-good",
+    { id: "signed-good", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) { return { marker: "activated" }; }`,
+  );
+  await signPluginDir(dir, key);
+
+  const storageManager = new StorageManager(dataDir);
+  const result = (await loadPlugin(
+    dir,
+    storageManager,
+    new HookRegistry(),
+  )) as { marker: string };
+  assert.equal(result.marker, "activated");
+
+  const manifest = await loadManifest(dir);
+  assert.equal(manifest.signature?.publicKey.length, 64);
+});
+
+test("a signed manifest with tampered fields is refused at load", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const key = makeSigningKey();
+
+  const dir = await writePlugin(
+    root,
+    "signed-tampered",
+    { id: "signed-tampered", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate() {}`,
+  );
+  await signPluginDir(dir, key);
+
+  // Tamper with a signed field (permissions) — the signature no longer covers
+  // the manifest, so the plugin must be refused.
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(
+    await fs.readFile(manifestPath, "utf8"),
+  ) as Record<string, unknown>;
+  manifest.permissions = ["network:skill:signed-tampered.x"];
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(() => loadManifest(dir), /signature/);
+});
+
+test("a signed plugin with changed code is refused at load", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const key = makeSigningKey();
+
+  const dir = await writePlugin(
+    root,
+    "signed-code-tampered",
+    { id: "signed-code-tampered", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate() {}`,
+  );
+  await signPluginDir(dir, key);
+
+  // Change the shipped code after signing: content hashes must catch it.
+  await fs.writeFile(path.join(dir, "index.mjs"), `export default function activate() { throw new Error("evil"); }`);
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(dir, storageManager, new HookRegistry()),
+    /content verification/,
+  );
+});
+
+test("a signed manifest without a files map is refused at load", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const key = makeSigningKey();
+
+  const dir = await writePlugin(
+    root,
+    "signed-nofiles",
+    { id: "signed-nofiles", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate() {}`,
+  );
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(
+    await fs.readFile(manifestPath, "utf8"),
+  ) as Record<string, unknown>;
+  manifest.signature = signManifest(manifest, key);
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(dir, storageManager, new HookRegistry()),
+    /unhashed file/,
+  );
 });
 
 

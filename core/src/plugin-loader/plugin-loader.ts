@@ -22,6 +22,7 @@ import {
 } from "../network/retry";
 import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext, NetworkCapability } from "./plugin-context";
+import { verifyManifestSignature, verifyPluginFiles } from "@p2p-hub/sdk";
 
 /**
  * Raised when a plugin `manifest.json` cannot be read, parsed or validated.
@@ -59,6 +60,18 @@ export async function loadManifest(pluginDir: string): Promise<PluginManifest> {
   }
 
   validateManifest(parsed, manifestPath);
+  if ((parsed as { signature?: unknown }).signature !== undefined) {
+    // Fase 2C: a manifest that claims a signature must prove it — any failure
+    // (malformed block, wrong alg, bad key/signature format, invalid
+    // signature) blocks the plugin. Unsigned manifests are handled by the
+    // caller (PluginHost) as untrusted, not here.
+    const verified = verifyManifestSignature(parsed);
+    if (!verified.ok) {
+      throw new InvalidManifestError(
+        `invalid plugin manifest at ${manifestPath}: ${verified.reason}`,
+      );
+    }
+  }
   return parsed;
 }
 
@@ -78,13 +91,19 @@ function validateManifest(
       `invalid plugin manifest at ${manifestPath}: missing or empty "id"`,
     );
   }
-  // The id is used to build `<dataDir>/<pluginId>.json` and as the permission
-  // string `storage:read:<id>`. Restrict it to a safe identifier so a
-  // plugin-authored id can never inject path separators or traversal.
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.id)) {
+  // The id is used to build `<dataDir>/<pluginId>.json`, as the permission
+  // string `storage:read:<id>`, and as the namespace prefix for every skill
+  // key (`<pluginId>.<skillName>`) and hook event (`<pluginId>:`). Dots are
+  // deliberately FORBIDDEN (Fase 2C): the dot is the namespace delimiter, so a
+  // dotted id like "a.b" could otherwise collide with plugin "a"'s skill
+  // "b.x". Restricting ids to a dot-free identifier makes the delimiter
+  // unambiguous by construction — same class of fix as anchoring namespace
+  // prefix checks on the delimiter itself.
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(manifest.id)) {
     throw new InvalidManifestError(
       `invalid plugin manifest at ${manifestPath}: "id" must start with an ` +
-        `alphanumeric and contain only alphanumerics, ".", "_" or "-"`,
+        `alphanumeric and contain only alphanumerics, "_" or "-" ` +
+        `(dots are reserved as the skill/event namespace delimiter)`,
     );
   }
   if (typeof manifest.version !== "string" || manifest.version.length === 0) {
@@ -175,6 +194,19 @@ export async function loadPlugin(
   resolveTrustLookup: (() => ContactLookup | null) | null = null,
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
+  if (manifest.signature !== undefined) {
+    // Fase 2C: a signed manifest is only trusted if every shipped file matches
+    // its signed content hashes. A mismatch (changed code, dropped-in file)
+    // means the plugin no longer is what its signer shipped — fail closed.
+    const files = manifest.files ?? {};
+    const verified = await verifyPluginFiles(pluginDir, files);
+    if (!verified.ok) {
+      throw new InvalidManifestError(
+        `signed plugin "${manifest.id}" failed content verification: ` +
+          `${verified.reason}`,
+      );
+    }
+  }
   const own = storageManager.getOrCreate(manifest.id);
   const aiProvider = new CoreAIProvider({ vault: vaultManager });
 

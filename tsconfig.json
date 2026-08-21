@@ -18,6 +18,7 @@
     { "path": "./plugins/tasks" },
     { "path": "./plugins/smartbase" },
     { "path": "./apps/core-server" },
-    { "path": "./apps/testlab" }
+    { "path": "./apps/testlab" },
+    { "path": "./apps/create-p2p-plugin" }
   ]
 }

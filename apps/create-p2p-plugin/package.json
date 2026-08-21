@@ -1,0 +1,19 @@
+{
+  "name": "@p2p-hub/create-p2p-plugin",
+  "version": "0.1.0",
+  "description": "Scaffold and sign p2p-hub plugins (Fase 2C distribution tooling)",
+  "bin": {
+    "create-p2p-plugin": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@p2p-hub/sdk": "0.1.0"
+  },
+  "license": "MIT"
+}

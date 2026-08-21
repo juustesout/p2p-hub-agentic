@@ -201,7 +201,10 @@ When asked to review or verify security-relevant work in this repo:
   colliding dotted ids (e.g. `"a.b"` and `"a"` registering skill `"b.x"`)
   can produce the same broker skill key. Theoretical today (single
   developer, no external plugin registration yet); revisit if/when plugin
-  ids are ever assigned by a third party (marketplace).
+  ids are ever assigned by a third party (marketplace). — ~~open~~ **opgelost
+  (Fase 2C)**: plugin ids zijn nu dot-free; de `.` is gereserveerd als
+  skill/hook-namespace-scheidingsteken, dus de collisie is structureel
+  onmogelijk gemaakt in `validateManifest`.
 - Chat's canonical message form is `JSON.stringify` over a fixed-key-order
   object (NFC-normalized text). That is only sound while sender and receiver
   reuse the same `canonicalMessage` constructor. Trigger to revisit: the

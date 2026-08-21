@@ -61,6 +61,14 @@ export interface PluginHostOptions {
    */
   activationTimeoutMs?: number;
   /**
+   * Fase 2C distribution gate. When true, any plugin whose manifest lacks an
+   * Ed25519 `signature` (and matching content hashes) is refused at boot —
+   * unsigned third-party plugins can never load. Defaults to `false` so local
+   * development keeps working; every boot still logs which plugins are
+   * unsigned and therefore untrusted.
+   */
+  requireSignedPlugins?: boolean;
+  /**
    * Test-only seam: constructs the network transport instead of the default
    * `NetworkLightProvider`. Tests inject a provider whose `start()` rejects so
    * they can verify a network failure never blocks plugin boot, without
@@ -110,6 +118,7 @@ export class PluginHost {
   private readonly disposers = new Map<string, DisposerBag>();
   private readonly plugins: PluginManifest[] = [];
   private readonly states = new Map<string, PluginState>();
+  private readonly signatures = new Map<string, "signed" | "unsigned">();
   private readonly activationTimeoutMs: number;
 
   constructor(private readonly options: PluginHostOptions) {
@@ -151,6 +160,8 @@ export class PluginHost {
       .map((entry) => entry.name)
       .sort();
 
+    const unsignedIds: string[] = [];
+
     for (const name of subdirs) {
       const pluginDir = path.join(this.options.pluginsDir, name);
 
@@ -160,6 +171,19 @@ export class PluginHost {
       } catch (err) {
         console.error(`[plugin-host] skipping "${name}": ${(err as Error).message}`);
         continue;
+      }
+
+      const signed = manifest.signature !== undefined;
+      if (!signed) {
+        if (this.options.requireSignedPlugins) {
+          // Fase 2C hard gate: unsigned third-party plugins are refused.
+          console.error(
+            `[plugin-host] skipping "${manifest.id}": unsigned manifest ` +
+              `(requireSignedPlugins is enabled)`,
+          );
+          continue;
+        }
+        unsignedIds.push(manifest.id);
       }
 
       const disposers = new DisposerBag();
@@ -187,6 +211,7 @@ export class PluginHost {
         this.disposers.set(manifest.id, disposers);
         this.plugins.push(manifest);
         this.states.set(manifest.id, "ACTIVE");
+        this.signatures.set(manifest.id, signed ? "signed" : "unsigned");
       } catch (err) {
         // Release anything the plugin registered before it failed, so a broken
         // activation never leaves dangling listeners or timers behind.
@@ -201,6 +226,15 @@ export class PluginHost {
           `[plugin-host] failed to activate "${manifest.id}": ${(err as Error).message}`,
         );
       }
+    }
+
+    // Fase 2C: an unsigned plugin has no provenance — be loud about it, once,
+    // so a silently-untrusted plugin can never slip through unnoticed.
+    if (unsignedIds.length > 0) {
+      console.warn(
+        `[plugin-host] ${unsignedIds.length} plugin(s) are unsigned and ` +
+          `treated as untrusted: ${unsignedIds.join(", ")}`,
+      );
     }
 
     if (this.options.enableNetworking) {
@@ -271,6 +305,7 @@ export class PluginHost {
     }
     this.activated.delete(pluginId);
     this.states.delete(pluginId);
+    this.signatures.delete(pluginId);
     const idx = this.plugins.findIndex((p) => p.id === pluginId);
     if (idx !== -1) {
       this.plugins.splice(idx, 1);
@@ -284,6 +319,15 @@ export class PluginHost {
   /** Lifecycle state of a plugin (`ACTIVE`, `FAILED_ACTIVATION`, or timeout). */
   pluginState(pluginId: string): PluginState | undefined {
     return this.states.get(pluginId);
+  }
+
+  /**
+   * Fase 2C provenance: `"signed"` for a plugin whose Ed25519 signature and
+   * content hashes verified at load, `"unsigned"` for one that loaded without
+   * a signature (treated as untrusted), `undefined` when not active.
+   */
+  pluginSignature(pluginId: string): "signed" | "unsigned" | undefined {
+    return this.signatures.get(pluginId);
   }
 
   hookRegistry(): HookRegistry {

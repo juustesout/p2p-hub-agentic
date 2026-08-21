@@ -1,9 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { PluginHost } from "./plugin-host";
+import {
+  collectPluginFileHashes,
+  signManifest,
+} from "@p2p-hub/sdk";
 
 async function makeTmpRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "plugin-host-"));
@@ -24,6 +29,38 @@ async function writePlugin(
     );
   }
   await fs.writeFile(path.join(dir, "index.mjs"), entrySource);
+}
+
+function makeSigningKey(): string {
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const pem = privateKey.export({ type: "pkcs8", format: "pem" });
+  return typeof pem === "string" ? pem : pem.toString("utf8");
+}
+
+async function signPluginDir(
+  root: string,
+  name: string,
+  privateKeyPem: string,
+): Promise<void> {
+  const dir = path.join(root, "plugins", name);
+  const manifestPath = path.join(dir, "manifest.json");
+  const manifest = JSON.parse(
+    await fs.readFile(manifestPath, "utf8"),
+  ) as Record<string, unknown>;
+  manifest.files = await collectPluginFileHashes(dir);
+  manifest.signature = signManifest(manifest, privateKeyPem);
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+}
+
+function silenceConsole(): () => void {
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  console.error = () => undefined;
+  console.warn = () => undefined;
+  return () => {
+    console.error = originalError;
+    console.warn = originalWarn;
+  };
 }
 
 test("boot activates all valid plugins", async () => {
@@ -289,4 +326,93 @@ test("ctx.trust fails closed when no contacts plugin is active", async () => {
   };
 
   assert.equal(await probe.lookup("a".repeat(64)), null);
+});
+
+test("an unsigned plugin loads but is flagged as untrusted (Fase 2C)", async () => {
+  const restore = silenceConsole();
+  try {
+    const root = await makeTmpRoot();
+    await writePlugin(
+      root,
+      "unsigned-plugin",
+      { id: "unsigned-plugin", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+      `export default function activate() { return { name: "unsigned" }; }`,
+    );
+
+    const host = new PluginHost({
+      pluginsDir: path.join(root, "plugins"),
+      dataDir: path.join(root, "data"),
+    });
+    await host.boot();
+
+    assert.deepEqual(host.getActivated("unsigned-plugin"), { name: "unsigned" });
+    assert.equal(host.pluginSignature("unsigned-plugin"), "unsigned");
+  } finally {
+    restore();
+  }
+});
+
+test("requireSignedPlugins refuses unsigned plugins at boot (Fase 2C)", async () => {
+  const restore = silenceConsole();
+  try {
+    const root = await makeTmpRoot();
+    await writePlugin(
+      root,
+      "unsigned-blocked",
+      { id: "unsigned-blocked", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+      `export default function activate() { return { name: "unsigned" }; }`,
+    );
+    const key = makeSigningKey();
+    await writePlugin(
+      root,
+      "signed-ok",
+      { id: "signed-ok", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+      `export default function activate() { return { name: "signed" }; }`,
+    );
+    await signPluginDir(root, "signed-ok", key);
+
+    const host = new PluginHost({
+      pluginsDir: path.join(root, "plugins"),
+      dataDir: path.join(root, "data"),
+      requireSignedPlugins: true,
+    });
+    await host.boot();
+
+    // The unsigned plugin is refused entirely; the signed one loads.
+    assert.equal(host.getActivated("unsigned-blocked"), undefined);
+    assert.deepEqual(host.getActivated("signed-ok"), { name: "signed" });
+    assert.equal(host.pluginSignature("signed-ok"), "signed");
+  } finally {
+    restore();
+  }
+});
+
+test("a signed plugin whose code changed after signing is refused (Fase 2C)", async () => {
+  const restore = silenceConsole();
+  try {
+    const root = await makeTmpRoot();
+    const key = makeSigningKey();
+    await writePlugin(
+      root,
+      "signed-mutated",
+      { id: "signed-mutated", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+      `export default function activate() { return { name: "clean" }; }`,
+    );
+    await signPluginDir(root, "signed-mutated", key);
+    await fs.writeFile(
+      path.join(root, "plugins", "signed-mutated", "index.mjs"),
+      `export default function activate() { throw new Error("evil"); }`,
+    );
+
+    const host = new PluginHost({
+      pluginsDir: path.join(root, "plugins"),
+      dataDir: path.join(root, "data"),
+    });
+    await host.boot();
+
+    assert.equal(host.getActivated("signed-mutated"), undefined);
+    assert.equal(host.pluginSignature("signed-mutated"), undefined);
+  } finally {
+    restore();
+  }
 });

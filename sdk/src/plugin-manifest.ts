@@ -1,5 +1,10 @@
 export type PluginKind = "network-provider" | "storage-plugin" | "generic";
 
+import type {
+  PluginManifestFileHashes,
+  PluginManifestSignature,
+} from "./manifest-signing";
+
 /**
  * Describes an optional bundled web UI for a plugin. Served as a static
  * document; the desktop shell renders it inside a sandboxed iframe and talks
@@ -38,4 +43,17 @@ export interface PluginManifest {
   exposedEvents?: string[];
   /** Optional bundled web UI (see {@link PluginManifestUI}). */
   ui?: PluginManifestUI;
+  /**
+   * Ed25519 provenance signature (Fase 2C). When present, the plugin loader
+   * verifies it against the canonical manifest AND checks every shipped file
+   * against {@link PluginManifest.files} before activation; any failure blocks
+   * the plugin. Absent = the plugin is treated as untrusted/unsigned.
+   */
+  signature?: PluginManifestSignature;
+  /**
+   * SHA-256 content hashes of every shipped file (posix relative paths). Only
+   * meaningful together with {@link PluginManifest.signature} — it is part of
+   * the signed payload.
+   */
+  files?: PluginManifestFileHashes;
 }

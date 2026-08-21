@@ -9,11 +9,13 @@
     "plugins/*",
     "apps/core-server",
     "apps/testlab",
-    "apps/desktop-shell"
+    "apps/desktop-shell",
+    "apps/create-p2p-plugin"
   ],
   "scripts": {
     "build": "tsc -b",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "scaffold-plugin": "node apps/create-p2p-plugin/dist/cli.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
