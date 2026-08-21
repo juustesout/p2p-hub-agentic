@@ -61,6 +61,7 @@ export default function activate(ctx: PluginContext): CalendarPlugin {
 
   ctx.skills.register("listEvents", async () => listEvents(), {
     localOnly: false,
+    remote: { gate: "any" },
     httpExposed: true,
   });
 

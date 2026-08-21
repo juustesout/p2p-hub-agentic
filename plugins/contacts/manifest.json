@@ -4,5 +4,8 @@
   "version": "0.1.0",
   "kind": "generic",
   "entry": "./dist/index.js",
-  "permissions": ["network:skill:contacts.signChallenge"]
+  "permissions": [
+    "network:skill:contacts.signChallenge",
+    "network:public:contacts.signChallenge"
+  ]
 }

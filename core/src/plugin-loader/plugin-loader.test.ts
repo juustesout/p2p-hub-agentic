@@ -9,6 +9,8 @@ import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
 import { VaultManager } from "../storage/vault-manager";
+import { AccessPassManager } from "../task-broker/access-pass-manager";
+import { DisposerBag } from "../disposable";
 import {
   collectPluginFileHashes,
   signManifest,
@@ -374,6 +376,88 @@ test("exposing a skill to the network succeeds with the permission", async () =>
   await loadPlugin(pluginG, storageManager, new HookRegistry(), taskBroker);
 
   assert.equal(taskBroker.hasSkill("g.x"), true);
+});
+
+test("Fase 2A: a skill gated 'any' requires the network:public permission", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: ["network:skill:g.x"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { localOnly: false, remote: { gate: "any" } });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(pluginG, storageManager, new HookRegistry(), new TaskBroker()),
+    /network:public:g\.x/,
+  );
+});
+
+test("Fase 2A: a skill gated 'any' loads when the network:public permission is present", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const taskBroker = new TaskBroker();
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: ["network:skill:g.x", "network:public:g.x"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { localOnly: false, remote: { gate: "any" } });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await loadPlugin(pluginG, storageManager, new HookRegistry(), taskBroker);
+
+  const skills = taskBroker.listSkills();
+  const skill = skills.find((s) => s.skill === "g.x");
+  assert.ok(skill, "g.x should be registered");
+  assert.deepEqual(skill.remote, { gate: "any" });
+});
+
+test("Fase 2A: ctx.access is exposed and backed by the shared pass store", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const access = new AccessPassManager();
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      return {
+        issue: () => ctx.access.issue("a".repeat(64), "site-read-only"),
+        hasPass: () => ctx.access.hasPass("a".repeat(64), "site-read-only"),
+      };
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  const api = (await loadPlugin(
+    pluginG,
+    storageManager,
+    new HookRegistry(),
+    new TaskBroker(),
+    new VaultManager(),
+    undefined,
+    null,
+    new DisposerBag(),
+    null,
+    access,
+  )) as { issue(): Promise<{ ok: boolean }>; hasPass(): Promise<boolean> };
+
+  const issued = await api.issue();
+  assert.deepEqual(issued, { ok: true });
+  assert.equal(await api.hasPass(), true);
+  assert.equal(access.hasValidPass("a".repeat(64), "site-read-only"), true);
 });
 
 test("loadManifest rejects a dotted plugin id (Fase 2C namespace fix)", async () => {

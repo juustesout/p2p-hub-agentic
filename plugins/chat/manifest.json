@@ -6,6 +6,7 @@
   "entry": "./dist/index.js",
   "permissions": [
     "network:skill:chat.receiveMessage",
+    "network:public:chat.receiveMessage",
     "storage:read:contacts"
   ],
   "exposedEvents": ["chat:messageReceived"]

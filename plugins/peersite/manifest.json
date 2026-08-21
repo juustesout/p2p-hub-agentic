@@ -8,6 +8,9 @@
     "network:skill:peersite.status",
     "network:skill:peersite.fetchAsset",
     "network:skill:peersite.signAuthChallenge",
-    "network:skill:peersite.requestAccess"
+    "network:skill:peersite.requestAccess",
+    "network:public:peersite.status",
+    "network:public:peersite.signAuthChallenge",
+    "network:public:peersite.requestAccess"
   ]
 }

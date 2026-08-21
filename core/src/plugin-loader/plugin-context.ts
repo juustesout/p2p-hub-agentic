@@ -100,6 +100,29 @@ export interface NetworkCapability {
 }
 
 /**
+ * Capability-scoped access-pass surface for plugins (Fase 2A). Backed by the
+ * core {@link AccessPassManager}, the same store the broker's `access-pass`
+ * remote gate consults. Passes are ephemeral (never persisted), never bearer
+ * tokens (the peer must still prove possession over the transport on every
+ * call), scoped, and expiring. Scope strings are shared global strings — use a
+ * distinctive value (e.g. `"site-read-only"`).
+ */
+export interface AccessContext {
+  /**
+   * Mint an ephemeral access pass for `peerId` over `scope`. Overwrites an
+   * existing pass for the same `(peerId, scope)` pair. Resolves to `{ ok: true }`
+   * or `{ ok: false, error }` — never throws.
+   */
+  issue(peerId: string, scope: string, ttlMs?: number): Promise<
+    { ok: true } | { ok: false; error: string }
+  >;
+  /** Revoke a pass; resolves to true when one existed for `(peerId, scope)`. */
+  revoke(peerId: string, scope: string): Promise<boolean>;
+  /** True when `peerId` holds a valid, unexpired pass for `scope`. */
+  hasPass(peerId: string, scope: string): Promise<boolean>;
+}
+
+/**
  * The object handed to a plugin at activation time. This is the enforcement
  * point for permissions: a plugin can only touch its own storage directly,
  * and can only reach another plugin's storage via {@link readStorageOf}, which
@@ -139,6 +162,12 @@ export interface PluginContext {
    * it is not a thrown error.
    */
   network: NetworkCapability | null;
+  /**
+   * Fase 2A access-pass capability. Never null: it is backed by the core
+   * {@link AccessPassManager} even when networking is off (issuing a pass is
+   * harmless without a network to spend it on).
+   */
+  access: AccessContext;
   /**
    * In-process trust lookup, or `null` when no lookup was wired (e.g. a bare
    * {@link loadPlugin} call outside a {@link PluginHost}). When present, it is

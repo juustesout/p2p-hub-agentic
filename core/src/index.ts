@@ -14,6 +14,8 @@ export * from "./plugin-loader/plugin-loader";
 export * from "./plugin-host/plugin-host";
 export * from "./task-broker/task-broker";
 export * from "./task-broker/wire-network";
+export * from "./task-broker/remote-access";
+export * from "./task-broker/access-pass-manager";
 export * from "./identity/peer-auth";
 export * from "./site/site-files";
 export * from "./test-support";

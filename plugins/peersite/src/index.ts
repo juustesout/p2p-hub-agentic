@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { PluginContext } from "@p2p-hub/core";
 import {
-  buildAuthMessage,
   buildKnockMessage,
   contentTypeForPath,
   PEER_ID_RE,
@@ -24,10 +23,12 @@ import {
  * files through the same {@link resolveAndContainFile}, so they accept and
  * reject exactly the same paths.
  *
- * The P2P surface is fail-closed: `fetchAsset` only answers a peer that proves
- * possession of its key (challenge-response over `peersite.signAuthChallenge`,
- * domain-separated by `PEERSITE_AUTH_CONTEXT`) *and* is either a verified
- * contact or holds a valid, human-approved access pass (see below).
+ * The P2P surface is fail-closed. Since Fase 2A the *authorization decision*
+ * lives in the platform: `peersite.fetchAsset` declares a broker-enforced
+ * `remote` policy (gate: verified contact **or** a valid site-read-only access
+ * pass), so the handler never runs for an unauthorized peer. The plugin keeps
+ * the same checks as defense-in-depth for its in-process API, backed by
+ * `ctx.trust` and the core `ctx.access` pass store.
  *
  * Access passes (phase 4B): a peer that is *not* a verified contact can request
  * read-only site access with a single, standalone proof-of-possession
@@ -36,10 +37,10 @@ import {
  * handshake, no transport identity. A valid knock creates a *pending* request
  * that the host resolves through a native tier-2 confirmation
  * (`TrustConfirmation.confirmTier2({ kind: "peer-access-request", ... })`). On
- * approval the plugin mints an ephemeral, in-memory `AccessPass` whose `scope`
- * is fixed to `"site-read-only"` — it only lifts the verified-contact gate on
- * `fetchAsset`, never on `execute-skill` (which stays a separate,
- * site-credential-gated surface).
+ * approval the plugin mints an ephemeral core access pass
+ * (`ctx.access.issue`) whose `scope` is fixed to `"site-read-only"` — it only
+ * lifts the verified-contact gate on `fetchAsset`, never on `execute-skill`
+ * (which stays a separate, site-credential-gated surface).
  */
 
 export interface FetchAssetInput {
@@ -69,18 +70,6 @@ export type RequestAccessResult =
   | { ok: true; requestId: string; status: "pending" }
   | { ok: false; error: string };
 
-/**
- * Ephemeral, in-memory access pass. `scope` is fixed to `"site-read-only"`; it
- * is never persisted and never handed out as a bearer token — it is keyed by
- * the peerId, and the peer must still prove possession on every `fetchAsset`.
- */
-export interface AccessPass {
-  peerId: string;
-  scope: "site-read-only";
-  issuedAt: number;
-  expiresAt: number;
-}
-
 export interface PeerSiteStatus {
   online: boolean;
   peerName: string;
@@ -103,8 +92,10 @@ export interface PeerSitePlugin {
 }
 
 const SITE_ROOT_KEY = "siteRoot";
-const FETCH_ASSET_SKILL = "peersite.fetchAsset";
-const SIGN_AUTH_CHALLENGE_SKILL = "peersite.signAuthChallenge";
+
+/** The core access-pass scope that lifts the `fetchAsset` gate. */
+const SITE_READ_SCOPE = "site-read-only";
+/** Hook event emitted when a peer knocks for site access. */
 const ACCESS_REQUESTED_EVENT = "peersite:accessRequested";
 
 /** A knock's signature is only accepted within this window of the timestamp. */
@@ -136,7 +127,6 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
   let rootLoaded = false;
   let acceptIncoming = false;
 
-  const accessPasses = new Map<string, AccessPass>();
   const pendingRequests = new Map<string, PendingAccessRequest>();
   const knockTimestamps = new Map<string, number>();
 
@@ -178,32 +168,13 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
    * Challenge-response proof of key possession, *without* any contact check.
    * The peer must answer a `signAuthChallenge` challenge signed with the key
    * behind `peerId`. Deny-by-default when there is no network seam.
+   *
+   * Kept as a standalone possession capability for peer-to-peer verification
+   * flows (a peer proves it holds the key behind its advertised peerId).
+   * `fetchAsset` no longer runs it: since Fase 1B the transport proves
+   * possession during the handshake identity binding, and since Fase 2A the
+   * broker enforces the gate on that transport-verified identity.
    */
-  async function provePossession(peerId: string): Promise<boolean> {
-    if (!ctx.network) {
-      return false;
-    }
-    const nonce = crypto.randomBytes(32);
-    const res = await ctx.network.sendTask(peerId, {
-      id: crypto.randomUUID(),
-      skill: SIGN_AUTH_CHALLENGE_SKILL,
-      payload: { nonce: nonce.toString("hex") },
-    });
-    if (res.status !== "ok") {
-      return false;
-    }
-    const signature = (res.result as { signature?: unknown } | undefined)
-      ?.signature;
-    if (typeof signature !== "string" || !/^[0-9a-f]+$/.test(signature)) {
-      return false;
-    }
-    return ctx.identity.verify(
-      peerId,
-      buildAuthMessage(nonce),
-      Buffer.from(signature, "hex"),
-    );
-  }
-
   async function isVerifiedContact(peerId: string): Promise<boolean> {
     if (!ctx.trust) {
       return false;
@@ -212,16 +183,10 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
     return contact?.trustState === "verified";
   }
 
-  function hasValidAccessPass(peerId: string): boolean {
-    const pass = accessPasses.get(peerId);
-    if (!pass) {
-      return false;
-    }
-    if (Date.now() > pass.expiresAt) {
-      accessPasses.delete(peerId);
-      return false;
-    }
-    return true;
+  function hasValidAccessPass(peerId: string): Promise<boolean> {
+    // Fase 2A: passes live in the core AccessPassManager (backing `ctx.access`),
+    // the same store the broker's `access-pass` gate consults.
+    return ctx.access.hasPass(peerId, SITE_READ_SCOPE);
   }
 
   async function setAcceptIncomingRequests(enabled: boolean): Promise<void> {
@@ -327,12 +292,13 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
     }
 
     const now = Date.now();
-    accessPasses.set(pending.peerId, {
-      peerId: pending.peerId,
-      scope: "site-read-only",
-      issuedAt: now,
-      expiresAt: now + pending.expiresInMs,
-    });
+    if (now - pending.createdAt > ACCESS_REQUEST_TTL_MS) {
+      return false;
+    }
+
+    // Fase 2A: mint the pass in the core store so the broker's `access-pass`
+    // gate (and `fetchAsset`) can see it.
+    await ctx.access.issue(pending.peerId, SITE_READ_SCOPE, pending.expiresInMs);
     return true;
   }
 
@@ -342,7 +308,7 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
       path?: unknown;
     };
 
-    // Authenticate first: never leak which paths exist to an unverified peer.
+    // Authenticate first: never leak which paths exist to an unauthorized peer.
     if (typeof peerId !== "string" || typeof requestedPath !== "string") {
       return { ok: false, error: "unauthorized" };
     }
@@ -350,15 +316,14 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
       return { ok: false, error: "unauthorized" };
     }
 
-    // Prove possession first, independent of contact status.
-    if (!(await provePossession(peerId))) {
-      return { ok: false, error: "unauthorized" };
-    }
-
     // Access requires either a verified contact or a valid site-read-only pass.
+    // (Fase 2A: the same decision is enforced broker-side by fetchAsset's
+    // `remote` policy; this is defense-in-depth for the in-process API.
+    // Possession is proven by the Fase 1B transport identity binding, not by
+    // another challenge round trip.)
     if (
       !(await isVerifiedContact(peerId)) &&
-      !hasValidAccessPass(peerId)
+      !(await hasValidAccessPass(peerId))
     ) {
       return { ok: false, error: "unauthorized" };
     }
@@ -402,12 +367,28 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
     { localOnly: true, httpExposed: true },
   );
 
-  ctx.skills.register("status", async () => status(), { localOnly: false });
+  ctx.skills.register(
+    "status",
+    async () => status(),
+    { localOnly: false, remote: { gate: "any" } },
+  );
 
   ctx.skills.register(
     "fetchAsset",
-    async (payload) => fetchAsset(payload as FetchAssetInput),
-    { localOnly: false },
+    async (payload, invocation) => {
+      // Fase 2A: the authorized caller identity is the transport-verified
+      // `invocation.peerId`, never a caller-supplied payload field. The broker
+      // enforces the policy; the plugin re-checks for the in-process API.
+      const { path: requestedPath } = (payload ?? {}) as { path?: unknown };
+      return fetchAsset({
+        peerId: invocation?.peerId ?? "",
+        path: requestedPath,
+      } as FetchAssetInput);
+    },
+    {
+      localOnly: false,
+      remote: { gate: ["verified-contact", "access-pass"], scope: SITE_READ_SCOPE },
+    },
   );
 
   ctx.skills.register(
@@ -425,13 +406,13 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
       );
       return { signature: signature.toString("hex") };
     },
-    { localOnly: false },
+    { localOnly: false, remote: { gate: "any" } },
   );
 
   ctx.skills.register(
     "requestAccess",
     async (payload) => requestAccess(payload as RequestAccessInput),
-    { localOnly: false },
+    { localOnly: false, remote: { gate: "any" } },
   );
 
   ctx.skills.register(

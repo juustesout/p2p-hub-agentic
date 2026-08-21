@@ -209,13 +209,16 @@ test("fetchAsset denies when no trust seam is wired", async () => {
   assert.deepEqual(result, { ok: false, error: "unauthorized" });
 });
 
-test("fetchAsset denies when no network is available for the challenge", async () => {
+test("fetchAsset serves a verified peer even without a network seam (possession is the transport's job)", async () => {
+  // Fase 2A: possession is proven by the Fase 1B transport identity binding,
+  // not by a plugin-level challenge round trip — so a verified contact is
+  // served even when no network provider is wired into the plugin.
   const { plugin, peerId } = await loadPeerSite({ networking: false });
   const { root } = await makeSite();
   await plugin.setSiteRoot(root);
 
   const result = await plugin.fetchAsset({ peerId, path: "index.html" });
-  assert.deepEqual(result, { ok: false, error: "unauthorized" });
+  assert.equal(result.ok, true);
 });
 
 test("fetchAsset serves a file to a verified peer", async () => {

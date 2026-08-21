@@ -10,6 +10,8 @@ import type {
 } from "@p2p-hub/sdk";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
+import type { RemoteAccessPolicy } from "../task-broker/remote-access";
+import { AccessPassManager } from "../task-broker/access-pass-manager";
 import { CoreAIProvider } from "../ai/core-ai-provider";
 import { VaultManager } from "../storage/vault-manager";
 import { IdentityManager } from "../identity/identity-manager";
@@ -192,6 +194,7 @@ export async function loadPlugin(
   networkRegistry: NetworkRegistry | null = null,
   disposers: DisposerBag = new DisposerBag(),
   resolveTrustLookup: (() => ContactLookup | null) | null = null,
+  accessManager: AccessPassManager = new AccessPassManager(),
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   if (manifest.signature !== undefined) {
@@ -264,9 +267,14 @@ export async function loadPlugin(
       // pass an arbitrary event string. Exposing a skill to the network
       // (localOnly: false) additionally requires an explicit manifest
       // permission, so a plugin author must make that choice deliberately.
+      // A `remote` policy gated `any` (explicitly public) requires a second,
+      // separate `network:public:*` permission on top of `network:skill:*`.
       register: (skillName, handler, options) => {
         if (options?.localOnly === false) {
           assertNetworkSkillPermission(manifest, skillName);
+        }
+        if (assertsPublicRemote(options)) {
+          assertPublicRemotePermission(manifest, skillName);
         }
         const fullName = `${manifest.id}.${skillName}`;
         taskBroker.registerSkill(fullName, handler, options);
@@ -303,6 +311,21 @@ export async function loadPlugin(
       peerId: async () => (await identityManager.getOrCreateIdentity()).peerId,
     },
     network: buildNetworkCapability(networkRegistry),
+    access: {
+      issue: async (peerId, scope, ttlMs) => {
+        try {
+          accessManager.issue(peerId, scope, ttlMs);
+          return { ok: true };
+        } catch (err) {
+          return {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      },
+      revoke: async (peerId, scope) => accessManager.revoke(peerId, scope),
+      hasPass: async (peerId, scope) => accessManager.hasValidPass(peerId, scope),
+    },
     trust: resolveTrustLookup
       ? {
           getContact: async (peerId) => {
@@ -388,6 +411,42 @@ function assertNetworkSkillPermission(
     throw new Error(
       `plugin "${manifest.id}" exposes skill "${skillName}" to the network ` +
         `but lacks permission "${permission}"`,
+    );
+  }
+}
+
+/**
+ * Fase 2A: true when the registration declares a `remote` policy whose gate
+ * list contains `"any"` — i.e. the author is deliberately making the skill
+ * public to every peer, not just contacts or pass holders.
+ */
+function assertsPublicRemote(
+  options: { remote?: RemoteAccessPolicy } | undefined,
+): boolean {
+  if (!options?.remote) {
+    return false;
+  }
+  const gates = Array.isArray(options.remote.gate)
+    ? options.remote.gate
+    : [options.remote.gate];
+  return gates.includes("any");
+}
+
+/**
+ * A skill gated `any` is reachable by *every* peer that can complete the
+ * transport handshake. That is strictly wider than `localOnly: false` alone,
+ * so it needs a separate, explicit manifest permission — a plugin author must
+ * deliberately opt in to being public.
+ */
+function assertPublicRemotePermission(
+  manifest: PluginManifest,
+  skillName: string,
+): void {
+  const permission = `network:public:${manifest.id}.${skillName}`;
+  if (!manifest.permissions.includes(permission)) {
+    throw new Error(
+      `plugin "${manifest.id}" marks skill "${skillName}" as publicly ` +
+        `reachable (remote gate "any") but lacks permission "${permission}"`,
     );
   }
 }

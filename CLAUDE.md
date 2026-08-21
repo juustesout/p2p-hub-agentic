@@ -99,6 +99,24 @@ miss, not boilerplate to skim.
    never read as data (reads are always by exact path) and are not
    auto-cleaned.
 
+### Remote-access authorization (Fase 2A — don't re-learn this either)
+
+Since Fase 2A the **TaskBroker is the single enforcement point** for "who may
+invoke a skill over the network", not the plugin. A network-exposed skill
+(`localOnly: false`) **without** a `remote` policy is denied by `handleRemote`
+before dispatch — the handler never runs. Fail-closed invariants live in
+`core/src/task-broker/task-broker.ts` + `remote-access.ts`: `access-pass`
+requires a `scope` (rejected loudly at registration); an anonymous remote caller
+(no transport-verified `task.peerId`, which only Fase 1B identity binding can
+set) can never pass `verified-contact`/`access-pass`; a missing `RemoteGate`
+denies; `any` requires the extra manifest permission `network:public:<id>.<skill>`
+on top of `network:skill:<id>.<skill>`. When adding a new network-reachable
+skill or a new external trigger surface, keep this shape: the platform decides
+authorization from a transport-verified identity, never from a caller-supplied
+payload field. Access passes are core-owned (`AccessPassManager` via `ctx.access`),
+ephemeral, scoped and expiring — never bearer tokens (the peer still proves
+possession over the transport).
+
 ### JSON nesting depth (corrected finding — don't re-learn this)
 
 `JSON.parse` in current V8 (Node 22, V8 12.4) is **iterative**: it parses

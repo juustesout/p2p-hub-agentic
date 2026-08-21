@@ -9,13 +9,14 @@ const ECHO_MANIFEST = {
   id: "testnode",
   version: "1.0.0",
   kind: "generic",
-  permissions: ["network:skill:testnode.echo"],
+  permissions: ["network:skill:testnode.echo", "network:public:testnode.echo"],
   entry: "./index.mjs",
 };
 
 const ECHO_SOURCE = `export default function activate(ctx) {
   ctx.skills.register("echo", async (payload) => ({ echoed: payload }), {
     localOnly: false,
+    remote: { gate: "any" },
   });
   return {
     sendEcho(peerId) {
@@ -51,12 +52,12 @@ const MIXED_MANIFEST = {
   id: "mixed",
   version: "1.0.0",
   kind: "generic",
-  permissions: ["network:skill:mixed.public"],
+  permissions: ["network:skill:mixed.public", "network:public:mixed.public"],
   entry: "./index.mjs",
 };
 
 const MIXED_SOURCE = `export default function activate(ctx) {
-  ctx.skills.register("public", async () => "ok", { localOnly: false });
+  ctx.skills.register("public", async () => "ok", { localOnly: false, remote: { gate: "any" } });
   ctx.skills.register("secret", async () => "shh");
   return {};
 }`;

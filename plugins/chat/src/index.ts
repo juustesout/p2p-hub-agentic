@@ -519,8 +519,15 @@ export default function activate(ctx: PluginContext): ChatPlugin {
   );
 
   // The only network-reachable skill: a peer delivers a signed message here.
-  // Requires the manifest permission `network:skill:chat.receiveMessage`.
-  ctx.skills.register("receiveMessage", receiveMessage, { localOnly: false });
+  // Requires the manifest permission `network:skill:chat.receiveMessage` (opt
+  // in to the network). Fase 2A: an explicit `any` policy (plus the separate
+  // `network:public:chat.receiveMessage` permission) keeps the pre-2A
+  // "accept signed messages from any peer, verify when known" behaviour while
+  // making the public exposure an explicit, platform-enforced choice.
+  ctx.skills.register("receiveMessage", receiveMessage, {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
 
   // Cross-namespace hook subscription. `on` is always allowed; the handler
   // still gates on the stored opt-in and on the event being an assignment.

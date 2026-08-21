@@ -306,7 +306,10 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
 
   // The only network-reachable skill: a peer invokes it to prove possession of
   // the private key behind its advertised peerId. Requires the manifest
-  // permission `network:skill:contacts.signChallenge`.
+  // permissions `network:skill:contacts.signChallenge` (network opt-in) and
+  // `network:public:contacts.signChallenge` (Fase 2A: reachable by *any* peer,
+  // because an unknown peer must be able to prove possession before it is
+  // granted contact/pass status).
   ctx.skills.register(
     "signChallenge",
     async (payload) => {
@@ -320,7 +323,7 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
       );
       return { signature: signature.toString("hex") };
     },
-    { localOnly: false },
+    { localOnly: false, remote: { gate: "any" } },
   );
 
   return { addContact, listContacts, removeContact, verifyPeer, getContact };

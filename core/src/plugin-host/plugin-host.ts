@@ -11,6 +11,8 @@ import { asContactLookup } from "@p2p-hub/sdk";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
+import type { RemoteGate } from "../task-broker/remote-access";
+import { AccessPassManager } from "../task-broker/access-pass-manager";
 import { VaultManager } from "../storage/vault-manager";
 import { IdentityManager } from "../identity/identity-manager";
 import { NetworkRegistry } from "../network-registry";
@@ -110,6 +112,7 @@ export class PluginHost {
   private readonly storages: StorageManager;
   private readonly hooks: HookRegistry;
   private readonly broker: TaskBroker;
+  private readonly access: AccessPassManager;
   private readonly vault: VaultManager;
   private readonly identity: IdentityManager;
   private readonly networks: NetworkRegistry;
@@ -125,7 +128,10 @@ export class PluginHost {
     const hooks = new HookRegistry();
     this.hooks = hooks;
     this.storages = new StorageManager(options.dataDir);
-    this.broker = new TaskBroker();
+    // Fase 2A: one shared access-pass store backs both `ctx.access` (plugins)
+    // and the broker's `access-pass` remote gate.
+    this.access = new AccessPassManager();
+    this.broker = new TaskBroker({ remoteGate: buildRemoteGate(this) });
     this.vault = new VaultManager({
       dataDir: options.dataDir,
       masterKey: options.masterKey,
@@ -199,6 +205,7 @@ export class PluginHost {
             this.networks,
             disposers,
             () => asContactLookup(this.getActivated("contacts")),
+            this.access,
           ),
           this.activationTimeoutMs,
           () =>
@@ -342,6 +349,14 @@ export class PluginHost {
     return this.broker;
   }
 
+  /**
+   * The shared Fase 2A access-pass store backing `ctx.access` and the broker's
+   * `access-pass` remote gate.
+   */
+  accessPassManager(): AccessPassManager {
+    return this.access;
+  }
+
   vaultManager(): VaultManager {
     return this.vault;
   }
@@ -371,6 +386,28 @@ const defaultNetworkProviderFactory: NetworkProviderFactory = (input) =>
     identitySigner: input.identitySigner,
     onPeerDisconnected: input.onPeerDisconnected,
   });
+
+/**
+ * Fase 2A: the {@link RemoteGate} the host injects into its {@link TaskBroker}.
+ * Contacts are looked up late-bound (mirroring the loader's `trust` seam), so a
+ * plugin that activates before the contacts plugin is loaded still resolves the
+ * up-to-date trust state at call time; absent contacts fail closed. Access
+ * passes come from the host's single {@link AccessPassManager}.
+ */
+function buildRemoteGate(host: PluginHost): RemoteGate {
+  return {
+    isVerifiedContact: async (peerId) => {
+      const lookup = asContactLookup(host.getActivated("contacts"));
+      if (!lookup) {
+        return false;
+      }
+      const contact = await lookup.getContact(peerId);
+      return contact?.trustState === "verified";
+    },
+    hasValidAccessPass: async (peerId, scope) =>
+      host.accessPassManager().hasValidPass(peerId, scope),
+  };
+}
 
 /**
  * Resolve with `promise`'s result, or reject with `makeError()` if it has not

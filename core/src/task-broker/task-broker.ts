@@ -4,8 +4,27 @@ import {
   validateObjectDepth,
   validatePayloadSize,
 } from "@p2p-hub/sdk";
+import type { RemoteAccessPolicy, RemoteGate } from "./remote-access";
+import { normalizeRemoteGates } from "./remote-access";
 
-export type SkillHandler = (payload: unknown) => Promise<unknown>;
+/**
+ * Second argument handed to a skill handler alongside the payload. Carries
+ * only transport-verified facts about the *caller* — nothing caller-supplied.
+ */
+export interface SkillInvocationContext {
+  /**
+   * Transport-verified persistent peerId of the remote caller, set only on the
+   * network path (`handleRemote`) and only when the transport proved it (Fase
+   * 1B identity binding). Absent for local/HTTP invocations and for anonymous
+   * remote callers. Never trust a caller-supplied `peerId` in the payload.
+   */
+  peerId?: string;
+}
+
+export type SkillHandler = (
+  payload: unknown,
+  context?: SkillInvocationContext,
+) => Promise<unknown>;
 
 export interface SkillRegistrationOptions {
   /**
@@ -24,12 +43,21 @@ export interface SkillRegistrationOptions {
    * deliberately expose.
    */
   httpExposed?: boolean;
+  /**
+   * Fase 2A: who may invoke this skill over the network. Without a policy, a
+   * skill registered with `localOnly: false` is *denied* on the network path —
+   * this is the fail-closed default (see `remote-access.ts`). A policy does
+   * not opt a skill into the network; that stays `localOnly: false` plus the
+   * `network:skill:*` manifest permission. The policy only authorizes callers.
+   */
+  remote?: RemoteAccessPolicy;
 }
 
 interface SkillRecord {
   handler: SkillHandler;
   localOnly: boolean;
   httpExposed: boolean;
+  remote: RemoteAccessPolicy | undefined;
 }
 
 export interface TaskBrokerOptions {
@@ -40,6 +68,12 @@ export interface TaskBrokerOptions {
    * memory or CPU. Defaults to 100.
    */
   maxConcurrentTasks?: number;
+  /**
+   * Fase 2A: the gate the broker consults to evaluate `remote` policies. When
+   * absent, every `verified-contact`/`access-pass` policy fails closed. The
+   * host injects a gate wired to its contacts lookup and access-pass manager.
+   */
+  remoteGate?: RemoteGate;
 }
 
 const DEFAULT_MAX_CONCURRENT_TASKS = 100;
@@ -57,11 +91,13 @@ const DEFAULT_MAX_CONCURRENT_TASKS = 100;
 export class TaskBroker {
   private readonly skills = new Map<string, SkillRecord>();
   private readonly maxConcurrentTasks: number;
+  private readonly remoteGate: RemoteGate | undefined;
   private activeTasks = 0;
 
   constructor(options: TaskBrokerOptions = {}) {
     const max = options.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_TASKS;
     this.maxConcurrentTasks = Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_CONCURRENT_TASKS;
+    this.remoteGate = options.remoteGate;
   }
 
   registerSkill(
@@ -69,10 +105,12 @@ export class TaskBroker {
     handler: SkillHandler,
     options: SkillRegistrationOptions = {},
   ): void {
+    validateRemotePolicy(options.remote);
     this.skills.set(skill, {
       handler,
       localOnly: options.localOnly ?? true,
       httpExposed: options.httpExposed ?? false,
+      remote: options.remote,
     });
   }
 
@@ -84,16 +122,18 @@ export class TaskBroker {
     return this.skills.has(skill);
   }
 
-  /** List every registered skill with its local-only and HTTP-exposure flags. */
+  /** List every registered skill with its local-only, HTTP-exposure and Fase 2A remote policy. */
   listSkills(): Array<{
     skill: string;
     localOnly: boolean;
     httpExposed: boolean;
+    remote?: RemoteAccessPolicy;
   }> {
     return [...this.skills.entries()].map(([skill, record]) => ({
       skill,
       localOnly: record.localOnly,
       httpExposed: record.httpExposed,
+      ...(record.remote ? { remote: record.remote } : {}),
     }));
   }
 
@@ -103,16 +143,18 @@ export class TaskBroker {
    * throwing handler both resolve to a `status: "error"` {@link TaskResult}.
    */
   async handle(task: TaskRequest): Promise<TaskResult> {
-    return this.execute(task, "local");
+    return this.execute(task, "local", undefined);
   }
 
   /**
    * Execute an incoming {@link TaskRequest} received from the network. Rejects
-   * skills registered as `localOnly`. Never throws. This is the function to
+   * skills registered as `localOnly` and enforces the skill's Fase 2A `remote`
+   * access policy (fail-closed: no policy → denied) using the transport-verified
+   * `task.peerId` as caller identity. Never throws. This is the function to
    * hand to `provider.onTask(...)`.
    */
   async handleRemote(task: TaskRequest): Promise<TaskResult> {
-    return this.execute(task, "network");
+    return this.execute(task, "network", task.peerId);
   }
 
   /**
@@ -123,12 +165,13 @@ export class TaskBroker {
    * trusted in-process caller.
    */
   async handleHttp(task: TaskRequest): Promise<TaskResult> {
-    return this.execute(task, "http");
+    return this.execute(task, "http", undefined);
   }
 
   private async execute(
     task: TaskRequest,
     gate: "local" | "network" | "http",
+    callerPeerId: string | undefined,
   ): Promise<TaskResult> {
     const record = this.skills.get(task.skill);
     if (!record) {
@@ -144,6 +187,19 @@ export class TaskBroker {
         status: "error",
         error: `skill "${task.skill}" is local-only and not network-accessible`,
       };
+    }
+    if (gate === "network") {
+      // Fase 2A: the network gate is evaluated here, before dispatch. A skill
+      // without an explicit remote policy is denied — `localOnly: false` alone
+      // authorizes nothing.
+      const allowed = await this.evaluateRemotePolicy(task, record, callerPeerId);
+      if (!allowed) {
+        return {
+          taskId: task.id,
+          status: "error",
+          error: `skill "${task.skill}" is not authorized for this remote peer`,
+        };
+      }
     }
     if (gate === "http" && !record.httpExposed) {
       return {
@@ -164,7 +220,7 @@ export class TaskBroker {
       validateObjectDepth(task.payload);
       const serialized = JSON.stringify(task.payload ?? null) ?? "null";
       validatePayloadSize(serialized, MAX_PAYLOAD_BYTES);
-      const result = await record.handler(task.payload);
+      const result = await record.handler(task.payload, { peerId: callerPeerId });
       return { taskId: task.id, status: "ok", result };
     } catch (err) {
       return {
@@ -175,5 +231,78 @@ export class TaskBroker {
     } finally {
       this.activeTasks -= 1;
     }
+  }
+
+  /**
+   * Evaluate a skill's Fase 2A `remote` policy for a network caller. Never
+   * throws (a broken gate denies rather than errors out). `any` is the only
+   * gate with no proof requirement; every other gate fails closed on an
+   * anonymous caller, a missing gate, or a peer the gate does not approve.
+   */
+  private async evaluateRemotePolicy(
+    task: TaskRequest,
+    record: SkillRecord,
+    callerPeerId: string | undefined,
+  ): Promise<boolean> {
+    const policy = record.remote;
+    if (!policy) {
+      return false;
+    }
+    const gates = normalizeRemoteGates(policy.gate);
+    if (gates.length === 0) {
+      return false;
+    }
+    const isAnonymous = callerPeerId === undefined || callerPeerId.length === 0;
+    for (const kind of gates) {
+      if (kind === "any") {
+        return true;
+      }
+      if (isAnonymous) {
+        continue;
+      }
+      if (!this.remoteGate) {
+        continue;
+      }
+      try {
+        if (kind === "verified-contact") {
+          if (await this.remoteGate.isVerifiedContact(callerPeerId)) {
+            return true;
+          }
+        } else if (kind === "access-pass") {
+          if (
+            typeof policy.scope === "string" &&
+            policy.scope.length > 0 &&
+            (await this.remoteGate.hasValidAccessPass(callerPeerId, policy.scope))
+          ) {
+            return true;
+          }
+        }
+      } catch {
+        // A throwing gate must not open the door — treat as denial.
+      }
+    }
+    return false;
+  }
+}
+
+/**
+ * Validate a `remote` policy at registration time so a misconfigured policy is
+ * loud at boot, not silently ineffective on the network path. Throws when an
+ * `access-pass` gate is declared without a scope.
+ */
+function validateRemotePolicy(policy: RemoteAccessPolicy | undefined): void {
+  if (!policy) {
+    return;
+  }
+  const gates = normalizeRemoteGates(policy.gate);
+  if (gates.length === 0) {
+    throw new Error(
+      "remote policy must name at least one gate (verified-contact, access-pass, or any)",
+    );
+  }
+  if (gates.includes("access-pass") && typeof policy.scope !== "string") {
+    throw new Error(
+      'remote policy with an "access-pass" gate requires a "scope"',
+    );
   }
 }

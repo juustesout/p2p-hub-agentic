@@ -272,7 +272,7 @@ export class CoreServer {
     this.broker.registerSkill(
       "core.echo",
       async (payload) => payload,
-      { localOnly: false, httpExposed: true },
+      { localOnly: false, httpExposed: true, remote: { gate: "any" } },
     );
 
     const aiProvider = new CoreAIProvider({ vault: this.host.vaultManager() });
