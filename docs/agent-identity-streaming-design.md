@@ -5,7 +5,11 @@ wiring + agent policy escalation) implemented**. This document turns the three
 formally-recorded decisions in `plan.md` ("Toekomstige Capabilities: Agent
 Identity & Streaming Guidelines") into concrete implementation designs and a
 slice plan. Treat each slice as its own scoped task, same as
-`docs/peersite-plan.md`.
+`docs/peersite-plan.md`. (The subsequent Fase 3 OS-sandboxing work — the
+plugin-hosting IPC engine that keeps plugins out of the host process — is a
+separate workstream tracked in `plan.md` under "Fase 3: OS-level
+plugin-sandboxing"; Slice 1 there is the `sdk/src/sandbox` + `core/src/sandbox`
+IPC protocol/transport/runner.)
 
 ## Decision 1 — Agent identity: own derived PeerID (child-keypair)
 

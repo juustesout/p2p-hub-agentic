@@ -282,3 +282,52 @@ Formeel vastgelegde architectuurbesluiten. **Status: besluit 1 gebouwd (A1 Slice
   transport-level frequency-cap voor continu stromende frames (bv. 20 Hz
   positie-updates) is een latere uitbreiding; de broker-limiter dekt vandaag de
   Tier-1 telemetry-calls.
+
+## Fase 3: OS-level plugin-sandboxing (proces-isolatie)
+
+Na 2B (capability-matrix-verscherping) en het agent-identiteit/media/telemetrie-werk
+(A1) is OS-level proces-isolatie de volgend geaccordeerde stap. De vertrouwensgrens
+blijft "Ed25519-sleutelbezitter = in-process toegang" totdat de sandbox de plugin
+uit het hostproces tilt. Uitgevoerd in slices; Slice 1 is de dependency-vrije IPC
+engine + wire protocol.
+
+**Slice 1 (gebouwd): sandbox IPC engine (`core/src/sandbox/` + `sdk/src/sandbox/`)**
+
+- **`sdk/src/sandbox/ipc-protocol.ts`** — strict, dependency-vrij JSON-RPC 2.0-subset
+  met `type`-discriminator (`"request"|"response"|"notification"`). Fail-closed:
+  `parseIPCMessageEnvelope` → `null` bij elke afwijking (verkeerde `jsonrpc`, onbekende
+  `type`, niet-UUIDv4 `id`, response met beide/geen van `result`/`error`, malformed
+  error-object, niet-structured `params`); `parseIPCMessageText` vertaalt de twee
+  faalklassen naar getypeerde `IPCParseError` (`PARSE_ERROR` / `INVALID_REQUEST`).
+  `IPCErrorCodes` scheidt JSON-RPC-standaardcodes (`-32xxx`) van IPC-specifieke
+  (`1000` CHANNEL_CLOSED, `1001` FRAME_TOO_LARGE).
+- **`core/src/sandbox/ipc-transport.ts`** — length-prefixed framing (4-byte BE + UTF-8
+  JSON) over elke Readable/Writable (stdin/stdout, child-process stdio, PassThrough).
+  Fragmentatie-veilig, backpressure via write-queue + `drain`, `maxFrameBytes`-cap
+  vóór allocatie aan beide kanten. Malformed frame ⇒ fout + teardown (de proces-grens
+  is de security-grens; een kapot frame breekt het kanaal af, nooit partieel
+  gedispatcht). `send()` op gesloten kanaal ⇒ `CHANNEL_CLOSED`; oversize ⇒
+  `FRAME_TOO_LARGE`.
+- **`core/src/sandbox/runner.ts`** — process-side bootstrap-schel (Slices 2+ haken hier
+  de PluginHost-spawner aan): `initialize`-request (validatie `pluginId` tegen de
+  manifest-id-regel, optionele `envAllowlist`), `shutdown` ⇒ ack + exit(0), onbekende
+  method ⇒ `METHOD_NOT_FOUND`. Crashes zijn gecontroleerd: `uncaughtException`/
+  `unhandledRejection` ⇒ `sandbox:crash`-notification naar de host + exit(1), nooit
+  stille dood. **Env-sandboxing** (`filteredEnv`): de sandbox erft nooit de ruwe host
+  env — alleen allowlisted keys (default minimaal: PATH/HOME/LANG/TZ/…), en
+  credential-lijkende keys (`secret|token|password|api[_-]?key|…`) worden altijd
+  geweigerd als defense-in-depth.
+- **Tests (37 nieuw, alle suites groen):** sdk 93 (+17), core 277 (+20), core-server
+  73; protocol-parsing (valid/ongeldig, beide/geen result+error, id-vorm, error-object),
+  transport (fragmentatie, meerdere frames per chunk, malformed frame ⇒ `PARSE_ERROR`
+  zonder handler-dispatch, oversize ⇒ `FRAME_TOO_LARGE`, backpressure over een
+  8-byte-highWaterMark-PassThrough, close-semantiek, failing writable ⇒ kanaal kapot),
+  runner (echte child-process-integratie over stdio: initialize met gefilterde env,
+  INVALID_PARAMS/METHOD_NOT_FOUND, shutdown-exit-0) + `filteredEnv`-units.
+
+**Open (Slices 2+):** plugin-activator bootstrap in de sandbox (skill-registratie,
+capability-dispatch over de IPC-bus), host-side `PluginHost`-integratie (spawn + lifecycle),
+privilege-decoupling (de sandbox draait met de laagste privileges die de capability
+behoeft) + permissie-checks verhuizen van "documentatie" naar "structureel onmogelijk
+voor de sandbox". Exakte slice-volgorde en de afweging process-isolatie-optie
+(`fork`/`spawn` + IPC vs. container) liggen bij de start van Slice 2.

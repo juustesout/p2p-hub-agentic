@@ -12,3 +12,4 @@ export * from "./media-contract";
 export * from "./sanitizer";
 export * from "./settings-risk";
 export * from "./trust-tier";
+export * from "./sandbox/ipc-protocol";
