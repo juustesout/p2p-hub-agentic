@@ -10,6 +10,12 @@ import {
   parseWebsiteResponse,
   WEBSITE_PROTOCOL_ID,
 } from "@p2p-hub/sdk";
+
+// Real mDNS multicast discovery is not delivered on GitHub-hosted macOS
+// runners, so this real multi-peer smoke scenario is skipped there.
+const MDNS_SKIP =
+  process.platform === "darwin" &&
+  "real mDNS multicast discovery is not delivered on GitHub macOS runners";
 import { installBuiltPlugin, writeSiteCliPlugin, type SiteCliApi } from "./fixtures";
 
 /**
@@ -101,7 +107,7 @@ function assertErrorEnvelope(result: TaskResultLike, code: string): void {
   assert.equal(response.code, code);
 }
 
-test("website-v1 wire contract: binary, malformed, traversal, oversize, and invalid-pass matrix", async () => {
+test("website-v1 wire contract: binary, malformed, traversal, oversize, and invalid-pass matrix", { skip: MDNS_SKIP }, async () => {
   const siteRoot = await fs.mkdtemp(path.join(os.tmpdir(), "website-v1-site-"));
   await fs.writeFile(path.join(siteRoot, "index.html"), "<h1>hello from P2P</h1>");
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0xff, 0xfe, 0xfd]);

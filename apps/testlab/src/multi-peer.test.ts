@@ -6,6 +6,14 @@ import * as path from "node:path";
 import { PluginHost } from "@p2p-hub/core";
 import { writeTestNodePlugin } from "./fixtures";
 
+// Real mDNS multicast discovery is not delivered on GitHub-hosted macOS
+// runners (multicast between in-process peers is dropped), so the real
+// multi-peer smoke scenario cannot run there. The unit-test matrix still
+// covers macOS; discovery is exercised on ubuntu and windows.
+const MDNS_SKIP =
+  process.platform === "darwin" &&
+  "real mDNS multicast discovery is not delivered on GitHub macOS runners";
+
 /**
  * Multi-peer integration layer, separate from the unit-test suites:
  * "378 unit tests green" does not prove the P2P system works. This suite boots
@@ -79,7 +87,7 @@ async function waitFor(
   throw new Error(`condition not met within ${timeoutMs}ms`);
 }
 
-test("three peers A<->B<->C form a full mesh and route a chained capability call", async () => {
+test("three peers A<->B<->C form a full mesh and route a chained capability call", { skip: MDNS_SKIP }, async () => {
   const a = await bootPeer("a");
   const b = await bootPeer("b");
   const c = await bootPeer("c");

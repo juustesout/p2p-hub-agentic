@@ -47,33 +47,53 @@ export function contentTypeForPath(filePath: string): string {
 }
 
 /**
+ * Resolve `p` to an absolute canonical path. When the path exists this is its
+ * realpath; when it does not (yet) exist, the deepest existing ancestor is
+ * realpath'd and the missing remainder is re-appended. This keeps a
+ * not-yet-created candidate in the same symlink-canonical form as its existing
+ * parents — without it, a lexical fallback and a realpath'd dataDir can
+ * disagree about the same directory when a base is a symlink (e.g. macOS
+ * `/var` -> `/private/var`).
+ */
+function canonicalResolve(p: string): string {
+  const abs = path.resolve(p);
+  try {
+    return fs.realpathSync(abs);
+  } catch {
+    let existing = abs;
+    const missing: string[] = [];
+    for (;;) {
+      const parent = path.dirname(existing);
+      if (parent === existing) {
+        return abs;
+      }
+      try {
+        const real = fs.realpathSync(existing);
+        return missing.length === 0 ? real : path.join(real, ...missing);
+      } catch {
+        missing.unshift(path.basename(existing));
+        existing = parent;
+      }
+    }
+  }
+}
+
+/**
  * True when `candidatePath` resolves to `dataDir` itself or a path inside it.
  * The containment check is prefix-anchored on the trailing separator
  * (CLAUDE.md principle #2), so `/data/site` never matches `/data/site-evil`.
- * Both sides are canonicalized to a realpath when possible; a missing
- * `dataDir` (fresh install) falls back to a lexical resolve so the structural
- * check still holds. This is the single containment predicate used by both the
- * core-server and plugin-facing surfaces — they cannot drift apart.
+ * Both sides are canonicalized via {@link canonicalResolve} (realpath where
+ * possible, symlink-canonical form for missing paths) so the structural check
+ * holds across platforms and fresh installs. This is the single containment
+ * predicate used by both the core-server and plugin-facing surfaces — they
+ * cannot drift apart.
  */
 export function isPathInsideDataDir(
   candidatePath: string,
   dataDir: string,
 ): boolean {
-  let candidateReal: string;
-  try {
-    candidateReal = fs.realpathSync(path.resolve(candidatePath));
-  } catch {
-    candidateReal = path.resolve(candidatePath);
-  }
-
-  // The data directory may not exist yet (fresh install); fall back to a
-  // lexical resolve so the containment check still holds structurally.
-  let dataReal: string;
-  try {
-    dataReal = fs.realpathSync(dataDir);
-  } catch {
-    dataReal = path.resolve(dataDir);
-  }
+  const candidateReal = canonicalResolve(candidatePath);
+  const dataReal = canonicalResolve(dataDir);
 
   return candidateReal === dataReal || candidateReal.startsWith(dataReal + path.sep);
 }

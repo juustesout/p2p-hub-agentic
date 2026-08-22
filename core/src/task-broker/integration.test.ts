@@ -9,6 +9,12 @@ import type { NetworkPeer, PeerIdentity, TaskResult } from "@p2p-hub/sdk";
 import { PluginHost } from "../plugin-host/plugin-host";
 import { wireNetworkToBroker } from "./wire-network";
 
+// Real mDNS discovery is not delivered on GitHub-hosted macOS runners, so
+// the two-host (discovery-based) tests are skipped there.
+const MDNS_SKIP =
+  process.platform === "darwin" &&
+  "real mDNS multicast discovery is not delivered on GitHub macOS runners";
+
 function makeIdentity(): { identity: PeerIdentity; signer: (data: Buffer) => Promise<Buffer> } {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   const jwk = publicKey.export({ format: "jwk" }) as { x: string };
@@ -81,7 +87,7 @@ async function setupCalendarHost(): Promise<PluginHost> {
   return host;
 }
 
-test("a remote task is routed through the broker to the calendar plugin", async () => {
+test("a remote task is routed through the broker to the calendar plugin", { skip: MDNS_SKIP }, async () => {
   const host = await setupCalendarHost();
 
   const calendar = host.getActivated("calendar") as {

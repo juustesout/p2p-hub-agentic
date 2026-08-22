@@ -7,6 +7,13 @@ import { buildKnockMessage, PluginHost } from "@p2p-hub/core";
 import { buildWebsiteRequest, parseWebsiteResponse } from "@p2p-hub/sdk";
 import { installBuiltPlugin, writeSiteCliPlugin, type SiteCliApi } from "./fixtures";
 
+// Real mDNS multicast discovery is not delivered on GitHub-hosted macOS
+// runners, so the real multi-peer smoke scenario cannot run there; it runs on
+// ubuntu and windows. macOS is still covered by the unit-test matrix.
+const MDNS_SKIP =
+  process.platform === "darwin" &&
+  "real mDNS multicast discovery is not delivered on GitHub macOS runners";
+
 /**
  * Fase 2A toetssteen — the plan.md end-criterion, exercised as a real multi-peer
  * test:
@@ -134,7 +141,7 @@ function assertAssetOk(result: TaskResultLike, expectedText: string): void {
   assert.equal(Buffer.from(response.data, "base64").toString("utf8"), expectedText);
 }
 
-test("Fase 2A toetssteen: a verified contact and an access-pass holder fetch a P2P static site; a stranger is denied", async () => {
+test("Fase 2A toetssteen: a verified contact and an access-pass holder fetch a P2P static site; a stranger is denied", { skip: MDNS_SKIP }, async () => {
   const siteRoot = await fs.mkdtemp(path.join(os.tmpdir(), "peer-app-site-"));
   await fs.writeFile(path.join(siteRoot, "index.html"), "<h1>hello from P2P</h1>");
   await fs.mkdir(path.join(siteRoot, "sub"), { recursive: true });

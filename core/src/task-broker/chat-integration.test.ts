@@ -5,6 +5,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { NetworkLightProvider } from "@p2p-hub/network-light";
+
+// Real mDNS discovery is not delivered on GitHub-hosted macOS runners, so
+// the two-host (discovery-based) tests are skipped there; the single-host
+// and fake-provider tests still run on every OS.
+const MDNS_SKIP =
+  process.platform === "darwin" &&
+  "real mDNS multicast discovery is not delivered on GitHub macOS runners";
 import { wireNetworkToBroker } from "./wire-network";
 import { TaskBroker } from "./task-broker";
 import { IdentityManager } from "../identity/identity-manager";
@@ -384,7 +391,7 @@ async function bootNode(): Promise<{
   return { chat, contacts, provider, peerId: peer.peerId };
 }
 
-test("two hosts exchange a verified signed message end-to-end", async () => {
+test("two hosts exchange a verified signed message end-to-end", { skip: MDNS_SKIP }, async () => {
   const nodeA = await bootNode();
   const nodeB = await bootNode();
   try {

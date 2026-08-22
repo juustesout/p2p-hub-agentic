@@ -5,6 +5,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { PluginHost } from "./plugin-host";
 
+// Real mDNS discovery is not delivered on GitHub-hosted macOS runners, so the
+// two-host discovery-based test is skipped there.
+const MDNS_SKIP =
+  process.platform === "darwin" &&
+  "real mDNS multicast discovery is not delivered on GitHub macOS runners";
+
 const ECHO_MANIFEST = {
   id: "testnode",
   version: "1.0.0",
@@ -104,7 +110,7 @@ test("enableNetworking defaults to false: boot leaves the registry empty", async
   assert.ok(host.getActivated("testnode") !== undefined);
 });
 
-test("two hosts reach each other's network-exposed skill via ctx.network", async () => {
+test("two hosts reach each other's network-exposed skill via ctx.network", { skip: MDNS_SKIP }, async () => {
   const rootA = await fs.mkdtemp(path.join(os.tmpdir(), "host-net-a-"));
   const rootB = await fs.mkdtemp(path.join(os.tmpdir(), "host-net-b-"));
   await writeTestNodePlugin(rootA);
