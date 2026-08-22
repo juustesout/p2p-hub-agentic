@@ -197,6 +197,9 @@ export class NetworkLightProvider implements NetworkProvider {
   private readonly capabilityProbes = new Map<string, Promise<PeerCapabilities | null>>();
   private readonly probeFailures = new Map<string, number>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private publishedService: Service | null = null;
+  private reannounceTimer: ReturnType<typeof setInterval> | null = null;
+  private announceSeq = 0;
 
   constructor(options: NetworkLightOptions = {}) {
     this.host = options.host ?? "0.0.0.0";
@@ -273,10 +276,14 @@ export class NetworkLightProvider implements NetworkProvider {
     });
 
     this.bonjour = new Bonjour();
-    this.bonjour.publish({
+    // `probe: false`: this instance owns its name on this host, and skipping
+    // the probe lets us re-announce the same service on a heartbeat below
+    // without a spurious "name already in use" teardown.
+    this.publishedService = this.bonjour.publish({
       name: this.name,
       type: SERVICE_TYPE,
       port: this.boundPort,
+      probe: false,
       txt: {
         id: this.instanceId,
         // Fase 0C: mDNS is discovery/bootstrap only. No skill names are
@@ -289,12 +296,19 @@ export class NetworkLightProvider implements NetworkProvider {
       },
     });
 
-    this.browser = this.bonjour.find({ type: SERVICE_TYPE }, (service) => {
-      this.onServiceUp(service);
-    });
-    this.browser.on("down", (service) => {
-      this.onServiceDown(service);
-    });
+    this.browser = this.bonjour.find({ type: SERVICE_TYPE });
+    this.browser.on("up", (service) => this.onServiceUp(service));
+    this.browser.on("down", (service) => this.onServiceDown(service));
+    // bonjour-service only announces once with an exponential backoff that
+    // stops entirely after a few minutes; without a heartbeat our
+    // `heartbeatTtlMs` prune would then remove every live peer. A peer's
+    // re-announcement carries a monotonic `announceSeq` in its TXT, so each
+    // one surfaces here as a `txt-update` and refreshes `lastSeen`.
+    this.browser.on("txt-update", (service) => this.onServiceHeartbeat(service));
+    this.browser.on("srv-update", (service) => this.onServiceHeartbeat(service));
+
+    this.reannounceTimer = setInterval(() => this.reannounce(), this.sweepIntervalMs);
+    this.reannounceTimer.unref?.();
 
     this.sweepTimer = setInterval(() => this.pruneStalePeers(), this.sweepIntervalMs);
     this.sweepTimer.unref?.();
@@ -309,6 +323,12 @@ export class NetworkLightProvider implements NetworkProvider {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+
+    if (this.reannounceTimer) {
+      clearInterval(this.reannounceTimer);
+      this.reannounceTimer = null;
+    }
+    this.publishedService = null;
 
     try {
       this.browser?.stop();
@@ -1048,6 +1068,58 @@ export class NetworkLightProvider implements NetworkProvider {
       this.capabilityProbes.delete(id);
       this.probeFailures.delete(id);
     }
+  }
+
+  /**
+   * A peer re-announced itself (or changed its SRV records). The identity,
+   * certificate and capabilities are unchanged — this is purely a liveness
+   * signal — so only `lastSeen` (and a possibly-changed address) is refreshed.
+   * Capabilities are deliberately NOT cleared here: a genuine restart gets a
+   * fresh instance id and arrives as a regular `up`.
+   */
+  private onServiceHeartbeat(service: Service): void {
+    const id = service.txt?.id as string | undefined;
+    if (!id || id === this.instanceId) {
+      return;
+    }
+    const peer = this.discovered.get(id);
+    if (!peer) {
+      this.onServiceUp(service);
+      return;
+    }
+    const address = this.serviceAddress(service);
+    if (address) {
+      peer.address = address;
+    }
+    peer.lastSeen = Date.now();
+  }
+
+  /**
+   * Re-announce our own service so peers keep our `lastSeen` fresh (and late
+   * browsers can still find us). bonjour-service's built-in announce chain
+   * backs off exponentially and then stops; we re-arm it on a fixed interval
+   * instead. The monotonic `announceSeq` in the TXT makes each announcement a
+   * distinct record, so a peer's browser surfaces it as a `txt-update`.
+   */
+  private reannounce(): void {
+    const service = this.publishedService;
+    if (!service || service.destroyed || !this.ready) {
+      return;
+    }
+    this.announceSeq += 1;
+    service.txt = { ...(service.txt ?? {}), announceSeq: this.announceSeq };
+    // Drop our earlier registry entry so re-starting does not accumulate
+    // duplicates in bonjour's registry, then re-arm the announce chain.
+    const registry = (this.bonjour as unknown as { registry?: { services?: Service[] } })
+      ?.registry;
+    if (registry?.services) {
+      const idx = registry.services.indexOf(service);
+      if (idx !== -1) {
+        registry.services.splice(idx, 1);
+      }
+    }
+    service.activated = false;
+    service.start();
   }
 
   /**

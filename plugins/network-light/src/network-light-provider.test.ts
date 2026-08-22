@@ -153,6 +153,50 @@ test("two local instances discover each other and exchange a task", async () => 
   }
 });
 
+test("discovery survives the heartbeat TTL via periodic re-announcement", async () => {
+  // Short TTL + sweep so the prune and re-announce timers run fast. Without
+  // the provider's own re-announce heartbeat, bonjour's built-in announce
+  // chain backs off (1s, 4s, 13s…) and the 1.5s prune would drop bob within a
+  // few seconds. With it, bob stays discoverable indefinitely.
+  const bobIdentity = makeIdentity();
+  const alice = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    heartbeatTtlMs: 1_500,
+    sweepIntervalMs: 500,
+  });
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobIdentity.identity,
+    identitySigner: bobIdentity.signer,
+    heartbeatTtlMs: 1_500,
+    sweepIntervalMs: 500,
+  });
+
+  await alice.start();
+  await bob.start();
+
+  try {
+    const bobPeer = await waitForPeerWithId(alice, bobIdentity.identity.peerId);
+    assert.ok(bobPeer);
+
+    // Wait well past several heartbeat-TTL windows.
+    await delay(5_000);
+
+    const stillThere = await waitForPeerWithId(
+      alice,
+      bobIdentity.identity.peerId,
+      undefined,
+      5_000,
+    );
+    assert.ok(stillThere, "bob must still be discovered long past the heartbeat TTL");
+  } finally {
+    await alice.stop();
+    await bob.stop();
+  }
+});
+
 test("a peer with an identity advertises both certFingerprint and peerId", async () => {
   const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({

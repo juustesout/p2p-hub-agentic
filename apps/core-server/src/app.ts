@@ -398,6 +398,22 @@ export class CoreServer {
     if (!this.provider) {
       return;
     }
+    // Warm the provider's capability cache for every discovered peer. Without
+    // this, `listPeers()` returns peers with an empty `skills` set until some
+    // other component happens to run a capability probe, and the shell has no
+    // way to know what a peer offers (e.g. the "View site" entry for
+    // `peersite.fetchAsset`). Probing is cached per peer after the first
+    // successful handshake, so this is cheap once warm.
+    const networkSkills = this.broker
+      .listSkills()
+      .filter((s) => !s.localOnly)
+      .map((s) => s.skill);
+    for (const skill of networkSkills) {
+      this.provider.discover(skill).catch(() => {
+        // Probe failures are retried internally (PROBE_RETRY_MS); never let a
+        // peer that is momentarily unreachable take down the poll loop.
+      });
+    }
     const peers = this.provider.listPeers();
     const current = new Set(peers.map((p) => p.id));
     for (const peer of peers) {
