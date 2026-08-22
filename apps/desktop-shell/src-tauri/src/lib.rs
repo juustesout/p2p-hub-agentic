@@ -103,3 +103,66 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_critical_settings_from_the_wire_shape() {
+        // Literal wire form as produced by `trust-confirm.ts`.
+        let request: ConfirmationRequest = serde_json::from_str(
+            r#"{"kind":"critical-settings","summary":"Rotate master key"}"#,
+        )
+        .expect("critical-settings wire form must parse");
+        assert!(matches!(
+            request,
+            ConfirmationRequest::CriticalSettings { summary }
+                if summary == "Rotate master key"
+        ));
+    }
+
+    #[test]
+    fn deserializes_peer_access_request_with_exact_camel_case_fields() {
+        // Literal wire form as produced by `trust-confirm.ts`: `peerId` and
+        // `expiresInMs` are camelCase. The per-field `#[serde(rename = ...)]`
+        // attributes on `peer_id` / `expires_in_ms` are what make this parse.
+        let request: ConfirmationRequest = serde_json::from_str(
+            r#"{"kind":"peer-access-request","peerId":"abc123","claim":"show my site","expiresInMs":60000}"#,
+        )
+        .expect("peer-access-request wire form must parse");
+        assert!(matches!(
+            request,
+            ConfirmationRequest::PeerAccessRequest {
+                peer_id,
+                claim,
+                expires_in_ms,
+            } if peer_id == "abc123" && claim == "show my site" && expires_in_ms == 60_000
+        ));
+    }
+
+    #[test]
+    fn rejects_snake_case_fields_that_do_not_match_the_wire_shape() {
+        // The wire contract sends camelCase `peerId` / `expiresInMs`. A
+        // snake_case fixture must fail to deserialize — this is exactly what
+        // the per-field serde renames enforce. If the `#[serde(rename = ...)]`
+        // attributes were removed, this test would still fail (correctly), but
+        // the camelCase test above would then fail instead, which is the real
+        // regression signal.
+        let snake_case_fields = serde_json::from_str::<ConfirmationRequest>(
+            r#"{"kind":"peer-access-request","peer_id":"abc123","claim":"show my site","expires_in_ms":60000}"#,
+        );
+        assert!(
+            snake_case_fields.is_err(),
+            "snake_case field names must not match the wire contract"
+        );
+
+        let snake_case_kind = serde_json::from_str::<ConfirmationRequest>(
+            r#"{"kind":"peer_access_request","peerId":"abc123","claim":"show my site","expiresInMs":60000}"#,
+        );
+        assert!(
+            snake_case_kind.is_err(),
+            "snake_case kind tag must not match the kebab-case wire contract"
+        );
+    }
+}

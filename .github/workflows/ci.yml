@@ -60,3 +60,5 @@ jobs:
           workspaces: apps/desktop-shell/src-tauri
       - name: cargo check
         run: cargo check
+      - name: cargo test (serde wire-contract round-trips)
+        run: cargo test
