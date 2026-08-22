@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   node:
     name: Node ${{ matrix.node }} (${{ matrix.os }})
@@ -15,8 +19,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node: [20, 22]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -42,7 +46,7 @@ jobs:
       run:
         working-directory: apps/desktop-shell/src-tauri
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux Tauri system dependencies
         if: runner.os == 'Linux'
         run: |
