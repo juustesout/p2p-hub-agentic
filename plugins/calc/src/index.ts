@@ -14,7 +14,6 @@ import {
   ERROR_ERROR,
   REF_ERROR,
   SYNTAX_ERROR,
-  coordToLabel,
   evaluateExpression,
   isAIFormula,
   isErrorValue,

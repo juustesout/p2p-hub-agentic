@@ -12,6 +12,7 @@
     "allowSyntheticDefaultImports": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
     "resolveJsonModule": true,
     "sourceMap": true,
     "types": ["node"]

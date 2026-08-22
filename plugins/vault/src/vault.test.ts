@@ -85,7 +85,7 @@ test("listKeys hides ai.* keys written by core", async () => {
 
 test("listKeys hides identity.* keys written by core", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-data-"));
-  const { vault, host } = await bootVault(dataDir, "test-master");
+  const { vault } = await bootVault(dataDir, "test-master");
 
   // boot() already persisted the identity keypair via the core-only
   // VaultManager; those keys must never surface through the plugin-facing list.

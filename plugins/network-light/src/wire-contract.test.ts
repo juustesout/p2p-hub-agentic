@@ -87,7 +87,6 @@ test("every encoded message round-trips through parseEnvelope", () => {
 
 test("parseEnvelope default-denies unknown protocol, version and shape", () => {
   const validBody = { versions: [1], capabilities: [], nonce };
-  const ackBody = { version: 1, capabilities: [], nonce, identity: binding };
   // Unknown protocol id.
   assert.equal(
     parseEnvelope({ protocol: "p2p-hub:other", version: 1, type: "hello", body: validBody }),

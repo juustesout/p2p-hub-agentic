@@ -708,7 +708,6 @@ test("a signed plugin loads and activates", async () => {
 
 test("a signed manifest with tampered fields is refused at load", async () => {
   const root = await makeTmpRoot();
-  const dataDir = path.join(root, "data");
   const key = makeSigningKey();
 
   const dir = await writePlugin(
@@ -728,7 +727,6 @@ test("a signed manifest with tampered fields is refused at load", async () => {
   manifest.permissions = ["network:skill:signed-tampered.x"];
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-  const storageManager = new StorageManager(dataDir);
   await assert.rejects(() => loadManifest(dir), /signature/);
 });
 

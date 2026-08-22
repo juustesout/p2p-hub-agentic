@@ -4,7 +4,6 @@ import {
   DIV0_ERROR,
   NAME_ERROR,
   NUM_ERROR,
-  REF_ERROR,
   VALUE_ERROR,
   coordToLabel,
   evaluateExpression,
@@ -15,7 +14,6 @@ import {
   rewriteRefs,
   stringifyExpression,
   type CellResolver,
-  type Expr,
   type RefNode,
 } from "./formula";
 

@@ -132,9 +132,6 @@ test("GET /ui/<pluginId>/<asset> serves sibling UI assets", async () => {
 test("HEAD /ui/<pluginId>/<asset> returns headers but no body", async () => {
   const { server, port } = await makeFixture();
   try {
-    const res = await get(port, "/ui/mywidget/app.js", {
-      "Content-Length": "0",
-    });
     // fetch has no HEAD helper; issue it via the server directly is overkill —
     // verify the route accepts HEAD through a raw fetch.
     const head = await fetch(`http://127.0.0.1:${port}/ui/mywidget/app.js`, {

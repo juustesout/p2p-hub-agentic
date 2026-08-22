@@ -330,7 +330,7 @@ test("2A: any gate allows any remote caller, even without a RemoteGate", async (
 
 test("2A: the handler receives the transport-verified peerId in its context", async () => {
   const broker = new TaskBroker({ remoteGate: gate() });
-  broker.registerSkill("demo.whoami", async (payload, ctx) => {
+  broker.registerSkill("demo.whoami", async (_payload, ctx) => {
     return { seen: ctx?.peerId };
   }, { localOnly: false, remote: { gate: "any" } });
 

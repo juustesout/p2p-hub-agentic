@@ -3,7 +3,6 @@ import {
   addObject,
   createDocument,
   linkObject,
-  resolveRef,
   rootObject,
   type PBXDocument,
   type PBXObject,

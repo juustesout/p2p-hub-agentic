@@ -84,10 +84,6 @@ export function setBrokenRefReporter(reporter: BrokenRefReporter | null): void {
   brokenRefReporter = reporter;
 }
 
-function reportBrokenRef(ref: string): void {
-  brokenRefReporter?.(ref);
-}
-
 /** Reserved structural keys that callers may not set via `data`. */
 const RESERVED_KEYS = new Set(["$id", "$class", "$version"]);
 

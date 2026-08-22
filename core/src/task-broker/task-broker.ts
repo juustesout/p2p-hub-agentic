@@ -192,7 +192,7 @@ export class TaskBroker {
       // Fase 2A: the network gate is evaluated here, before dispatch. A skill
       // without an explicit remote policy is denied — `localOnly: false` alone
       // authorizes nothing.
-      const allowed = await this.evaluateRemotePolicy(task, record, callerPeerId);
+      const allowed = await this.evaluateRemotePolicy(record, callerPeerId);
       if (!allowed) {
         return {
           taskId: task.id,
@@ -240,7 +240,6 @@ export class TaskBroker {
    * anonymous caller, a missing gate, or a peer the gate does not approve.
    */
   private async evaluateRemotePolicy(
-    task: TaskRequest,
     record: SkillRecord,
     callerPeerId: string | undefined,
   ): Promise<boolean> {

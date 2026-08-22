@@ -44,7 +44,6 @@ const SERVICE_TYPE = "p2p-hub";
 const RESPONSE_TIMEOUT_MS = 10_000;
 /** Peers silent this long are treated as gone even without an mDNS "down". */
 const HEARTBEAT_TTL_MS = 30_000;
-const SWEEP_INTERVAL_MS = 15_000;
 /** After a failed capability probe, do not retry that peer for this long. */
 const PROBE_RETRY_MS = 10_000;
 
