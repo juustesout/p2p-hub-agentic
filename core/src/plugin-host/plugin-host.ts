@@ -11,7 +11,11 @@ import { asContactLookup } from "@p2p-hub/sdk";
 import { StorageManager } from "../storage/storage-manager";
 import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
-import type { RemoteGate } from "../task-broker/remote-access";
+import type {
+  AgentGate,
+  RemoteGate,
+  TaskApprovalGate,
+} from "../task-broker/remote-access";
 import { AccessPassManager } from "../task-broker/access-pass-manager";
 import { VaultManager } from "../storage/vault-manager";
 import { IdentityManager } from "../identity/identity-manager";
@@ -77,6 +81,13 @@ export interface PluginHostOptions {
    * depending on OS-specific port-collision behaviour.
    */
   networkProviderFactory?: NetworkProviderFactory;
+  /**
+   * A1/Slice 2: per-invocation human approval for agent-initiated tasks that
+   * need Tier-2 step-up. Wired into the host's {@link TaskBroker}; the desktop
+   * shell injects the native confirmation here. Absent ⇒ agent tasks that need
+   * approval are denied (fail-closed).
+   */
+  taskApprovalGate?: TaskApprovalGate;
 }
 
 /** Input handed to a {@link NetworkProviderFactory}. */
@@ -130,9 +141,16 @@ export class PluginHost {
     this.hooks = hooks;
     this.storages = new StorageManager(options.dataDir);
     // Fase 2A: one shared access-pass store backs both `ctx.access` (plugins)
-    // and the broker's `access-pass` remote gate.
+    // and the broker's `access-pass` remote gate. A1/Slice 2: the broker's
+    // agent gate resolves declared agent identities from this host's own
+    // child-identity registry, and the operator's approval gate is passed
+    // through for Tier-2 step-up.
     this.access = new AccessPassManager();
-    this.broker = new TaskBroker({ remoteGate: buildRemoteGate(this) });
+    this.broker = new TaskBroker({
+      remoteGate: buildRemoteGate(this),
+      agentGate: buildAgentGate(this),
+      taskApprovalGate: options.taskApprovalGate,
+    });
     this.vault = new VaultManager({
       dataDir: options.dataDir,
       masterKey: options.masterKey,
@@ -435,6 +453,24 @@ function buildRemoteGate(host: PluginHost): RemoteGate {
     },
     hasValidAccessPass: async (peerId, scope) =>
       host.accessPassManager().hasValidPass(peerId, scope),
+  };
+}
+
+/**
+ * A1/Slice 2: the {@link AgentGate} the host injects into its
+ * {@link TaskBroker}. It resolves declared agent identities from the host's own
+ * child-identity registry (`IdentityManager.listChildIdentities`), so only the
+ * operator's own derived agents are ever recognised — a random remote peerId is
+ * never treated as an agent. Cross-node agent recognition (certificate import)
+ * is a later slice. The registry is read live, so deleting an agent identity
+ * takes effect on the very next remote call.
+ */
+function buildAgentGate(host: PluginHost): AgentGate {
+  return {
+    resolveAgentLabel: async (peerId) => {
+      const children = await host.identityManager().listChildIdentities();
+      return children.find((child) => child.peerId === peerId)?.label ?? null;
+    },
   };
 }
 

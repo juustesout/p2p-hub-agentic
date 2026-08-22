@@ -1,10 +1,11 @@
 # Agent Identity & Streaming Guidelines — Implementation Design (A1)
 
-Status: **design; Slice 1 (child-key derivation) implemented**. This document
-turns the three formally-recorded decisions in `plan.md` ("Toekomstige
-Capabilities: Agent Identity & Streaming Guidelines") into concrete
-implementation designs and a slice plan. Treat each slice as its own scoped
-task, same as `docs/peersite-plan.md`.
+Status: **design; Slice 1 (child-key derivation) and Slice 2 (shell/operator
+wiring + agent policy escalation) implemented**. This document turns the three
+formally-recorded decisions in `plan.md` ("Toekomstige Capabilities: Agent
+Identity & Streaming Guidelines") into concrete implementation designs and a
+slice plan. Treat each slice as its own scoped task, same as
+`docs/peersite-plan.md`.
 
 ## Decision 1 — Agent identity: own derived PeerID (child-keypair)
 
@@ -89,15 +90,36 @@ listChildIdentities(): Promise<Array<{ label: string; peerId: string }>>
 static verifyChildCertificate(parentPublicKeyHex: string, cert: unknown): boolean
 ```
 
-### Plugin surface (later slice, not Slice 1)
+### Plugin surface (built in Slice 2, broker-level)
 
-Agents are created by the **shell/operator**, not by plugins, so no new plugin
-capability is added here. A child identity is just another `peerId`: it flows
-through the exact same `verified-contact` / `access-pass` / `any` gates as any
-peer. Differentiated trust (stricter threshold for agent-initiated
-`sendTask`) is a **policy** decision layered on top of the transport-verified
-caller `peerId` (Fase 2A already delivers that to the handler context) — a
-future slice, not part of the key derivation.
+Agents are created by the **shell/operator**, never by plugins — no plugin
+capability is added. The differentiated-trust layer (Slice 2) lives entirely in
+the platform:
+
+- `GET /api/agents`, `POST /api/agents {label}`, `DELETE /api/agents/:label` on
+  the core-server HTTP bridge (boot-token guarded) let the operator create/list/
+  delete agent identities. Only public material is returned (peerId,
+  publicKeyHex, the operator-signed certificate, `createdAt`); the private key
+  never leaves `IdentityManager`.
+- `TaskBroker` gains an injected **`AgentGate`** (resolves a transport-verified
+  `peerId` to an agent label via the local child-identity registry) and a
+  **`TaskApprovalGate`** (per-invocation native human approval). The broker
+  evaluates the three-tier escalation matrix *before dispatch*:
+
+| Caller is a declared agent | Skill's `remote.agent.level` | Outcome |
+|---|---|---|
+| yes | (gate is `any`) | **denied** — the public path is structurally closed to agents |
+| yes | `telemetry` (Tier 1) | allowed on the normal gate (verified-contact/access-pass), no approval |
+| yes | `approved` (Tier 2, **default**) | normal gate + per-invocation native approval; no confirmer ⇒ denied |
+| yes | `never` (Tier 3) | **denied** even with a passing gate |
+| no | any | unchanged pre-A1 behavior |
+
+- Handlers receive the audit facts on the network path:
+  `initiatedBy: "operator" | "agent"` and `agentLabel` when agent — platform
+  verdicts derived from the transport-verified identity, never caller-supplied.
+
+The agent policy is inert until the operator creates an agent identity: no
+peer is an agent by default, so existing deployments see no behavior change.
 
 ## Decision 2 — Media capabilities: Tier-2 native-confirm gate
 
@@ -136,13 +158,19 @@ request/response rate-limiters.
 ## Slice plan
 
 - **Slice 1 (done):** Decision 1 core — `deriveChildIdentity` / persistence /
-  parent-signed certificate / `verifyChildCertificate` / `listChildIdentities`
-  + tests. This is the part CLAUDE.md's follow-up ("every future
-  IdentityManager change must preserve the ability to derive child keys")
+  parent-signed certificate / `verifyChildCertificate` / `listChildIdentities` /
+  `deleteChildIdentity` + tests. This is the part CLAUDE.md's follow-up ("every
+  future IdentityManager change must preserve the ability to derive child keys")
   protects.
-- **Slice 2:** shell/operator wiring — create an agent identity, hand it to an
-  agent runtime, and a policy hook for stricter thresholds on agent-initiated
-  actions.
+- **Slice 2 (done):** shell/operator wiring + the differentiated-trust policy.
+  `GET/POST/DELETE /api/agents` CRUD; `TaskBroker` agent escalation matrix
+  (any-closure, telemetry/approved/never levels) via injected `AgentGate` +
+  `TaskApprovalGate`, wired by `PluginHost` from its child-identity registry;
+  `initiatedBy`/`agentLabel` audit facts on the handler context. The operator's
+  native approval prompt is the same `trustConfirmation` channel, extended with
+  an `agent-task-approval` kind. Cross-node agent recognition (verifying a
+  foreign child's certificate and importing it as a declared agent) is not part
+  of this slice — the registry is the operator's own child identities.
 - **Slice 3:** `p2p-hub:media:v1` + Tier-2 native-confirm gate (Decision 2).
 - **Slice 4:** capability type split + per-peer telemetry frequency caps
   (Decision 3).
@@ -153,7 +181,11 @@ request/response rate-limiters.
   reserved `identity.agent.*` vault namespace; the certificate is the only
   public artifact and exposes no secret.
 - No agent bypass: a child `peerId` is subject to the same default-deny gates
-  as every other peer.
+  as every other peer — and to *stricter* ones. The `any` gate never authorizes
+  an agent, and every non-telemetry agent invocation needs an explicit native
+  approval. The escalation is decided by the platform from the
+  transport-verified caller `peerId` (via the injected `AgentGate`); a
+  caller-supplied field can never claim agent status.
 - Domain separation: the certificate context
   `p2p-hub:agent-identity:cert:v1` is distinct from
   `p2p-hub:peersite:auth:v1:`, `p2p-hub:peersite:knock:v1:`, and the manifest

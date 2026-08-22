@@ -161,9 +161,9 @@ publieke webserver hoef te draaien."
 
 ## Toekomstige Capabilities: Agent Identity & Streaming Guidelines
 
-Formeel vastgelegde architectuurbesluiten. **Status: vastgelegd, niet gebouwd** — dit
-is een richtlijn voor toekomstig werk aan IdentityManager, media-capabilities en
-telemetrie/streaming-capabilities, geen implementatie in deze fase.
+Formeel vastgelegde architectuurbesluiten. **Status: besluit 1 gebouwd (A1 Slice 1 + 2,
+`ed26400` + volgend), besluiten 2 en 3 nog niet gebouwd.** Details en slice-plan:
+`docs/agent-identity-streaming-design.md`.
 
 ### 1. Agent-identiteit: eigen, afgeleide PeerID (child-keypair)
 
@@ -185,6 +185,32 @@ telemetrie/streaming-capabilities, geen implementatie in deze fase.
     omzeiling van access-passes of contact-gates.
 - **Vastleggingseis:** bij elke toekomstige uitbreiding aan de IdentityManager blijft
   de mogelijkheid tot het genereren van afgeleide child-keys geborgd.
+
+#### Implementatiestatus (A1, Slice 1 + 2)
+
+- **Slice 1 (kind-keys, gebouwd):** `deriveChildIdentity`/`getChildIdentity`/
+  `listChildIdentities`/`deleteChildIdentity` op `IdentityManager`; deterministische
+  HKDF-kind-derivatie (PKCS8-seed), parent-ondertekend certificaat
+  (`p2p-hub:agent-identity:cert:v1`) voor registry-vrije auditability; vault-isolatie
+  onder het gereserveerde `identity.agent.*`-prefix.
+- **Slice 2 (operator-wiring + gedifferentieerde trust, gebouwd):**
+  - CRUD-API op de HTTP-bridge (boot-token guarded): `GET /api/agents`,
+    `POST /api/agents {label}`, `DELETE /api/agents/:label`. Alleen publiek materiaal
+    (peerId, publicKeyHex, certificaat, `createdAt`) — de private key verlaat
+    `IdentityManager` nooit; labels door `isValidAgentLabel`.
+  - `TaskBroker`-escalatiematrix (gelaagde agent-policy), vóór dispatch geëvalueerd
+    door de broker:
+    - **Tier 1 — telemetry:** `remote.agent.level: "telemetry"` → normale gate
+      (verified-contact/access-pass) is voldoende, geen goedkeuring.
+    - **Tier 2 — discrete acties (default `approved`):** normale gate + per-invocatie
+      native menselijke goedkeuring (`TaskApprovalGate`, fail-closed zonder confirmer).
+    - **Tier 3 — kritiek:** `remote.agent.level: "never"` → altijd geweigerd; de
+      `any`-gate autoriseert een agent structureel nooit.
+  - Audit-velden op de handler-context: `initiatedBy: "operator" | "agent"` +
+    `agentLabel` — platform-uitspraak op basis van de transport-verified `peerId`,
+    nooit een caller-supplied veld.
+  - Agent-registratie = de lokale kind-identiteiten van de operator; cross-node
+    herkenning (buitenlands kind-certificaat importeren) is een latere slice.
 
 ### 2. Media-capabilities (camera/microfoon): Tier-2 native-confirm-gate
 

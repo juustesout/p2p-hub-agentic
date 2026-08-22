@@ -161,3 +161,23 @@ test("child key material derives from a seed and signs/verifies like any Ed25519
   // the vault with an arbitrary key name.
   assert.equal(await manager.getChildIdentity("../evil"), null);
 });
+
+test("deleteChildIdentity removes an agent from the registry and the vault", async () => {
+  const manager = new IdentityManager({ vault: await makeVault() });
+  await manager.deriveChildIdentity("retired-agent");
+  assert.equal(await manager.getChildIdentity("retired-agent") !== null, true);
+
+  // Deletion succeeds and the identity is gone from both the registry and the vault.
+  assert.equal(await manager.deleteChildIdentity("retired-agent"), true);
+  assert.equal(await manager.getChildIdentity("retired-agent"), null);
+  assert.deepEqual(await manager.listChildIdentities(), []);
+
+  // Deleting again is a no-op (false), and an invalid label never touches the vault.
+  assert.equal(await manager.deleteChildIdentity("retired-agent"), false);
+  assert.equal(await manager.deleteChildIdentity("../evil"), false);
+
+  // Other labels are untouched.
+  await manager.deriveChildIdentity("kept-agent");
+  assert.equal(await manager.deleteChildIdentity("retired-agent"), false);
+  assert.equal(await manager.getChildIdentity("kept-agent") !== null, true);
+});

@@ -29,6 +29,8 @@ import {
   validateTextLength,
 } from "@p2p-hub/sdk";
 import type {
+  ChildCertificate,
+  ChildIdentity,
   EffectiveSettings,
   RiskAssessment,
   TaskResult,
@@ -43,13 +45,14 @@ import {
   TrustTierGate,
   atomicWriteFile,
   contentTypeForPath,
+  isValidAgentLabel,
   mirrorDestination,
   mirrorFetchAndStore,
   readJsonFile,
   resolveAndContainFile,
   wireNetworkToBroker,
 } from "@p2p-hub/core";
-import type { TrustConfirmation } from "@p2p-hub/core";
+import type { TaskApprovalGate, TrustConfirmation } from "@p2p-hub/core";
 import { NetworkLightProvider } from "@p2p-hub/network-light";
 
 export interface CoreServerOptions {
@@ -68,6 +71,13 @@ export interface CoreServerOptions {
    * default, which makes every tier-2 settings change fail closed (denied).
    */
   trustConfirmation?: TrustConfirmation;
+  /**
+   * A1/Slice 2: per-invocation human approval for agent-initiated remote
+   * skills that need Tier-2 step-up. Delegated to the same native confirmation
+   * channel as `trustConfirmation` (an `agent-task-approval` prompt). Absent by
+   * default, which makes every agent task that needs approval fail closed.
+   */
+  taskApprovalGate?: TaskApprovalGate;
   /**
    * Start the P2P network transport (LAN discovery + inbound capability calls).
    * Default `true` — the core-server is by definition the P2P-capable backend.
@@ -189,6 +199,7 @@ export class CoreServer {
       pluginsDir: options.pluginsDir,
       dataDir: options.dataDir,
       masterKey: options.masterKey,
+      taskApprovalGate: options.taskApprovalGate,
     });
     this.broker = this.host.taskBroker();
     this.trustGate = new TrustTierGate(options.trustConfirmation);
@@ -597,6 +608,44 @@ export class CoreServer {
         await this.saveSettings(settings);
         this.broadcast("settings:updated", { settings, risk });
         return this.sendJson(res, 200, { ok: true, risk });
+      }
+      if (req.method === "GET" && path === "/api/agents") {
+        const agents: unknown[] = [];
+        for (const { label } of await this.host
+          .identityManager()
+          .listChildIdentities()) {
+          const child = await this.host.identityManager().getChildIdentity(label);
+          if (child) {
+            agents.push(agentView(child));
+          }
+        }
+        return this.sendJson(res, 200, { agents });
+      }
+      if (req.method === "POST" && path === "/api/agents") {
+        const body = (await readJson(req)) as { label?: unknown };
+        if (typeof body.label !== "string" || !isValidAgentLabel(body.label)) {
+          return this.sendJson(res, 400, {
+            ok: false,
+            error: "create expects a valid agent label (^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$)",
+          });
+        }
+        const child = await this.host
+          .identityManager()
+          .deriveChildIdentity(body.label);
+        return this.sendJson(res, 200, { ok: true, agent: agentView(child) });
+      }
+      if (req.method === "DELETE" && path.startsWith("/api/agents/")) {
+        const label = decodeURIComponent(path.slice("/api/agents/".length));
+        if (!isValidAgentLabel(label)) {
+          return this.sendJson(res, 400, {
+            ok: false,
+            error: `invalid agent label "${label}"`,
+          });
+        }
+        const deleted = await this.host
+          .identityManager()
+          .deleteChildIdentity(label);
+        return this.sendJson(res, 200, { ok: true, deleted });
       }
 
       return this.sendJson(res, 404, { error: "not found" });
@@ -1421,6 +1470,29 @@ function settingsApplySummary(risk: RiskAssessment): string {
   return `Apply security settings (${risk.aggregate}): ${risk.findings
     .map((f) => f.id)
     .join(", ")}`;
+}
+
+/**
+ * Public view of a derived agent identity for the `/api/agents` surface. Only
+ * public material is exposed: the peerId, the public key, the operator-signed
+ * certificate and its `issuedAt`. The private key never leaves
+ * `IdentityManager` — it is structurally absent from this view (CLAUDE.md
+ * principle #6).
+ */
+function agentView(child: ChildIdentity): {
+  label: string;
+  peerId: string;
+  publicKeyHex: string;
+  certificate: ChildCertificate;
+  createdAt: number;
+} {
+  return {
+    label: child.label,
+    peerId: child.peerId,
+    publicKeyHex: child.publicKeyHex,
+    certificate: child.certificate,
+    createdAt: child.certificate.issuedAt,
+  };
 }
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {

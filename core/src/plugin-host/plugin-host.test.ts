@@ -416,3 +416,95 @@ test("a signed plugin whose code changed after signing is refused (Fase 2C)", as
     restore();
   }
 });
+
+// ---------------------------------------------------------------------------
+// A1/Slice 2 — the host wires its child-identity registry as the broker's
+// agent gate and passes the operator's approval gate through.
+// ---------------------------------------------------------------------------
+
+test("A1: a derived child is recognised as an agent by the host's broker and escalated", async () => {
+  const root = await makeTmpRoot();
+  await fs.mkdir(path.join(root, "plugins"), { recursive: true });
+  const approvals: Array<{ taskId: string; skill: string; agentLabel: string; peerId: string }> = [];
+  const host = new PluginHost({
+    pluginsDir: path.join(root, "plugins"),
+    dataDir: path.join(root, "data"),
+    taskApprovalGate: {
+      approveAgentTask: async (request) => {
+        approvals.push(request);
+        return true;
+      },
+    },
+  });
+  await host.boot();
+
+  const child = await host.identityManager().deriveChildIdentity("wired-agent");
+  const operator = await host.identityManager().getOrCreateIdentity();
+  assert.notEqual(child.peerId, operator.peerId);
+
+  const broker = host.taskBroker();
+  const passedGate = host
+    .accessPassManager()
+    .issue(child.peerId, "agent-run");
+  assert.ok(passedGate);
+
+  // An agent-initiated invocation on a Tier-2 (approved) skill consults the
+  // operator's approval gate and reaches the handler with the agent audit
+  // context — the operator's own identity is never substituted.
+  broker.registerSkill("agent.safe", async (_payload, ctx) => ctx, {
+    localOnly: false,
+    remote: { gate: "access-pass", scope: "agent-run", agent: { level: "approved" } },
+  });
+  const agentCall = await broker.handleRemote({
+    id: "wired-1",
+    skill: "agent.safe",
+    peerId: child.peerId,
+    payload: null,
+  });
+  assert.equal(agentCall.status, "ok");
+  assert.deepEqual(agentCall.result, {
+    peerId: child.peerId,
+    initiatedBy: "agent",
+    agentLabel: "wired-agent",
+  });
+  assert.equal(approvals.length, 1);
+  assert.deepEqual(approvals[0], {
+    taskId: "wired-1",
+    skill: "agent.safe",
+    agentLabel: "wired-agent",
+    peerId: child.peerId,
+  });
+
+  // The operator's own peerId is never treated as an agent: the public `any`
+  // gate still works for it, with no approval.
+  broker.registerSkill("agent.public", async (_payload, ctx) => ctx, {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+  const operatorCall = await broker.handleRemote({
+    id: "wired-2",
+    skill: "agent.public",
+    peerId: operator.peerId,
+    payload: null,
+  });
+  assert.equal(operatorCall.status, "ok");
+  assert.deepEqual(operatorCall.result, {
+    peerId: operator.peerId,
+    initiatedBy: "operator",
+  });
+  assert.equal(approvals.length, 1);
+
+  // Deleting the agent identity removes it from the live registry immediately:
+  // the same peerId stops escalating (no more approval), reverting to a plain
+  // peer that still has to pass the normal gate.
+  await host.identityManager().deleteChildIdentity("wired-agent");
+  const afterDelete = await broker.handleRemote({
+    id: "wired-3",
+    skill: "agent.safe",
+    peerId: child.peerId,
+    payload: null,
+  });
+  assert.equal(afterDelete.status, "ok");
+  assert.deepEqual(afterDelete.result, { peerId: child.peerId, initiatedBy: "operator" });
+  assert.equal(approvals.length, 1);
+});

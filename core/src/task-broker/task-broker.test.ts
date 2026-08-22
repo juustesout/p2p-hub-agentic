@@ -365,3 +365,281 @@ test("2A: a throwing RemoteGate denies rather than opening the door", async () =
   assert.equal(result.status, "error");
   assert.match(result.error ?? "", /not authorized/);
 });
+
+// ---------------------------------------------------------------------------
+// A1/Slice 2 — agent escalation matrix (plan.md: gelaagde agent policy)
+// ---------------------------------------------------------------------------
+
+const OPERATOR = "f".repeat(64);
+const AGENT_LABEL = "alice";
+const AGENT = "e".repeat(64);
+const AGENT2 = "d".repeat(64);
+
+function agentGate(labelFor: string): import("./remote-access").AgentGate {
+  return {
+    resolveAgentLabel: async (peerId) =>
+      peerId === AGENT || peerId === AGENT2 ? labelFor : null,
+  };
+}
+
+function approvalGate(decision: boolean): import("./remote-access").TaskApprovalGate {
+  return { approveAgentTask: async () => decision };
+}
+
+test("A1: an agent caller can never pass the 'any' gate (public path closed)", async () => {
+  const broker = new TaskBroker({ agentGate: agentGate(AGENT_LABEL) });
+  broker.registerSkill("contacts.signChallenge", async () => "sig", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  const agent = await broker.handleRemote(
+    task({ skill: "contacts.signChallenge", peerId: AGENT }),
+  );
+  const operator = await broker.handleRemote(
+    task({ skill: "contacts.signChallenge", peerId: OPERATOR }),
+  );
+
+  assert.equal(agent.status, "error");
+  assert.match(agent.error ?? "", /not authorized/);
+  assert.equal(operator.status, "ok");
+});
+
+test("A1: 'any' is skipped for agents but an OR-ed stricter gate still applies", async () => {
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+  });
+  broker.registerSkill("peersite.read", async () => "data", {
+    localOnly: false,
+    remote: {
+      gate: ["any", "verified-contact"],
+      agent: { level: "telemetry" },
+    },
+  });
+
+  const asContact = await broker.handleRemote(
+    task({ skill: "peersite.read", peerId: AGENT }),
+  );
+  const agentNotAContact = await broker.handleRemote(
+    task({ skill: "peersite.read", peerId: AGENT2 }),
+  );
+
+  assert.equal(asContact.status, "ok");
+  assert.equal(agentNotAContact.status, "error");
+});
+
+test("A1: telemetry level (Tier 1) lets an agent through on the normal gate", async () => {
+  const seen: unknown[] = [];
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+  });
+  broker.registerSkill("telemetry.vitals", async (_p, ctx) => {
+    seen.push(ctx);
+    return "ok";
+  }, {
+    localOnly: false,
+    remote: {
+      gate: "verified-contact",
+      agent: { level: "telemetry" },
+    },
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "telemetry.vitals", peerId: AGENT }),
+  );
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(seen[0], {
+    peerId: AGENT,
+    initiatedBy: "agent",
+    agentLabel: AGENT_LABEL,
+  });
+});
+
+test("A1: approved level (Tier 2, default) without a confirmer fails closed", async () => {
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+  });
+  broker.registerSkill("mail.send", async () => "sent", {
+    localOnly: false,
+    remote: { gate: "verified-contact" },
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "mail.send", peerId: AGENT }),
+  );
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /not authorized/);
+});
+
+test("A1: approved level approves the task when the operator confirms", async () => {
+  const requests: unknown[] = [];
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    taskApprovalGate: {
+      approveAgentTask: async (request) => {
+        requests.push(request);
+        return true;
+      },
+    },
+  });
+  broker.registerSkill("mail.send", async () => "sent", {
+    localOnly: false,
+    remote: { gate: "verified-contact", agent: { level: "approved" } },
+  });
+
+  const result = await broker.handleRemote(
+    task({ id: "task-9", skill: "mail.send", peerId: AGENT }),
+  );
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.result, "sent");
+  assert.deepEqual(requests[0], {
+    taskId: "task-9",
+    skill: "mail.send",
+    agentLabel: AGENT_LABEL,
+    peerId: AGENT,
+  });
+});
+
+test("A1: approved level refuses when the operator denies the task", async () => {
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    taskApprovalGate: approvalGate(false),
+  });
+  broker.registerSkill("mail.send", async () => "sent", {
+    localOnly: false,
+    remote: { gate: "verified-contact" },
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "mail.send", peerId: AGENT }),
+  );
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /not authorized/);
+});
+
+test("A1: a throwing approval gate denies (fail-closed)", async () => {
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    taskApprovalGate: {
+      approveAgentTask: async () => {
+        throw new Error("prompt exploded");
+      },
+    },
+  });
+  broker.registerSkill("mail.send", async () => "sent", {
+    localOnly: false,
+    remote: { gate: "verified-contact" },
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "mail.send", peerId: AGENT }),
+  );
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /not authorized/);
+});
+
+test("A1: never level (Tier 3) hard-refuses an agent even with a passing gate", async () => {
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+  });
+  broker.registerSkill("vault.read", async () => "secret", {
+    localOnly: false,
+    remote: { gate: "verified-contact", agent: { level: "never" } },
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "vault.read", peerId: AGENT }),
+  );
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /not authorized/);
+});
+
+test("A1: the agent level never escalates a non-agent remote caller", async () => {
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === OPERATOR }),
+  });
+  broker.registerSkill("vault.read", async () => "secret", {
+    localOnly: false,
+    remote: { gate: "verified-contact", agent: { level: "never" } },
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "vault.read", peerId: OPERATOR }),
+  );
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.result, "secret");
+});
+
+test("A1: a non-agent remote caller gets initiatedBy 'operator'", async () => {
+  const seen: unknown[] = [];
+  const broker = new TaskBroker({
+    agentGate: agentGate(AGENT_LABEL),
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === OPERATOR }),
+  });
+  broker.registerSkill("demo.whoami", async (_p, ctx) => {
+    seen.push(ctx);
+    return "ok";
+  }, { localOnly: false, remote: { gate: "verified-contact" } });
+
+  const result = await broker.handleRemote(
+    task({ skill: "demo.whoami", peerId: OPERATOR }),
+  );
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(seen[0], { peerId: OPERATOR, initiatedBy: "operator" });
+});
+
+test("A1: a remote policy with an unknown agent level is rejected at registration", async () => {
+  const broker = new TaskBroker();
+  assert.throws(
+    () =>
+      broker.registerSkill("demo.x", async () => "x", {
+        localOnly: false,
+        remote: {
+          gate: "verified-contact",
+          agent: { level: "root" as "telemetry" },
+        },
+      }),
+    /agent" level must be one of "telemetry", "approved", "never"/,
+  );
+});
+
+test("A1: a throwing AgentGate reads as 'not an agent' (base gate still applies)", async () => {
+  const broker = new TaskBroker({
+    agentGate: {
+      resolveAgentLabel: async () => {
+        throw new Error("registry exploded");
+      },
+    },
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === OPERATOR }),
+  });
+  broker.registerSkill("peersite.read", async () => "data", {
+    localOnly: false,
+    remote: { gate: "verified-contact" },
+  });
+
+  const operator = await broker.handleRemote(
+    task({ skill: "peersite.read", peerId: OPERATOR }),
+  );
+  const stranger = await broker.handleRemote(
+    task({ skill: "peersite.read", peerId: AGENT }),
+  );
+
+  assert.equal(operator.status, "ok");
+  assert.equal(stranger.status, "error");
+});

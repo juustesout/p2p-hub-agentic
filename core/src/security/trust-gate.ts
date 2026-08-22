@@ -34,6 +34,13 @@ export type ConfirmationRequest =
       peerId: string;
       claim: string;
       expiresInMs: number;
+    }
+  | {
+      kind: "agent-task-approval";
+      taskId: string;
+      skill: string;
+      agentLabel: string;
+      peerId: string;
     };
 
 /**

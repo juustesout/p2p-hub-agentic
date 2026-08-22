@@ -4,8 +4,18 @@ import {
   validateObjectDepth,
   validatePayloadSize,
 } from "@p2p-hub/sdk";
-import type { RemoteAccessPolicy, RemoteGate } from "./remote-access";
-import { normalizeRemoteGates } from "./remote-access";
+import type {
+  AgentGate,
+  RemoteAccessPolicy,
+  RemoteGate,
+  RemoteGateKind,
+  TaskApprovalGate,
+} from "./remote-access";
+import {
+  DEFAULT_AGENT_ACCESS_LEVEL,
+  isAgentAccessLevel,
+  normalizeRemoteGates,
+} from "./remote-access";
 
 /**
  * Second argument handed to a skill handler alongside the payload. Carries
@@ -19,6 +29,20 @@ export interface SkillInvocationContext {
    * remote callers. Never trust a caller-supplied `peerId` in the payload.
    */
   peerId?: string;
+  /**
+   * Auditability (A1/Slice 2): who initiated this invocation, as derived by
+   * the platform from the transport-verified caller identity. `"agent"` when
+   * the caller is a declared agent identity (with `agentLabel` set), `"operator"`
+   * for a verified non-agent remote peer. Absent for local/HTTP/anonymous calls.
+   * This is a platform verdict — never a caller-supplied field.
+   */
+  initiatedBy?: "operator" | "agent";
+  /**
+   * The declared agent label when `initiatedBy === "agent"`, so handlers can
+   * distinguish human-from-agent actions in their own audit output. Absent
+   * for non-agent callers.
+   */
+  agentLabel?: string;
 }
 
 export type SkillHandler = (
@@ -74,6 +98,18 @@ export interface TaskBrokerOptions {
    * host injects a gate wired to its contacts lookup and access-pass manager.
    */
   remoteGate?: RemoteGate;
+  /**
+   * A1/Slice 2: the gate that resolves whether a transport-verified caller
+   * peerId is a declared agent identity. When absent, no caller is treated as
+   * an agent and the agent policy is inert.
+   */
+  agentGate?: AgentGate;
+  /**
+   * A1/Slice 2: per-invocation human approval for agent-initiated tasks that
+   * need Tier-2 step-up. When absent, an agent task that requires approval is
+   * denied (fail-closed).
+   */
+  taskApprovalGate?: TaskApprovalGate;
 }
 
 const DEFAULT_MAX_CONCURRENT_TASKS = 100;
@@ -92,12 +128,16 @@ export class TaskBroker {
   private readonly skills = new Map<string, SkillRecord>();
   private readonly maxConcurrentTasks: number;
   private readonly remoteGate: RemoteGate | undefined;
+  private readonly agentGate: AgentGate | undefined;
+  private readonly taskApprovalGate: TaskApprovalGate | undefined;
   private activeTasks = 0;
 
   constructor(options: TaskBrokerOptions = {}) {
     const max = options.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_TASKS;
     this.maxConcurrentTasks = Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_CONCURRENT_TASKS;
     this.remoteGate = options.remoteGate;
+    this.agentGate = options.agentGate;
+    this.taskApprovalGate = options.taskApprovalGate;
   }
 
   registerSkill(
@@ -188,11 +228,30 @@ export class TaskBroker {
         error: `skill "${task.skill}" is local-only and not network-accessible`,
       };
     }
+    // A1/Slice 2: resolve whether the transport-verified caller is a declared
+    // agent identity. Only the network path can carry a verified caller, and
+    // only `task.peerId` (set by the transport) is consulted — never a
+    // caller-supplied payload field. A throwing/failing lookup reads as "not an
+    // agent"; the normal gate still applies either way.
+    let agentLabel: string | undefined;
+    if (gate === "network" && callerPeerId) {
+      try {
+        agentLabel = (await this.agentGate?.resolveAgentLabel(callerPeerId)) ?? undefined;
+      } catch {
+        agentLabel = undefined;
+      }
+    }
     if (gate === "network") {
-      // Fase 2A: the network gate is evaluated here, before dispatch. A skill
-      // without an explicit remote policy is denied — `localOnly: false` alone
-      // authorizes nothing.
-      const allowed = await this.evaluateRemotePolicy(record, callerPeerId);
+      // Fase 2A + A1/Slice 2: the network gate (and the agent escalation
+      // matrix) is evaluated here, before dispatch. A skill without an explicit
+      // remote policy is denied — `localOnly: false` alone authorizes nothing.
+      const allowed = await this.evaluateRemotePolicy(
+        record,
+        task.id,
+        task.skill,
+        callerPeerId,
+        agentLabel,
+      );
       if (!allowed) {
         return {
           taskId: task.id,
@@ -220,7 +279,14 @@ export class TaskBroker {
       validateObjectDepth(task.payload);
       const serialized = JSON.stringify(task.payload ?? null) ?? "null";
       validatePayloadSize(serialized, MAX_PAYLOAD_BYTES);
-      const result = await record.handler(task.payload, { peerId: callerPeerId });
+      const context: SkillInvocationContext = { peerId: callerPeerId };
+      if (agentLabel !== undefined) {
+        context.initiatedBy = "agent";
+        context.agentLabel = agentLabel;
+      } else if (gate === "network" && callerPeerId) {
+        context.initiatedBy = "operator";
+      }
+      const result = await record.handler(task.payload, context);
       return { taskId: task.id, status: "ok", result };
     } catch (err) {
       return {
@@ -234,14 +300,26 @@ export class TaskBroker {
   }
 
   /**
-   * Evaluate a skill's Fase 2A `remote` policy for a network caller. Never
+   * Evaluate a skill's Fase 2A `remote` policy for a network caller, applying
+   * the A1/Slice 2 agent escalation matrix for declared agent callers. Never
    * throws (a broken gate denies rather than errors out). `any` is the only
    * gate with no proof requirement; every other gate fails closed on an
    * anonymous caller, a missing gate, or a peer the gate does not approve.
+   *
+   * For agent callers (`agentLabel` resolved) the matrix from plan.md applies:
+   * - `any` never authorizes an agent — the public path is structurally
+   *   closed to agents (Tier 3 refusal).
+   * - the remaining gate(s) must still pass, and then `remote.agent.level`
+   *   decides: `"telemetry"` allows without approval (Tier 1),
+   *   `"approved"` (default) requires a per-invocation native approval
+   *   (Tier 2, fail-closed without a confirmer), `"never"` refuses (Tier 3).
    */
   private async evaluateRemotePolicy(
     record: SkillRecord,
+    taskId: string,
+    skill: string,
     callerPeerId: string | undefined,
+    agentLabel: string | undefined,
   ): Promise<boolean> {
     const policy = record.remote;
     if (!policy) {
@@ -251,12 +329,42 @@ export class TaskBroker {
     if (gates.length === 0) {
       return false;
     }
-    const isAnonymous = callerPeerId === undefined || callerPeerId.length === 0;
+    const gatePassed = await this.evaluateGates(policy, gates, callerPeerId, agentLabel);
+    if (!gatePassed) {
+      return false;
+    }
+    if (agentLabel === undefined) {
+      return true;
+    }
+    const level = policy.agent?.level ?? DEFAULT_AGENT_ACCESS_LEVEL;
+    if (level === "never") {
+      return false;
+    }
+    if (level === "approved") {
+      return this.approveAgentTask(callerPeerId as string, agentLabel, taskId, skill);
+    }
+    return true;
+  }
+
+  /**
+   * Evaluate the skill's named gates. For an agent caller the `any` gate is
+   * skipped (agents can never use the public path) and every other gate still
+   * has to prove the caller. Never throws.
+   */
+  private async evaluateGates(
+    policy: RemoteAccessPolicy,
+    gates: RemoteGateKind[],
+    callerPeerId: string | undefined,
+    agentLabel: string | undefined,
+  ): Promise<boolean> {
     for (const kind of gates) {
+      if (agentLabel !== undefined && kind === "any") {
+        continue;
+      }
       if (kind === "any") {
         return true;
       }
-      if (isAnonymous) {
+      if (callerPeerId === undefined || callerPeerId.length === 0) {
         continue;
       }
       if (!this.remoteGate) {
@@ -282,12 +390,40 @@ export class TaskBroker {
     }
     return false;
   }
+
+  /**
+   * Tier 2 step-up: ask the injected {@link TaskApprovalGate} for an explicit
+   * native confirmation before dispatching an agent-initiated task. Fails
+   * closed: no confirmer, a confirmer that throws, or a denial all refuse.
+   */
+  private async approveAgentTask(
+    callerPeerId: string,
+    agentLabel: string,
+    taskId: string,
+    skill: string,
+  ): Promise<boolean> {
+    const approve = this.taskApprovalGate?.approveAgentTask;
+    if (!approve) {
+      return false;
+    }
+    try {
+      return await approve({
+        taskId,
+        skill,
+        agentLabel,
+        peerId: callerPeerId,
+      });
+    } catch {
+      return false;
+    }
+  }
 }
 
 /**
  * Validate a `remote` policy at registration time so a misconfigured policy is
  * loud at boot, not silently ineffective on the network path. Throws when an
- * `access-pass` gate is declared without a scope.
+ * `access-pass` gate is declared without a scope, or when the `agent` policy
+ * names an unknown access level.
  */
 function validateRemotePolicy(policy: RemoteAccessPolicy | undefined): void {
   if (!policy) {
@@ -302,6 +438,11 @@ function validateRemotePolicy(policy: RemoteAccessPolicy | undefined): void {
   if (gates.includes("access-pass") && typeof policy.scope !== "string") {
     throw new Error(
       'remote policy with an "access-pass" gate requires a "scope"',
+    );
+  }
+  if (policy.agent !== undefined && !isAgentAccessLevel(policy.agent.level)) {
+    throw new Error(
+      `remote policy "agent" level must be one of "telemetry", "approved", "never"`,
     );
   }
 }

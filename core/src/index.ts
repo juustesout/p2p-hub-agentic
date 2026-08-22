@@ -22,6 +22,19 @@ export * from "./site/site-mirror";
 export * from "./test-support";
 
 import { IdentityManager } from "./identity/identity-manager";
+import { isValidChildLabel } from "./identity/child-identity";
+
+/**
+ * Validate an agent label before it is used as a vault key/URL segment for a
+ * derived agent identity. Re-exported so the HTTP bridge can reject a malformed
+ * label with a clean 4xx before any vault write happens — the label becomes a
+ * key under the reserved `identity.agent.*` namespace, so it must pass the same
+ * check the derivation itself enforces (delimiter-anchored, per CLAUDE.md
+ * principle #2).
+ */
+export function isValidAgentLabel(label: string): boolean {
+  return isValidChildLabel(label);
+}
 
 /**
  * Standalone proof-of-possession verifier. Re-exported so consumers (plugins)

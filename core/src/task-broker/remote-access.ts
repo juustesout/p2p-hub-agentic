@@ -47,6 +47,75 @@ export interface RemoteAccessPolicy {
    * lift the gate on unrelated capabilities.
    */
   scope?: string;
+  /**
+   * A1/Slice 2 — how *agent* callers (declared child identities) are treated,
+   * layered on top of the gate. Fail-closed default when absent: `"approved"`
+   * (every agent-initiated invocation additionally needs a native human
+   * approval). Agents can never pass the `"any"` gate regardless of this field.
+   */
+  agent?: AgentAccessPolicy;
+}
+
+/**
+ * A1/Slice 2 — per-skill classification of agent callers. Mirrors the
+ * three-tier escalation matrix recorded in plan.md:
+ *
+ * - `"telemetry"` (Tier 1) — read-only/telemetry skills: the normal gate is
+ *   the whole check, no per-invocation approval.
+ * - `"approved"` (Tier 2, default) — discrete side-effect skills: after the
+ *   gate passes, every agent-initiated invocation also requires a native human
+ *   approval (per-invocation step-up).
+ * - `"never"` (Tier 3) — critical skills (vault/admin/settings-adjacent):
+ *   agent callers are always refused, even with a passing gate.
+ *
+ * The broker's `any`-gate refusal is structural and independent of this field:
+ * an agent caller can never use the public path.
+ */
+export type AgentAccessLevel = "telemetry" | "approved" | "never";
+
+export interface AgentAccessPolicy {
+  level: AgentAccessLevel;
+}
+
+/**
+ * Capability the {@link TaskBroker} consults to detect agent callers.
+ * Deliberately injected (never constructed by the broker): the broker must not
+ * know *how* agent identities are stored — the host wires a concrete
+ * implementation backed by its child-identity registry. Resolution happens
+ * from the transport-verified `task.peerId` only; a caller-supplied payload
+ * field is never consulted (CLAUDE.md principle: the platform decides
+ * authorization from a transport-verified identity).
+ */
+export interface AgentGate {
+  /**
+   * Resolve the agent label for a transport-verified `peerId`, or `null` when
+   * the peer is not a declared agent identity. Never throws (a failing lookup
+   * reads as "not an agent" — the caller still has to pass the normal gate).
+   */
+  resolveAgentLabel(peerId: string): Promise<string | null>;
+}
+
+/** What the host's native approval prompt needs to render for an agent task. */
+export interface AgentTaskApprovalRequest {
+  taskId: string;
+  skill: string;
+  agentLabel: string;
+  peerId: string;
+}
+
+/**
+ * A1/Slice 2 — per-invocation human approval for agent-initiated tasks (Tier 2
+ * step-up). Injected by the host exactly like {@link RemoteGate}; the desktop
+ * shell renders a native confirmation. An absent gate fails closed: an agent
+ * task that needs approval is denied when no confirmer is wired.
+ */
+export interface TaskApprovalGate {
+  /**
+   * Ask the host for a fresh, explicit native confirmation before dispatching
+   * an agent-initiated task. Resolves `true` = approved. Never throws (a
+   * throwing confirmer is a denial).
+   */
+  approveAgentTask?(request: AgentTaskApprovalRequest): Promise<boolean>;
 }
 
 /**
@@ -68,4 +137,12 @@ export function normalizeRemoteGates(spec: RemoteGateSpec | undefined): RemoteGa
     return [];
   }
   return Array.isArray(spec) ? spec : [spec];
+}
+
+/** The fail-closed agent access level when a policy declares none. */
+export const DEFAULT_AGENT_ACCESS_LEVEL: AgentAccessLevel = "approved";
+
+/** True when `level` names a known {@link AgentAccessLevel}. */
+export function isAgentAccessLevel(value: unknown): value is AgentAccessLevel {
+  return value === "telemetry" || value === "approved" || value === "never";
 }

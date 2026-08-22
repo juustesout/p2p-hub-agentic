@@ -185,6 +185,25 @@ export class IdentityManager {
   }
 
   /**
+   * Remove a derived agent identity (private key, public key and certificate)
+   * from the vault. Returns `false` for an invalid/absent label — never throws
+   * on a missing record. An operator removing an agent identity is how an agent
+   * is decommissioned; the peerId stops resolving as an agent on this host
+   * immediately (the broker's agent gate reads the live registry).
+   */
+  async deleteChildIdentity(label: string): Promise<boolean> {
+    if (!isValidChildLabel(label)) {
+      return false;
+    }
+    const deleted = await Promise.all([
+      this.vault.deleteSecret(childPrivateKeyKey(label)),
+      this.vault.deleteSecret(childPublicKeyKey(label)),
+      this.vault.deleteSecret(childCertificateKey(label)),
+    ]);
+    return deleted.some(Boolean);
+  }
+
+  /**
    * Stateless certificate check: does `cert` prove that `parentPublicKeyHex`
    * (the operator's *public* key) created this child identity? Returns `false`
    * (never throws) for a malformed/tampered cert or a foreign parent key.
