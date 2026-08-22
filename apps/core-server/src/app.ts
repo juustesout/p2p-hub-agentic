@@ -16,6 +16,7 @@ import {
   MAX_PAYLOAD_BYTES,
   ObjectDepthExceededError,
   PayloadTooLargeError,
+  asContactLookup,
   buildWebsiteRequest,
   evaluateSettingsRisk,
   isPlainObject,
@@ -400,16 +401,16 @@ export class CoreServer {
     }
     // Warm the provider's capability cache for every discovered peer. Without
     // this, `listPeers()` returns peers with an empty `skills` set until some
-    // other component happens to run a capability probe, and the shell has no
-    // way to know what a peer offers (e.g. the "View site" entry for
-    // `peersite.fetchAsset`). Probing is cached per peer after the first
-    // successful handshake, so this is cheap once warm.
-    const networkSkills = this.broker
+    // other component happens to run a capability probe. `discover(skill)`
+    // probes every peer regardless of the requested skill, so a single call
+    // with any network-exposed skill name warms the whole cache; probing is
+    // cached per peer after the first successful handshake, so this is cheap
+    // once warm.
+    const probeSkill = this.broker
       .listSkills()
-      .filter((s) => !s.localOnly)
-      .map((s) => s.skill);
-    for (const skill of networkSkills) {
-      this.provider.discover(skill).catch(() => {
+      .find((s) => !s.localOnly)?.skill;
+    if (probeSkill !== undefined) {
+      this.provider.discover(probeSkill).catch(() => {
         // Probe failures are retried internally (PROBE_RETRY_MS); never let a
         // peer that is momentarily unreachable take down the poll loop.
       });
@@ -507,7 +508,7 @@ export class CoreServer {
         return this.sendJson(res, 200, { ok: true, uptime: process.uptime() });
       }
       if (req.method === "GET" && path === "/api/capabilities") {
-        return this.sendJson(res, 200, this.buildCapabilities());
+        return this.sendJson(res, 200, await this.buildCapabilities());
       }
       if (req.method === "POST" && path === "/api/execute") {
         const body = (await readJson(req)) as ExecuteBody;
@@ -1103,7 +1104,7 @@ export class CoreServer {
     return false;
   }
 
-  private buildCapabilities(): unknown {
+  private async buildCapabilities(): Promise<unknown> {
     const plugins = this.host.listPlugins().map((p) => ({
       id: p.id,
       name: p.name ?? p.id,
@@ -1140,16 +1141,31 @@ export class CoreServer {
     events.add("task:completed");
     events.add("vault:updated");
 
+    // Same duck-typed contacts read-seam the host's RemoteGate uses (Fase 2A):
+    // distinguish verified contacts from anonymous/self-signed peers so the
+    // shell can render per-peer trust instead of assuming everyone is equal.
+    const contacts = asContactLookup(this.host.getActivated("contacts"));
     const peers = this.provider
-      ? this.provider.listPeers().map((peer) => ({
-          id: peer.id,
-          peerId: peer.peerId ?? null,
-          name: peer.name ?? peer.id,
-          address: peer.address,
-          skills: peer.skills,
-          transport: this.provider!.id,
-          trust: "self-signed",
-        }))
+      ? await Promise.all(
+          this.provider.listPeers().map(async (peer) => {
+            let trust = "self-signed";
+            if (peer.peerId && contacts) {
+              const info = await contacts.getContact(peer.peerId);
+              if (info?.trustState === "verified") {
+                trust = "verified";
+              }
+            }
+            return {
+              id: peer.id,
+              peerId: peer.peerId ?? null,
+              name: peer.name ?? peer.id,
+              address: peer.address,
+              skills: peer.skills,
+              transport: this.provider!.id,
+              trust,
+            };
+          }),
+        )
       : [];
 
     return {
