@@ -1,0 +1,163 @@
+# Agent Identity & Streaming Guidelines — Implementation Design (A1)
+
+Status: **design; Slice 1 (child-key derivation) implemented**. This document
+turns the three formally-recorded decisions in `plan.md` ("Toekomstige
+Capabilities: Agent Identity & Streaming Guidelines") into concrete
+implementation designs and a slice plan. Treat each slice as its own scoped
+task, same as `docs/peersite-plan.md`.
+
+## Decision 1 — Agent identity: own derived PeerID (child-keypair)
+
+### Goal
+
+An AI agent gets a **derived** identity — a child keypair — never the
+operator's `peerId`. Goals from `plan.md`: auditability / non-repudiation
+(logs distinguish human-from-agent actions), differentiated trust-gates
+(agent-initiated `sendTask` may need a stricter threshold), and no agent bypass
+of the default-deny capability model.
+
+### Why derived, not independently generated
+
+`plan.md` offers "(child-keypair / aparte IdentityManager-instantie)". An
+*independently generated* random keypair is not linkable to its operator
+without a registry. A **deterministically derived** child key is provably
+bound to the operator (the operator can recompute the child from the parent
+seed), and the linkage is additionally **publicly verifiable** via a
+parent-signed certificate — registry-free auditability. Derivation is the
+stronger choice and is what CLAUDE.md's "every future IdentityManager change
+must preserve the ability to derive child keys" anticipates.
+
+### Child-key derivation
+
+- The parent's Ed25519 private key, in JWK form, carries its 32-byte **seed**
+  as `d` (`node:crypto` exports this). The seed never leaves `IdentityManager`.
+- Child seed = `HKDF-SHA256(ikm = parentSeed, salt = empty, info =
+  "p2p-hub:agent-identity:v1:<label>", length = 32)`. Deterministic and
+  domain-separated per label.
+- Child key = the seed wrapped in a **PKCS8 DER** blob
+  (`SEQUENCE { INTEGER 0, SEQUENCE { OID 1.3.101.112 }, OCTET STRING {
+  OCTET STRING { seed } } }`). `node:crypto` computes the public key from the
+  seed internally on import/export — no hand-rolled curve arithmetic.
+  Verified empirically: same seed ⇒ same public key, and the derived `x`
+  matches the JWK `d`-import path.
+- Determinism ⇒ a child identity is **stable across restarts** and across
+  fresh `IdentityManager` instances on the same vault. No separate registry.
+
+### Persistence (vault isolation)
+
+Child keys live under the already core-reserved `identity.` namespace:
+
+- `identity.agent.<label>.privateKey` → PKCS8 PEM
+- `identity.agent.<label>.publicKey` → hex
+- `identity.agent.<label>.certificate` → the parent-signed certificate
+
+The `identity.` prefix is in `DEFAULT_RESERVED_PREFIXES`
+(`core/src/storage/vault-manager.ts`), so no plugin-facing vault surface can
+read or write them — only `IdentityManager` (core) touches them.
+
+### Auditability certificate
+
+A parent-signed certificate binds the child to the operator without exposing
+the derivation secret:
+
+```
+context  = "p2p-hub:agent-identity:cert:v1"
+payload  = { context, parent, child, label, issuedAt }   // canonical, sorted keys
+signature = parent signs canonicalize(payload)  // domain-separated: distinct
+                                                    // from manifest/peersite/knock domains
+```
+
+`IdentityManager.verifyChildCertificate(parentPublicKeyHex, cert)` recomputes
+the canonical payload and verifies with the parent's public key. Any peer with
+the operator's public key can confirm "this agent identity was created by
+operator X" — the auditability claim — while only the operator can produce
+such a certificate.
+
+### API shape (`IdentityManager`)
+
+```ts
+interface ChildIdentity {
+  peerId: string;          // child's hex Ed25519 public key
+  publicKeyHex: string;    // identical to peerId today (kept distinct in type)
+  label: string;           // validated ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$
+  certificate: ChildCertificate;
+}
+
+deriveChildIdentity(label: string): Promise<ChildIdentity>       // derive + persist + sign cert
+getChildIdentity(label: string): Promise<ChildIdentity | null>   // load persisted
+listChildIdentities(): Promise<Array<{ label: string; peerId: string }>>
+static verifyChildCertificate(parentPublicKeyHex: string, cert: unknown): boolean
+```
+
+### Plugin surface (later slice, not Slice 1)
+
+Agents are created by the **shell/operator**, not by plugins, so no new plugin
+capability is added here. A child identity is just another `peerId`: it flows
+through the exact same `verified-contact` / `access-pass` / `any` gates as any
+peer. Differentiated trust (stricter threshold for agent-initiated
+`sendTask`) is a **policy** decision layered on top of the transport-verified
+caller `peerId` (Fase 2A already delivers that to the handler context) — a
+future slice, not part of the key derivation.
+
+## Decision 2 — Media capabilities: Tier-2 native-confirm gate
+
+`plan.md` decision: requesting live camera/microphone access **from a remote
+peer** is a Tier-2 native-confirm action, never a lighter browser
+`getUserMedia` popup.
+
+- The future `p2p-hub:media:v1` capability must not be invocable through any
+  route that skips the shell's native confirm flow. The transport delivers a
+  media *request* (peer, kind: camera/mic, requested stream params); the shell
+  shows the same Tier-2 native prompt as execute-skill / vault-access /
+  `peersite.requestAccess` (`TrustTierGate.confirmPeerAccess` in
+  `apps/core-server/src/app.ts` is the existing integration point to mirror).
+  Only an approved request opens a stream over the P2P transport.
+- The browser's own permission UI stays out of this path entirely.
+- Slice 3 in the plan; no media code exists yet.
+
+## Decision 3 — Real-time traffic vs discrete actions
+
+`plan.md` decision: the capability abstraction gets an explicit **type split**
+between "Discrete Actions" and "Light Telemetry/Streams"; telemetry gets a
+**per-peer frequency cap** (bandwidth/message throttling), not a copy of the
+request/response rate-limiters.
+
+- The capability/skill model gains a discriminator: `type: "action"`
+  (today's behavior) vs `type: "telemetry"`.
+- Telemetry frames flow at the **transport** level (continuous 20 Hz-style
+  updates), so the per-peer frequency cap lives there — a token-bucket or
+  fixed-window message+byte budget **per peer**, with overflow handled by
+  drop/backpressure, never error-spam or connection close.
+- The existing request/response controls stay exactly where they are: broker
+  concurrency cap, peersite knock limits, payload-size guards, per-IP
+  connection limits. No copy-paste of that logic into the streaming path.
+- Slice 4 in the plan; no telemetry code exists yet.
+
+## Slice plan
+
+- **Slice 1 (done):** Decision 1 core — `deriveChildIdentity` / persistence /
+  parent-signed certificate / `verifyChildCertificate` / `listChildIdentities`
+  + tests. This is the part CLAUDE.md's follow-up ("every future
+  IdentityManager change must preserve the ability to derive child keys")
+  protects.
+- **Slice 2:** shell/operator wiring — create an agent identity, hand it to an
+  agent runtime, and a policy hook for stricter thresholds on agent-initiated
+  actions.
+- **Slice 3:** `p2p-hub:media:v1` + Tier-2 native-confirm gate (Decision 2).
+- **Slice 4:** capability type split + per-peer telemetry frequency caps
+  (Decision 3).
+
+## Security invariants (non-negotiable, mirrored from CLAUDE.md)
+
+- The parent seed stays inside `IdentityManager`; child keys live under the
+  reserved `identity.agent.*` vault namespace; the certificate is the only
+  public artifact and exposes no secret.
+- No agent bypass: a child `peerId` is subject to the same default-deny gates
+  as every other peer.
+- Domain separation: the certificate context
+  `p2p-hub:agent-identity:cert:v1` is distinct from
+  `p2p-hub:peersite:auth:v1:`, `p2p-hub:peersite:knock:v1:`, and the manifest
+  signature domain — a certificate signature can never be replayed as another
+  protocol's signature.
+- Reuse the pinned canonical serializer from `manifest-signing`; do not invent
+  a second, divergent canonical form.

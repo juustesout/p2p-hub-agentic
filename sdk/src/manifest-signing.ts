@@ -75,6 +75,16 @@ type VerifyResult =
  * A manifest whose JSON key order differs from the signer's still verifies.
  */
 export function canonicalizeManifest(value: unknown): string {
+  return canonicalizeJson(value);
+}
+
+/**
+ * Generic canonical serializer shared by every signature domain in the repo
+ * (manifest signatures, agent child-identity certificates, anything that signs
+ * a JSON payload). Kept in the SDK so independent implementations interoperate
+ * without sharing TypeScript; never fork this into a second canonical form.
+ */
+export function canonicalizeJson(value: unknown): string {
   return canonicalize(value);
 }
 
