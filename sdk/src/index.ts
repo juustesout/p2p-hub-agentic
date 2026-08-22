@@ -1,4 +1,5 @@
 export * from "./network-provider";
+export * from "./capability";
 export * from "./plugin-manifest";
 export * from "./manifest-signing";
 export * from "./ai-provider";

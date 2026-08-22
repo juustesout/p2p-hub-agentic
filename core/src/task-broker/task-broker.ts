@@ -1,5 +1,7 @@
-import type { TaskRequest, TaskResult } from "@p2p-hub/sdk";
+import type { CapabilityType, TaskRequest, TaskResult } from "@p2p-hub/sdk";
 import {
+  DEFAULT_CAPABILITY_TYPE,
+  isCapabilityType,
   MAX_PAYLOAD_BYTES,
   validateObjectDepth,
   validatePayloadSize,
@@ -16,6 +18,21 @@ import {
   isAgentAccessLevel,
   normalizeRemoteGates,
 } from "./remote-access";
+import type { TelemetryRateLimitConfig } from "./telemetry-rate-limiter";
+import {
+  DEFAULT_TELEMETRY_RATE_LIMIT,
+  TELEMETRY_RATE_LIMIT_ERROR_CODE,
+  TelemetryRateLimitExceededError,
+  TelemetryRateLimiter,
+} from "./telemetry-rate-limiter";
+
+/**
+ * Key used in the telemetry rate limiter for anonymous remote callers (no
+ * transport-verified peerId). The limiter must still bound a flood from a
+ * public `any`-gated telemetry skill, so anonymous callers share one budget
+ * instead of each forging a unique key.
+ */
+const ANONYMOUS_PEER_KEY = "<anonymous>";
 
 /**
  * Second argument handed to a skill handler alongside the payload. Carries
@@ -75,6 +92,15 @@ export interface SkillRegistrationOptions {
    * `network:skill:*` manifest permission. The policy only authorizes callers.
    */
   remote?: RemoteAccessPolicy;
+  /**
+   * A1/Slice 4: what kind of work this capability does. `"action"` (the
+   * default, and the fail-closed choice) is a discrete, possibly side-effect-
+   * ful operation. `"telemetry"` declares a read-only, side-effect-free
+   * capability that the broker rate-limits per remote peer (sliding window)
+   * before dispatch. Telemetry must be declared explicitly — an undeclared or
+   * invalid value is treated as `"action"`, never widened.
+   */
+  capabilityType?: CapabilityType;
 }
 
 interface SkillRecord {
@@ -82,6 +108,7 @@ interface SkillRecord {
   localOnly: boolean;
   httpExposed: boolean;
   remote: RemoteAccessPolicy | undefined;
+  capabilityType: CapabilityType;
 }
 
 export interface TaskBrokerOptions {
@@ -110,6 +137,13 @@ export interface TaskBrokerOptions {
    * denied (fail-closed).
    */
   taskApprovalGate?: TaskApprovalGate;
+  /**
+   * A1/Slice 4: per-peer sliding-window cap for `"telemetry"` capabilities.
+   * Defaults to {@link DEFAULT_TELEMETRY_RATE_LIMIT} — telemetry is always
+   * rate-limited, even when no config is supplied (fail-closed: a missing
+   * config is never "unlimited").
+   */
+  telemetryRateLimit?: TelemetryRateLimitConfig;
 }
 
 const DEFAULT_MAX_CONCURRENT_TASKS = 100;
@@ -130,6 +164,7 @@ export class TaskBroker {
   private readonly remoteGate: RemoteGate | undefined;
   private readonly agentGate: AgentGate | undefined;
   private readonly taskApprovalGate: TaskApprovalGate | undefined;
+  private readonly telemetryRateLimiter: TelemetryRateLimiter;
   private activeTasks = 0;
 
   constructor(options: TaskBrokerOptions = {}) {
@@ -138,6 +173,9 @@ export class TaskBroker {
     this.remoteGate = options.remoteGate;
     this.agentGate = options.agentGate;
     this.taskApprovalGate = options.taskApprovalGate;
+    this.telemetryRateLimiter = new TelemetryRateLimiter(
+      options.telemetryRateLimit ?? DEFAULT_TELEMETRY_RATE_LIMIT,
+    );
   }
 
   registerSkill(
@@ -151,6 +189,11 @@ export class TaskBroker {
       localOnly: options.localOnly ?? true,
       httpExposed: options.httpExposed ?? false,
       remote: options.remote,
+      // Fail-closed: only an explicit `"telemetry"` opts a capability into
+      // rate limiting; anything missing or unknown is an action.
+      capabilityType: isCapabilityType(options.capabilityType)
+        ? options.capabilityType
+        : DEFAULT_CAPABILITY_TYPE,
     });
   }
 
@@ -162,17 +205,19 @@ export class TaskBroker {
     return this.skills.has(skill);
   }
 
-  /** List every registered skill with its local-only, HTTP-exposure and Fase 2A remote policy. */
+  /** List every registered skill with its local-only, HTTP-exposure, Fase 2A remote policy and A1/Slice 4 capability type. */
   listSkills(): Array<{
     skill: string;
     localOnly: boolean;
     httpExposed: boolean;
     remote?: RemoteAccessPolicy;
+    capabilityType: CapabilityType;
   }> {
     return [...this.skills.entries()].map(([skill, record]) => ({
       skill,
       localOnly: record.localOnly,
       httpExposed: record.httpExposed,
+      capabilityType: record.capabilityType,
       ...(record.remote ? { remote: record.remote } : {}),
     }));
   }
@@ -242,16 +287,34 @@ export class TaskBroker {
       }
     }
     if (gate === "network") {
-      // Fase 2A + A1/Slice 2: the network gate (and the agent escalation
-      // matrix) is evaluated here, before dispatch. A skill without an explicit
-      // remote policy is denied — `localOnly: false` alone authorizes nothing.
-      const allowed = await this.evaluateRemotePolicy(
-        record,
-        task.id,
-        task.skill,
-        callerPeerId,
-        agentLabel,
-      );
+      // Fase 2A + A1/Slice 2 + A1/Slice 4: the network gate (and the agent
+      // escalation matrix, and the telemetry frequency cap) is evaluated here,
+      // before dispatch. A skill without an explicit remote policy is denied —
+      // `localOnly: false` alone authorizes nothing.
+      let allowed: boolean;
+      try {
+        allowed = await this.evaluateRemotePolicy(
+          record,
+          task.id,
+          task.skill,
+          callerPeerId,
+          agentLabel,
+        );
+      } catch (err) {
+        // A1/Slice 4: a peer over its telemetry budget fails with a typed,
+        // distinguishable error — never a generic denial and never dispatch.
+        if (err instanceof TelemetryRateLimitExceededError) {
+          return {
+            taskId: task.id,
+            status: "error",
+            code: TELEMETRY_RATE_LIMIT_ERROR_CODE,
+            error: err.message,
+          };
+        }
+        // evaluateRemotePolicy is not supposed to throw otherwise; treat an
+        // unexpected throw as a denial rather than crashing the broker.
+        allowed = false;
+      }
       if (!allowed) {
         return {
           taskId: task.id,
@@ -302,9 +365,12 @@ export class TaskBroker {
   /**
    * Evaluate a skill's Fase 2A `remote` policy for a network caller, applying
    * the A1/Slice 2 agent escalation matrix for declared agent callers. Never
-   * throws (a broken gate denies rather than errors out). `any` is the only
-   * gate with no proof requirement; every other gate fails closed on an
-   * anonymous caller, a missing gate, or a peer the gate does not approve.
+   * throws for a policy/gate failure (a broken gate denies rather than errors
+   * out) — the one deliberate exception is {@link TelemetryRateLimitExceededError},
+   * thrown when a `"telemetry"` capability exceeds its per-peer frequency cap
+   * (A1/Slice 4). `any` is the only gate with no proof requirement; every
+   * other gate fails closed on an anonymous caller, a missing gate, or a peer
+   * the gate does not approve.
    *
    * For agent callers (`agentLabel` resolved) the matrix from plan.md applies:
    * - `any` never authorizes an agent — the public path is structurally
@@ -313,6 +379,10 @@ export class TaskBroker {
    *   decides: `"telemetry"` allows without approval (Tier 1),
    *   `"approved"` (default) requires a per-invocation native approval
    *   (Tier 2, fail-closed without a confirmer), `"never"` refuses (Tier 3).
+   *
+   * The telemetry frequency cap is applied last — after the gate and agent
+   * matrix authorize the call — so denied callers are never counted against a
+   * peer's budget, and a rate-limited call is never dispatched.
    */
   private async evaluateRemotePolicy(
     record: SkillRecord,
@@ -334,14 +404,46 @@ export class TaskBroker {
       return false;
     }
     if (agentLabel === undefined) {
-      return true;
+      return this.enforceTelemetryRateLimit(record, skill, callerPeerId);
     }
     const level = policy.agent?.level ?? DEFAULT_AGENT_ACCESS_LEVEL;
     if (level === "never") {
       return false;
     }
     if (level === "approved") {
-      return this.approveAgentTask(callerPeerId as string, agentLabel, taskId, skill);
+      const approved = await this.approveAgentTask(
+        callerPeerId as string,
+        agentLabel,
+        taskId,
+        skill,
+      );
+      if (!approved) {
+        return false;
+      }
+    }
+    return this.enforceTelemetryRateLimit(record, skill, callerPeerId);
+  }
+
+  /**
+   * A1/Slice 4: apply the per-peer sliding-window frequency cap for a
+   * `"telemetry"` capability. Non-telemetry capabilities pass through
+   * untouched. On overflow the caller is refused with a typed
+   * {@link TelemetryRateLimitExceededError} — dispatch never happens.
+   * Anonymous remote callers share one budget so a public `any`-gated
+   * telemetry skill cannot be flooded from unique anonymous connections.
+   */
+  private enforceTelemetryRateLimit(
+    record: SkillRecord,
+    skill: string,
+    callerPeerId: string | undefined,
+  ): boolean {
+    if (record.capabilityType !== "telemetry") {
+      return true;
+    }
+    const peerKey =
+      callerPeerId && callerPeerId.length > 0 ? callerPeerId : ANONYMOUS_PEER_KEY;
+    if (!this.telemetryRateLimiter.allow(peerKey, skill)) {
+      throw new TelemetryRateLimitExceededError(peerKey, skill);
     }
     return true;
   }

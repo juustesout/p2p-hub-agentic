@@ -408,13 +408,15 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
     },
     // Local-only, but reachable over the authenticated HTTP bridge so the
     // desktop shell can configure the site without any network exposure.
-    { localOnly: true, httpExposed: true },
+    { localOnly: true, httpExposed: true, capabilityType: "action" },
   );
 
   ctx.skills.register(
     "status",
     async () => status(),
-    { localOnly: false, remote: { gate: "any" } },
+    // A read-only, side-effect-free public probe: a telemetry capability. The
+    // broker rate-limits it per peer so a LAN peer cannot flood this endpoint.
+    { localOnly: false, remote: { gate: "any" }, capabilityType: "telemetry" },
   );
 
   ctx.skills.register(
@@ -449,6 +451,7 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
     {
       localOnly: false,
       remote: { gate: ["verified-contact", "access-pass"], scope: SITE_READ_SCOPE },
+      capabilityType: "action",
     },
   );
 
@@ -467,13 +470,13 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
       );
       return { signature: signature.toString("hex") };
     },
-    { localOnly: false, remote: { gate: "any" } },
+    { localOnly: false, remote: { gate: "any" }, capabilityType: "action" },
   );
 
   ctx.skills.register(
     "requestAccess",
     async (payload) => requestAccess(payload as RequestAccessInput),
-    { localOnly: false, remote: { gate: "any" } },
+    { localOnly: false, remote: { gate: "any" }, capabilityType: "action" },
   );
 
   ctx.skills.register(
@@ -486,7 +489,7 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
       await setAcceptIncomingRequests(enabled);
       return { enabled };
     },
-    { localOnly: true, httpExposed: true },
+    { localOnly: true, httpExposed: true, capabilityType: "action" },
   );
 
   return {

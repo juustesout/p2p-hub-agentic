@@ -166,7 +166,21 @@ request/response rate-limiters.
 - The existing request/response controls stay exactly where they are: broker
   concurrency cap, peersite knock limits, payload-size guards, per-IP
   connection limits. No copy-paste of that logic into the streaming path.
-- Slice 4 in the plan; no telemetry code exists yet.
+- **Built (A1 Slice 4):** the request/response instantiation of this decision.
+  `CapabilityType = "action" | "telemetry"` (`sdk/src/capability.ts`,
+  fail-closed default `"action"`), declared on `SkillRegistrationOptions
+  .capabilityType`. The `TaskBroker` enforces a per-peer, per-skill
+  sliding-window frequency cap (`TelemetryRateLimiter`,
+  `core/src/task-broker/telemetry-rate-limiter.ts`) for `"telemetry"`
+  capabilities, applied inside `evaluateRemotePolicy` as the final step after
+  the gate and agent matrix — a rate-limited call is never dispatched and a
+  gate-denied caller never consumes a peer's budget. Overflow fails with a
+  typed `TelemetryRateLimitExceededError` / `code: "telemetry-rate-limit"` on
+  the `TaskResult`, distinct from a gate denial. Anonymous remote callers share
+  one budget so a public `any`-gated telemetry skill cannot be flooded. The
+  *transport-level* frequency cap for continuous streaming frames (20 Hz-style)
+  is still a later slice — the broker limiter covers Tier-1 telemetry calls
+  today.
 
 ## Slice plan
 
@@ -189,8 +203,15 @@ request/response rate-limiters.
   `core.media.request` skill (fail-closed parse, transport-verified peerId
   required, every grant gated through `confirmMediaRequest`, `verified-contact`
   remote policy, no HTTP exposure, per-peer cooldown). See Decision 2 above.
-- **Slice 4:** capability type split + per-peer telemetry frequency caps
-  (Decision 3).
+- **Slice 4 (done):** capability type split + per-peer telemetry frequency caps
+  (Decision 3). `sdk/src/capability.ts` (`CapabilityType`, fail-closed default
+  `"action"`), `SkillRegistrationOptions.capabilityType`, the in-broker
+  `TelemetryRateLimiter` (sliding window per transport-verified peerId × skill,
+  bounded memory), the `TelemetryRateLimitExceededError` /
+  `telemetry-rate-limit` result code, `listSkills()`/`/api/capabilities`
+  exposure, and explicit labeling of the built-in capabilities
+  (`core.echo`/`core.ai.generateText`/`core.media.request`/peersite ⇒ action,
+  `peersite.status` ⇒ telemetry).
 
 ## Security invariants (non-negotiable, mirrored from CLAUDE.md)
 

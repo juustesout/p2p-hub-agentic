@@ -643,3 +643,163 @@ test("A1: a throwing AgentGate reads as 'not an agent' (base gate still applies)
   assert.equal(operator.status, "ok");
   assert.equal(stranger.status, "error");
 });
+
+// ---------------------------------------------------------------------------
+// A1/Slice 4 — capability type split + per-peer telemetry frequency caps
+// ---------------------------------------------------------------------------
+
+const TELEMETRY_CONFIG = { windowMs: 1000, maxCalls: 2 };
+
+test("A1/Slice 4: a telemetry capability is rate-limited per peer with a typed error", async () => {
+  const broker = new TaskBroker({ telemetryRateLimit: TELEMETRY_CONFIG });
+  broker.registerSkill("telemetry.status", async () => ({ ok: true }), {
+    localOnly: false,
+    remote: { gate: "any" },
+    capabilityType: "telemetry",
+  });
+
+  const first = await broker.handleRemote(task({ skill: "telemetry.status", peerId: ALICE }));
+  const second = await broker.handleRemote(task({ skill: "telemetry.status", peerId: ALICE }));
+  const third = await broker.handleRemote(task({ skill: "telemetry.status", peerId: ALICE }));
+
+  assert.equal(first.status, "ok");
+  assert.equal(second.status, "ok");
+  assert.equal(third.status, "error");
+  assert.equal(third.code, "telemetry-rate-limit");
+  assert.match(third.error ?? "", /telemetry rate limit exceeded/);
+});
+
+test("A1/Slice 4: telemetry budgets are independent per peer", async () => {
+  const broker = new TaskBroker({ telemetryRateLimit: TELEMETRY_CONFIG });
+  broker.registerSkill("telemetry.status", async () => ({ ok: true }), {
+    localOnly: false,
+    remote: { gate: "any" },
+    capabilityType: "telemetry",
+  });
+
+  await broker.handleRemote(task({ skill: "telemetry.status", peerId: ALICE }));
+  await broker.handleRemote(task({ skill: "telemetry.status", peerId: ALICE }));
+  const aliceBlocked = await broker.handleRemote(
+    task({ skill: "telemetry.status", peerId: ALICE }),
+  );
+  const bobFirst = await broker.handleRemote(task({ skill: "telemetry.status", peerId: BOB }));
+
+  assert.equal(aliceBlocked.status, "error");
+  assert.equal(aliceBlocked.code, "telemetry-rate-limit");
+  assert.equal(bobFirst.status, "ok");
+});
+
+test("A1/Slice 4: an action capability is never rate-limited", async () => {
+  const broker = new TaskBroker({ telemetryRateLimit: { windowMs: 1000, maxCalls: 1 } });
+  broker.registerSkill("action.write", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+    capabilityType: "action",
+  });
+
+  for (let i = 0; i < 10; i++) {
+    const result = await broker.handleRemote(task({ skill: "action.write", peerId: ALICE }));
+    assert.equal(result.status, "ok");
+  }
+});
+
+test("A1/Slice 4: an undeclared capability type defaults to action (fail-closed, not rate-limited)", async () => {
+  const broker = new TaskBroker({ telemetryRateLimit: { windowMs: 1000, maxCalls: 1 } });
+  broker.registerSkill("sloppy.noType", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  for (let i = 0; i < 5; i++) {
+    const result = await broker.handleRemote(task({ skill: "sloppy.noType", peerId: ALICE }));
+    assert.equal(result.status, "ok");
+  }
+});
+
+test("A1/Slice 4: an invalid capabilityType value is treated as action (fail-closed)", async () => {
+  const broker = new TaskBroker({ telemetryRateLimit: { windowMs: 1000, maxCalls: 1 } });
+  broker.registerSkill("sloppy.wrongType", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+    capabilityType: "stream" as "telemetry",
+  });
+
+  for (let i = 0; i < 5; i++) {
+    const result = await broker.handleRemote(task({ skill: "sloppy.wrongType", peerId: ALICE }));
+    assert.equal(result.status, "ok");
+  }
+});
+
+test("A1/Slice 4: a denied telemetry caller never consumes the peer's budget", async () => {
+  const broker = new TaskBroker({
+    telemetryRateLimit: { windowMs: 1000, maxCalls: 1 },
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === ALICE }),
+  });
+  broker.registerSkill("telemetry.vitals", async () => "vitals", {
+    localOnly: false,
+    remote: { gate: "verified-contact" },
+    capabilityType: "telemetry",
+  });
+
+  // BOB is denied by the gate — this must NOT consume ALICE's budget.
+  const denied = await broker.handleRemote(task({ skill: "telemetry.vitals", peerId: BOB }));
+  assert.equal(denied.status, "error");
+  assert.equal(denied.code, undefined);
+  assert.match(denied.error ?? "", /not authorized/);
+
+  const allowed = await broker.handleRemote(task({ skill: "telemetry.vitals", peerId: ALICE }));
+  const blocked = await broker.handleRemote(task({ skill: "telemetry.vitals", peerId: ALICE }));
+
+  assert.equal(allowed.status, "ok");
+  assert.equal(blocked.status, "error");
+  assert.equal(blocked.code, "telemetry-rate-limit");
+});
+
+test("A1/Slice 4: telemetry without a remote policy is still denied (gate beats rate limit)", async () => {
+  const broker = new TaskBroker({ telemetryRateLimit: TELEMETRY_CONFIG });
+  broker.registerSkill("telemetry.noPolicy", async () => "data", {
+    localOnly: false,
+    capabilityType: "telemetry",
+  });
+
+  const result = await broker.handleRemote(task({ skill: "telemetry.noPolicy", peerId: ALICE }));
+
+  assert.equal(result.status, "error");
+  assert.equal(result.code, undefined);
+  assert.match(result.error ?? "", /not authorized/);
+});
+
+test("A1/Slice 4: anonymous remote callers share one telemetry budget", async () => {
+  const broker = new TaskBroker({ telemetryRateLimit: { windowMs: 1000, maxCalls: 1 } });
+  broker.registerSkill("telemetry.ping", async () => "pong", {
+    localOnly: false,
+    remote: { gate: "any" },
+    capabilityType: "telemetry",
+  });
+
+  const first = await broker.handleRemote(task({ skill: "telemetry.ping" }));
+  const second = await broker.handleRemote(task({ skill: "telemetry.ping" }));
+
+  assert.equal(first.status, "ok");
+  assert.equal(second.status, "error");
+  assert.equal(second.code, "telemetry-rate-limit");
+});
+
+test("A1/Slice 4: listSkills exposes the capability type", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("telemetry.status", async () => ({}), {
+    localOnly: false,
+    remote: { gate: "any" },
+    capabilityType: "telemetry",
+  });
+  broker.registerSkill("action.write", async () => ({}));
+
+  const listed = broker.listSkills().sort((a, b) => a.skill.localeCompare(b.skill));
+  assert.deepEqual(
+    listed.map((s) => ({ skill: s.skill, capabilityType: s.capabilityType })),
+    [
+      { skill: "action.write", capabilityType: "action" },
+      { skill: "telemetry.status", capabilityType: "telemetry" },
+    ],
+  );
+});

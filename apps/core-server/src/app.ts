@@ -324,7 +324,12 @@ export class CoreServer {
     this.broker.registerSkill(
       "core.echo",
       async (payload) => payload,
-      { localOnly: false, httpExposed: true, remote: { gate: "any" } },
+      {
+        localOnly: false,
+        httpExposed: true,
+        remote: { gate: "any" },
+        capabilityType: "action",
+      },
     );
 
     const aiProvider = new CoreAIProvider({ vault: this.host.vaultManager() });
@@ -345,7 +350,11 @@ export class CoreServer {
           model: typeof model === "string" ? model : undefined,
         });
       },
-      { localOnly: true, httpExposed: true },
+      {
+        localOnly: true,
+        httpExposed: true,
+        capabilityType: "action",
+      },
     );
   }
 
@@ -369,7 +378,12 @@ export class CoreServer {
     this.broker.registerSkill(
       "core.media.request",
       createMediaSkillHandler({ trustGate: this.trustGate }),
-      { localOnly: false, httpExposed: false, remote: { gate: "verified-contact" } },
+      {
+        localOnly: false,
+        httpExposed: false,
+        remote: { gate: "verified-contact" },
+        capabilityType: "action",
+      },
     );
   }
 
@@ -1201,6 +1215,7 @@ export class CoreServer {
       skill: s.skill,
       localOnly: s.localOnly,
       httpExposed: s.httpExposed,
+      capabilityType: s.capabilityType,
       pluginId: s.skill.split(".")[0] ?? "",
     }));
 

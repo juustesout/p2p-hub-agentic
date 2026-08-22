@@ -175,7 +175,14 @@ test("core.media.request is registered network-exposed but not HTTP-exposed", as
     });
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
-      local: { skills: Array<{ skill: string; localOnly: boolean; httpExposed: boolean }> };
+      local: {
+        skills: Array<{
+          skill: string;
+          localOnly: boolean;
+          httpExposed: boolean;
+          capabilityType?: string;
+        }>;
+      };
     };
     const media = body.local.skills.find((s) => s.skill === "core.media.request");
     assert.ok(media, "core.media.request should be registered");
@@ -185,6 +192,7 @@ test("core.media.request is registered network-exposed but not HTTP-exposed", as
       false,
       "media must not be reachable over the local HTTP bridge",
     );
+    assert.equal(media.capabilityType, "action", "media is a discrete action capability");
   } finally {
     await server.stop();
   }

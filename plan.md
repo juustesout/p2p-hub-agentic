@@ -162,7 +162,7 @@ publieke webserver hoef te draaien."
 ## Toekomstige Capabilities: Agent Identity & Streaming Guidelines
 
 Formeel vastgelegde architectuurbesluiten. **Status: besluit 1 gebouwd (A1 Slice 1 + 2,
-`ed26400` + volgend), besluit 2 gebouwd (A1 Slice 3), besluit 3 nog niet gebouwd.** Details en slice-plan:
+`ed26400` + volgend), besluit 2 gebouwd (A1 Slice 3), besluit 3 gebouwd (A1 Slice 4).** Details en slice-plan:
 `docs/agent-identity-streaming-design.md`.
 
 ### 1. Agent-identiteit: eigen, afgeleide PeerID (child-keypair)
@@ -256,3 +256,29 @@ Formeel vastgelegde architectuurbesluiten. **Status: besluit 1 gebouwd (A1 Slice
   bestaande rate-limit-logica niet naar streaming-capabilities. Voor telemetrie geldt
   een **frequency-cap per peer** (bandwidth/message throttling) in plaats van een
   payload-size- of knock-limit-check.
+
+#### Implementatiestatus (A1, Slice 4)
+
+- **Gebouwd — capability type-split:** `CapabilityType = "action" | "telemetry"`
+  (`sdk/src/capability.ts`). Registratie-expliciet op `SkillRegistrationOptions
+  .capabilityType`; ontbrekend of ongeldig ⇒ fail-closed `"action"` (nooit
+  verwijding). `TaskBroker.listSkills()` en de HTTP-bridge
+  (`/api/capabilities`) exponeren het type.
+- **Gebouwd — per-peer telemetry frequency-cap:** `TelemetryRateLimiter`
+  (`core/src/task-broker/telemetry-rate-limiter.ts`): in-memory sliding window
+  per transport-verified `peerId` × skill (anonieme remote callers delen één
+  budget, zodat een public `any`-gated telemetry-skill niet te floden is);
+  buckets worden gesweept per window (geheugengebonden). De limiter draait in
+  `TaskBroker.evaluateRemotePolicy` als **laatste stap na de gate + agent-matrix**:
+  geweigerde callers verbruiken geen budget, en een rate-limited call bereikt de
+  handler nooit. Overflow ⇒ getypeerde `TelemetryRateLimitExceededError` /
+  `code: "telemetry-rate-limit"` op de `TaskResult` (te onderscheiden van een
+  gate-denial). Fail-closed: telemetrie is ook zonder expliciete config
+  rate-limited (`DEFAULT_TELEMETRY_RATE_LIMIT`).
+- **Bestaande capabilities gelabeld:** `core.echo`, `core.ai.generateText`,
+  `core.media.request`, alle peersite-skills ⇒ `action`; `peersite.status` ⇒
+  `telemetry` (public read-only probe, nu per-peer capped).
+- **Scope-notitie:** dit is de request/response-instantie van Besluit 3. De
+  transport-level frequency-cap voor continu stromende frames (bv. 20 Hz
+  positie-updates) is een latere uitbreiding; de broker-limiter dekt vandaag de
+  Tier-1 telemetry-calls.

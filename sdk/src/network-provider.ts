@@ -48,6 +48,13 @@ export interface TaskResult {
   status: TaskStatus;
   result?: unknown;
   error?: string;
+  /**
+   * Optional machine-readable error code for typed failure results (e.g.
+   * `"telemetry-rate-limit"`). Absent for `status: "ok"`. This is additive —
+   * the P2P wire contract (`network-light`'s `encodeResult`) reconstructs only
+   * its own known fields, so a `code` never leaks onto the wire.
+   */
+  code?: string;
 }
 
 /**
