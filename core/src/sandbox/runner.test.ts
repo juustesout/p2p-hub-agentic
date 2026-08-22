@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import path from "node:path";
 import { IPCErrorCodes } from "@p2p-hub/sdk";
 import type { IPCMessageEnvelope } from "@p2p-hub/sdk";
@@ -8,6 +10,28 @@ import { IPCSocketTransport } from "./ipc-transport";
 import { filteredEnv } from "./runner";
 
 const REQUEST_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+const PLUGIN_ID = "peersite";
+
+async function makePluginFixture(entrySource: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sandbox-runner-"));
+  await fs.writeFile(
+    path.join(dir, "manifest.json"),
+    JSON.stringify({
+      id: PLUGIN_ID,
+      version: "0.0.1",
+      kind: "generic",
+      entry: "index.js",
+      permissions: [],
+    }),
+  );
+  await fs.writeFile(path.join(dir, "index.js"), entrySource);
+  return dir;
+}
+
+const TRIVIAL_ENTRY = `
+exports.default = async function activate() {};
+`;
 
 async function waitFor(
   predicate: () => boolean,
@@ -79,28 +103,42 @@ test("filteredEnv honors a custom secretKeyRe override", () => {
 
 async function spawnRunner(
   childEnv: Record<string, string>,
+  entrySource: string = TRIVIAL_ENTRY,
 ): Promise<{
   child: ReturnType<typeof spawn>;
   host: IPCSocketTransport;
   received: IPCMessageEnvelope[];
   errors: Error[];
+  cleanup: () => Promise<void>;
 }> {
+  const pluginRoot = await makePluginFixture(entrySource);
   const runnerPath = path.join(__dirname, "runner.js");
-  const child = spawn(process.execPath, [runnerPath], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: childEnv,
-  });
+  const child = spawn(
+    process.execPath,
+    [runnerPath, "--plugin-root", pluginRoot],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: childEnv,
+    },
+  );
   const received: IPCMessageEnvelope[] = [];
   const errors: Error[] = [];
   const host = new IPCSocketTransport(child.stdout, child.stdin);
   host.onMessage((m) => received.push(m));
   host.onError((err) => errors.push(err));
   await waitFor(() => child.pid !== undefined);
-  return { child, host, received, errors };
+  const cleanup = async (): Promise<void> => {
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+    }
+    host.close();
+    await fs.rm(pluginRoot, { recursive: true, force: true });
+  };
+  return { child, host, received, errors, cleanup };
 }
 
 test("runner: initialize returns a filtered env and rejects secret keys", async () => {
-  const { child, host, received, errors } = await spawnRunner({
+  const { host, received, errors, cleanup } = await spawnRunner({
     PATH: "/usr/bin",
     HOME: "/home/x",
     FOO: "bar",
@@ -114,7 +152,7 @@ test("runner: initialize returns a filtered env and rejects secret keys", async 
     id: REQUEST_ID,
     method: "initialize",
     params: {
-      pluginId: "peersite",
+      pluginId: PLUGIN_ID,
       envAllowlist: ["PATH", "HOME", "FOO", "MY_SECRET", "API_KEY"],
     },
   });
@@ -130,13 +168,13 @@ test("runner: initialize returns a filtered env and rejects secret keys", async 
   assert.equal(typeof result.arch, "string");
   assert.equal(typeof result.nodeVersion, "string");
   assert.deepEqual(result.env, { PATH: "/usr/bin", HOME: "/home/x", FOO: "bar" });
+  assert.deepEqual(result.plugin, { id: PLUGIN_ID, entry: "index.js" });
 
-  child.kill("SIGKILL");
-  host.close();
+  await cleanup();
 });
 
 test("runner: initialize rejects an invalid pluginId and malformed envAllowlist", async () => {
-  const { child, host, received } = await spawnRunner({ PATH: "/usr/bin" });
+  const { host, received, cleanup } = await spawnRunner({ PATH: "/usr/bin" });
 
   host.send({
     type: "request",
@@ -160,12 +198,61 @@ test("runner: initialize rejects an invalid pluginId and malformed envAllowlist"
   const badAllow = received[1] as { error?: { code: number; message: string } };
   assert.equal(badAllow.error?.code, IPCErrorCodes.INVALID_PARAMS);
 
-  child.kill("SIGKILL");
-  host.close();
+  await cleanup();
+});
+
+test("runner: initialize rejects a pluginId that does not match the manifest", async () => {
+  const { host, received, cleanup } = await spawnRunner({ PATH: "/usr/bin" });
+
+  host.send({
+    type: "request",
+    jsonrpc: "2.0",
+    id: REQUEST_ID,
+    method: "initialize",
+    params: { pluginId: "notpeersite" },
+  });
+  await waitFor(() => received.length === 1);
+  const response = received[0] as { error?: { code: number; message: string } };
+  assert.equal(response.error?.code, IPCErrorCodes.INVALID_PARAMS);
+  assert.match(response.error?.message ?? "", /does not match initialized pluginId/);
+
+  await cleanup();
+});
+
+test("runner: a plugin whose activate throws fails initialize and exits nonzero", async () => {
+  const { child, host, received, cleanup } = await spawnRunner(
+    { PATH: "/usr/bin" },
+    `exports.default = async function activate() { throw new Error("evil activate"); };`,
+  );
+
+  host.send({
+    type: "request",
+    jsonrpc: "2.0",
+    id: REQUEST_ID,
+    method: "initialize",
+    params: { pluginId: PLUGIN_ID },
+  });
+  await waitFor(() => received.length === 1);
+  const response = received[0] as { error?: { code: number; message: string } };
+  assert.equal(response.error?.code, IPCErrorCodes.INTERNAL_ERROR);
+  assert.match(response.error?.message ?? "", /plugin activation failed: evil activate/);
+
+  const exit = new Promise<number | null>((resolve) => {
+    child.on("exit", (code) => resolve(code));
+  });
+  const code = await Promise.race([
+    exit,
+    new Promise<number | null>((resolve) =>
+      setTimeout(() => resolve(null), 2000),
+    ),
+  ]);
+  assert.equal(code, 1);
+
+  await cleanup();
 });
 
 test("runner: unknown method returns METHOD_NOT_FOUND", async () => {
-  const { child, host, received } = await spawnRunner({ PATH: "/usr/bin" });
+  const { host, received, cleanup } = await spawnRunner({ PATH: "/usr/bin" });
 
   host.send({
     type: "request",
@@ -177,12 +264,11 @@ test("runner: unknown method returns METHOD_NOT_FOUND", async () => {
   const response = received[0] as { error?: { code: number; message: string } };
   assert.equal(response.error?.code, IPCErrorCodes.METHOD_NOT_FOUND);
 
-  child.kill("SIGKILL");
-  host.close();
+  await cleanup();
 });
 
 test("runner: shutdown acknowledges and the process exits 0", async () => {
-  const { child, host, received } = await spawnRunner({ PATH: "/usr/bin" });
+  const { child, host, received, cleanup } = await spawnRunner({ PATH: "/usr/bin" });
 
   host.send({
     type: "request",
@@ -204,11 +290,12 @@ test("runner: shutdown acknowledges and the process exits 0", async () => {
     ),
   ]);
   assert.equal(code, 0);
-  host.close();
+
+  await cleanup();
 });
 
 test("runner: default envAllowlist (no params) still never leaks secrets", async () => {
-  const { child, host, received } = await spawnRunner({
+  const { host, received, cleanup } = await spawnRunner({
     PATH: "/usr/bin",
     MY_SECRET: "shh",
     API_KEY: "k",
@@ -220,7 +307,7 @@ test("runner: default envAllowlist (no params) still never leaks secrets", async
     jsonrpc: "2.0",
     id: REQUEST_ID,
     method: "initialize",
-    params: { pluginId: "peersite" },
+    params: { pluginId: PLUGIN_ID },
   });
   await waitFor(() => received.length === 1);
   const response = received[0] as { result: { env: Record<string, string> } };
@@ -230,6 +317,5 @@ test("runner: default envAllowlist (no params) still never leaks secrets", async
   assert.equal(env.MY_SECRET, undefined);
   assert.equal(env.API_KEY, undefined);
 
-  child.kill("SIGKILL");
-  host.close();
+  await cleanup();
 });

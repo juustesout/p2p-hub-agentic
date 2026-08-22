@@ -325,9 +325,72 @@ engine + wire protocol.
   runner (echte child-process-integratie over stdio: initialize met gefilterde env,
   INVALID_PARAMS/METHOD_NOT_FOUND, shutdown-exit-0) + `filteredEnv`-units.
 
-**Open (Slices 2+):** plugin-activator bootstrap in de sandbox (skill-registratie,
-capability-dispatch over de IPC-bus), host-side `PluginHost`-integratie (spawn + lifecycle),
-privilege-decoupling (de sandbox draait met de laagste privileges die de capability
-behoeft) + permissie-checks verhuizen van "documentatie" naar "structureel onmogelijk
-voor de sandbox". Exakte slice-volgorde en de afweging process-isolatie-optie
-(`fork`/`spawn` + IPC vs. container) liggen bij de start van Slice 2.
+**Slice 2 (gebouwd): sandboxed plugin lifecycle + skill-dispatch (`core/src/sandbox/`)**
+
+Besluit vóór aanvang: **`child_process.spawn()`, géén `fork()`** — fork's verborgen
+`'ipc'`-kanaal omzeilt de length-prefixed framing (onze security-boundary); met plain
+spawn + stdio-pipes is het framed protocol het *enige* kanaal tussen host en sandbox.
+Mechanisme = **Optie 1 (minimaal & fail-closed)**: alleen skill-registratie/-executie
+wordt geproxied; alle andere PluginContext-capabilities (`storage`, `vault`, `ai`,
+`identity`, `hooks`, `network`, `access`, `trust`, `dataDir`, …) zijn in de sandbox
+fail-closed afwezig (luide `SandboxCapabilityUnavailableError`) en worden in latere
+slices per-stuk geproxied. Host-trust-regels: (1) registratieclaims uit het child
+worden nooit vertrouwd — de host valideert tegen het zelf geladen `manifest.json`;
+(2) PID/transport zijn strict aan `pluginId` gebonden (source-pinning), cross-plugin
+spoofing onmogelijk; (3) TaskBroker blijft het enige remote/agent-authorization point
+(evaluatie host-side vóór dispatch, nooit op een caller-supplied veld).
+
+- **`core/src/sandbox/launcher.ts`** — `spawnSandboxProcess({ pluginRoot, envAllowlist?,
+  maxFrameBytes?, heapSizeMb? (default 256), runnerPath?, stderr? })`. Hardening-vlaggen:
+  `--no-addons` (geen native `.node`-escape), `--disallow-code-generation-from-strings`
+  (`eval`/`new Function` ⇒ throw), `--max-old-space-size=<cap>` (heap-cap). `NODE_OPTIONS`
+  wordt *altijd* gestript (geen `--require`/`--import`-preload-erfenis van de host), ook
+  als iemand het allowlist; env = `filteredEnv(envAllowlist)`. stderr-forwarding optioneel.
+- **`core/src/sandbox/runner.ts`** — niet meer alleen schel: laadt nu de plugin zelf.
+  `readSandboxManifest` (id tegen de manifest-id-regel, entry niet-escape uit de dir),
+  entry via `require`, `resolveSandboxActivate` (CJS `{ default }` / dynamic-import-genest),
+  `activate(ctx)`. **Fail-closed `ctx`-shim**: echt = `skills.register/unregister`
+  (child→host request `skill:register` met `{ skill, options }`, wacht op ack),
+  `timers` (setTimeout/setInterval → Disposable), `onDispose`; stubs = `storage`/`hooks`/
+  `ai`/`vault`/`identity`/`access`/`isPathInsideDataDir`/`dataDir` werpen
+  `SandboxCapabilityUnavailableError`; `network`/`trust` = null (zelfde absent-signaal als
+  in-process). **In-flight skill-ops worden vóór het `initialize`-antwoord afgewacht**
+  (echte plugins roepen `ctx.skills.register` fire-and-forget; de sandbox mag pas
+  "geïnitialiseerd" melden als de host-goedgekeurde registraties lokaal zichtbaar zijn,
+  anders kan de host naar een nog-niet-geregistreerde skill dispatchen). Requests:
+  `initialize` (manifest-id-mismatch-check, entry-containment), `invokeSkill`
+  (depth-revalidatie over de proces-grens, handler-throw ⇒ `{ ok:false, error }` — de
+  sandbox blijft up —, result opnieuw geserialiseerd: non-serializable ⇒
+  `{ ok:false, error }`, sandbox overleeft), `sandbox:heartbeat` ⇒ `{ pong: true }`,
+  `shutdown` ⇒ ack + exit(0); onbekend ⇒ `METHOD_NOT_FOUND`. `console.log/…` ⇒ stderr
+  (stdout blijft pure IPC-pipe). `sendToHost` met UUID-correlatie + host-request-timeout;
+  crash ⇒ `sandbox:crash`-notification + exit(1). Geen auto-respawn.
+- **`core/src/sandbox/sandboxed-plugin-adapter.ts`** — host-side lifecycle:
+  spawn → `initialize` → running → heartbeat → shutdown/kill. `start()` (init-handshake,
+  hartslag-interval), `shutdown(timeoutMs=2000)` (ack + exit-wacht 150ms + SIGKILL-fallback),
+  `kill()`; states `spawning|running|crashed|stopped`. **Skill-proxy**: `registerSkill`
+  met broker-key `${pluginId}.${skill}` (altijd host-side afgeleid), handler ⇒
+  `invokeSkill`-IPC. **Permission-gates (host, tegen manifest)**: `localOnly:false` ⇒
+  `network:skill:<id>.<skill>`, `httpExposed:true` ⇒ `network:http:<id>.<skill>`,
+  remote-gate `"any"` ⇒ `network:public:<id>.<skill>` — afwijking ⇒ registratie geweigerd,
+  activate mislukt, sandbox down. **Timeout/crash**: invoke-timeout ⇒
+  `PluginExecutionTimeoutError` + SIGKILL + crashed; hartslag-timeout ⇒ SIGKILL + crashed;
+  channel-close/error ⇒ crashed (fail-closed). Crash ⇒ skills unregistered + pending
+  gereject met `PluginCrashError` + `onCrashed`-callback; geen auto-respawn. Payload
+  depth/size na child-result opnieuw gevalideerd (`validateObjectDepth`/`validatePayloadSize`).
+- **Tests (16 nieuw in `sandboxed-plugin.test.ts` + runner-test-updates, alle suites groen):**
+  lifecycle + skill-registratie via activate → broker `handle`/`handleRemote`; result- en
+  error-afhandeling (`{ok:false}` ⇒ broker-error, sandbox blijft up); permission-gates
+  (claim zonder manifest-perm ⇒ activate faalt, crashed); fail-closed capability-stubs;
+  hardening-vlaggen in `process.execArgv` + `NODE_OPTIONS`-strip; code-generation-block
+  bij activate én in handler; infinite-loop ⇒ timeout + SIGKILL + unregistered;
+  hartslag-uitval ⇒ host SIGKILL; externe SIGKILL ⇒ in-flight pending krijgt
+  `PluginCrashError`; non-serializable result ⇒ failed-outcome, kanaal intact;
+  TaskBroker-handleRemote evalueert localOnly vóór de sandbox; launcher-units
+  (spawnargs, stderr-forwarding, `filteredEnv`-secret-drop).
+
+**Open (Slice 3+):** privilege-decoupling (laagste privileges per capability),
+host-side `PluginHost`-integratie (sandboxed lifecycle aan het bestaande boot- en
+deactivate-pad haken), verdere capability-proxy's, en de container-optie als
+enterprise-afweging. De `PluginContext`-capabilities buiten skill-executie blijven
+fail-closed afwezig tot een latere slice ze per-stuk proxied.

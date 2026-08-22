@@ -9,7 +9,9 @@ slice plan. Treat each slice as its own scoped task, same as
 plugin-hosting IPC engine that keeps plugins out of the host process — is a
 separate workstream tracked in `plan.md` under "Fase 3: OS-level
 plugin-sandboxing"; Slice 1 there is the `sdk/src/sandbox` + `core/src/sandbox`
-IPC protocol/transport/runner.)
+IPC protocol/transport/runner, and Slice 2 adds the hardened `spawn` launcher,
+the plugin-activating runner and the host-side `SandboxedPluginAdapter` with
+skill-proxy + manifest permission gates.)
 
 ## Decision 1 — Agent identity: own derived PeerID (child-keypair)
 
