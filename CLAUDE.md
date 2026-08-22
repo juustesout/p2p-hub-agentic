@@ -259,12 +259,32 @@ When asked to review or verify security-relevant work in this repo:
   Since Fase 0D there is also `P2P_HUB_NETWORKING=0` for a fully local-only
   core-server (no P2P transport, no identity created — the vault is never
   touched, so a corrupt vault cannot fail a local-only boot).
-- `network-light` advertises all local skill names via mDNS regardless of
+- ~~`network-light` advertises all local skill names via mDNS regardless of
   `localOnly`/`httpExposed` — rejected correctly at the broker, but still
-  leaks which skills exist to anything listening on the LAN.
-- `birthday-cards` title matching (`/verjaardag|birthday/i`) has no word
+  leaks which skills exist to anything listening on the LAN.~~ — **resolved**:
+  since Fase 0C mDNS is capability-less — the TXT record carries only
+  `{id, version, certFingerprint, peerId?, announceSeq}`, never skill names
+  (`plugins/network-light/src/network-light-provider.ts`). Skills arrive
+  exclusively via the Fase 1A authenticated handshake.
+- ~~`birthday-cards` title matching (`/verjaardag|birthday/i`) has no word
   boundaries — false-positives on titles like "Birthday Films". Non-urgent,
-  noted for whenever that plugin gets revisited.
+  noted for whenever that plugin gets revisited.~~ — **resolved**: the regex
+  now has word boundaries `\b(verjaardag|birthday)\b`
+  (`plugins/birthday-cards/src/index.ts`).
+- **Agent identity & streaming guidelines (formal decision, not built):** see
+  plan.md "Toekomstige Capabilities: Agent Identity & Streaming Guidelines".
+  (1) An agent always gets its *own derived* identity (child-keypair / separate
+  IdentityManager instance), never the operator's peerId — for auditability,
+  differentiated trust-gates (agent-initiated `sendTask`/skill may require a
+  stricter threshold or human approval) and no agent bypass of the default-deny
+  capability model. **Every future IdentityManager change must preserve the
+  ability to derive child keys.** (2) P2P media (camera/mic) requests go through
+  the shell's Tier-2 native-confirm flow like execute-skill/vault/
+  `peersite.requestAccess` — never the lighter browser `getUserMedia` popup.
+  (3) The capability abstraction gets an explicit type split between "Discrete
+  Actions" and "Light Telemetry/Streams"; telemetry gets a per-peer
+  frequency-cap (bandwidth/message throttling), not a copy of the
+  request/response rate-limiters.
 - **Plugin UI residuals (Fase 2B, accepted):** (a) `/ui/*` responses set no
   `frame-ancestors`, so any page can embed a plugin's UI in an iframe — inert
   for an attacker, because the UI is sandboxed, origin-pinned to the core-server
@@ -320,6 +340,27 @@ When asked to review or verify security-relevant work in this repo:
   yet. Don't "fix" the gap with `rejectUnauthorized: false` (CLAUDE.md
   principle #4) — pin the fingerprint via the already-trusted mDNS TXT side
   channel and verify it after `secureConnect`, when that work happens.
+
+## Known blind spots & CI limitations
+
+These are places where CI cannot give a definitive answer, so the gap stays
+visible instead of silently looking green. Do not read any of these as "the
+feature is broken"; they are about *test coverage*, not *behaviour*.
+
+- **mDNS discovery is untested on macOS in CI — but works on real macOS.**
+  mDNS itself functions correctly on real macOS machines; the gap is CI-only.
+  GitHub macOS runners block multicast traffic on the loopback interface
+  (runner network sandboxing), so discovery between two in-process peers is
+  never delivered there. All discovery-dependent tests therefore skip on
+  darwin with the visible reason "real mDNS multicast discovery is not
+  delivered on GitHub macOS runners" (12 in network-light, 4 in core, 3
+  smoke-scenarios in testlab). Consequences: (a) a future change to the mDNS
+  discovery layer can break on production macOS without CI ever catching it;
+  (b) the raw-TLS / handshake / abuse-limit tests in network-light still run
+  on every OS, only discovery is gapped. Before claiming cross-platform mDNS
+  support, run the discovery-dependent suites once on a real macOS machine
+  (or a macOS host with multicast enabled) — do not treat a green GitHub
+  Actions matrix as proof of macOS discovery.
 
 ## Spec-gaps: when an acceptance criterion hides a dependency
 
