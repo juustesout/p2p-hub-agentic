@@ -14,11 +14,11 @@ import {
   encodeHelloAck,
   encodeResult,
   encodeTask,
-  negotiateVersion,
   normalizeFingerprint,
   parseEnvelope,
   parseIdentityBinding,
   randomNonce,
+  supportedVersion,
   verifyIdentityBinding,
 } from "./wire-contract";
 
@@ -27,21 +27,24 @@ import {
 // these tests (and any independent implementation following the spec) must be
 // reviewed. This is the "no shared TS constructor" guarantee — the bytes are
 // the source of truth.
+const nonce = "a".repeat(32);
+const binding = {
+  peerId: "b".repeat(64),
+  certFingerprint: "c".repeat(64),
+  signature: "d".repeat(128),
+};
+
 test("canonical serializations are pinned byte-for-byte", () => {
   assert.equal(
-    encodeHello([1], ["echo"]),
+    encodeHello([1], ["echo"], nonce),
     '{"protocol":"p2p-hub:network","version":1,"type":"hello",' +
-      '"body":{"versions":[1],"capabilities":["echo"]}}',
+      `"body":{"versions":[1],"capabilities":["echo"],"nonce":"${nonce}"}}`,
   );
   assert.equal(
-    encodeHelloAck(1, ["echo"], { maxPayloadBytes: 1000 }),
+    encodeHelloAck(1, ["echo"], { maxPayloadBytes: 1000 }, nonce, binding),
     '{"protocol":"p2p-hub:network","version":1,"type":"hello_ack",' +
-      '"body":{"version":1,"capabilities":["echo"],"limits":{"maxPayloadBytes":1000}}}',
-  );
-  assert.equal(
-    encodeHelloAck(1, ["echo"]),
-    '{"protocol":"p2p-hub:network","version":1,"type":"hello_ack",' +
-      '"body":{"version":1,"capabilities":["echo"]}}',
+      `"body":{"version":1,"capabilities":["echo"],"limits":{"maxPayloadBytes":1000},"nonce":"${nonce}",` +
+      `"identity":{"peerId":"${binding.peerId}","certFingerprint":"${binding.certFingerprint}","signature":"${binding.signature}"}}}`,
   );
   assert.equal(
     encodeTask({ id: "t", skill: "echo", payload: "hi" }),
@@ -67,9 +70,9 @@ test("canonical serializations are pinned byte-for-byte", () => {
 
 test("every encoded message round-trips through parseEnvelope", () => {
   const messages = [
-    encodeHello([1], ["a", "b"]),
-    encodeHelloAck(1, ["a"], { maxPayloadBytes: 1000 }),
-    encodeHelloAck(1, []),
+    encodeHello([1], ["a", "b"], nonce),
+    encodeHelloAck(1, ["a"], { maxPayloadBytes: 1000 }, nonce, binding),
+    encodeHelloAck(1, [], undefined, nonce, binding),
     encodeTask({ id: "t1", skill: "s", payload: { deep: [1, 2, 3] } }),
     encodeResult({ taskId: "t1", status: "ok", result: 42 }),
     encodeResult({ taskId: "t1", status: "error", error: "no" }),
@@ -83,7 +86,8 @@ test("every encoded message round-trips through parseEnvelope", () => {
 });
 
 test("parseEnvelope default-denies unknown protocol, version and shape", () => {
-  const validBody = { versions: [1], capabilities: [] };
+  const validBody = { versions: [1], capabilities: [], nonce };
+  const ackBody = { version: 1, capabilities: [], nonce, identity: binding };
   // Unknown protocol id.
   assert.equal(
     parseEnvelope({ protocol: "p2p-hub:other", version: 1, type: "hello", body: validBody }),
@@ -105,11 +109,11 @@ test("parseEnvelope default-denies unknown protocol, version and shape", () => {
 
   // hello: empty / string versions.
   assert.equal(
-    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello", body: { versions: [], capabilities: [] } }),
+    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello", body: { versions: [], capabilities: [], nonce } }),
     null,
   );
   assert.equal(
-    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello", body: { versions: ["1"], capabilities: [] } }),
+    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello", body: { versions: ["1"], capabilities: [], nonce } }),
     null,
   );
   // hello: too many capabilities.
@@ -118,8 +122,13 @@ test("parseEnvelope default-denies unknown protocol, version and shape", () => {
       protocol: NETWORK_PROTOCOL_ID,
       version: 1,
       type: "hello",
-      body: { versions: [1], capabilities: new Array(257).fill("s") },
+      body: { versions: [1], capabilities: new Array(257).fill("s"), nonce },
     }),
+    null,
+  );
+  // hello: missing nonce (anonymous mode is gone — the nonce is mandatory).
+  assert.equal(
+    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello", body: { versions: [1], capabilities: [] } }),
     null,
   );
 
@@ -145,7 +154,7 @@ test("parseEnvelope default-denies unknown protocol, version and shape", () => {
 
   // hello_ack: non-positive version / invalid limit.
   assert.equal(
-    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello_ack", body: { version: 0, capabilities: [] } }),
+    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello_ack", body: { version: 0, capabilities: [], nonce, identity: binding } }),
     null,
   );
   assert.equal(
@@ -153,20 +162,33 @@ test("parseEnvelope default-denies unknown protocol, version and shape", () => {
       protocol: NETWORK_PROTOCOL_ID,
       version: 1,
       type: "hello_ack",
-      body: { version: 1, capabilities: [], limits: { maxPayloadBytes: 0 } },
+      body: { version: 1, capabilities: [], limits: { maxPayloadBytes: 0 }, nonce, identity: binding },
     }),
+    null,
+  );
+  // hello_ack: missing nonce or missing identity is denied (no anonymous mode).
+  assert.equal(
+    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello_ack", body: { version: 1, capabilities: [], identity: binding } }),
+    null,
+  );
+  assert.equal(
+    parseEnvelope({ protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello_ack", body: { version: 1, capabilities: [], nonce } }),
     null,
   );
 });
 
-test("negotiateVersion picks our version or denies", () => {
-  assert.equal(negotiateVersion([1]), NETWORK_PROTOCOL_VERSION);
-  assert.equal(negotiateVersion([2, 1]), NETWORK_PROTOCOL_VERSION);
-  assert.equal(negotiateVersion([2]), null);
-  assert.equal(negotiateVersion([]), null);
-  assert.equal(negotiateVersion(undefined), null);
-  assert.equal(negotiateVersion("1"), null);
-  assert.equal(negotiateVersion([1, "1"]), NETWORK_PROTOCOL_VERSION);
+test("supportedVersion requires exact supported membership — no negotiation, no downgrade", () => {
+  assert.equal(supportedVersion([1]), NETWORK_PROTOCOL_VERSION);
+  assert.equal(supportedVersion([2, 1]), NETWORK_PROTOCOL_VERSION);
+  // A hypothetical higher version next to the supported one must NOT win:
+  // the server picks the exact version it supports, never "the highest".
+  assert.equal(supportedVersion([999, 1]), NETWORK_PROTOCOL_VERSION);
+  assert.equal(supportedVersion([999]), null);
+  assert.equal(supportedVersion([2]), null);
+  assert.equal(supportedVersion([]), null);
+  assert.equal(supportedVersion(undefined), null);
+  assert.equal(supportedVersion("1"), null);
+  assert.equal(supportedVersion([1, "1"]), NETWORK_PROTOCOL_VERSION);
 });
 
 test("identity binding serialization is canonical and round-trips", () => {
@@ -210,7 +232,7 @@ test("identity binding serialization is canonical and round-trips", () => {
 
 test("parseEnvelope default-denies malformed nonce, identity and auth", () => {
   const ackBase = { protocol: NETWORK_PROTOCOL_ID, version: 1, type: "hello_ack" };
-  const validBody = { version: 1, capabilities: [] };
+  const validBody = { version: 1, capabilities: [], nonce, identity: binding };
   // Malformed nonces.
   assert.equal(
     parseEnvelope({ ...ackBase, body: { ...validBody, nonce: "xyz" } }),

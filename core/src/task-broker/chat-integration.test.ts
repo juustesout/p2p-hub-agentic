@@ -375,6 +375,7 @@ async function bootNode(): Promise<{
     port: 0,
     skills: ["contacts.signChallenge", "chat.receiveMessage"],
     identity: peer,
+    identitySigner: (data) => identity.sign(data),
   });
   wireNetworkToBroker(provider, broker);
   registry.register(provider);

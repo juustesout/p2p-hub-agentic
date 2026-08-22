@@ -24,7 +24,7 @@ import {
   encodeResult,
   encodeTask,
   mDNS_PROTOCOL_VERSION,
-  negotiateVersion,
+  supportedVersion,
   normalizeFingerprint,
   parseEnvelope,
   randomNonce,
@@ -58,18 +58,19 @@ export interface NetworkLightOptions {
   /** Skills this instance can serve. */
   skills?: string[];
   /**
-   * Optional persistent identity. When present, its `peerId` is advertised in
-   * the mDNS TXT record alongside (not instead of) the session
-   * `certFingerprint`. The claim is proven over the wire: see
-   * {@link NetworkLightOptions.identitySigner}.
+   * Persistent identity. Required: {@link start} fails loudly without it. Its
+   * `peerId` is advertised in the mDNS TXT record alongside (not instead of)
+   * the session `certFingerprint`. The claim is proven over the wire — see
+   * {@link NetworkLightOptions.identitySigner}. There is no anonymous mode.
    */
   identity?: PeerIdentity;
   /**
    * Capability that signs bytes with the Ed25519 private key behind
-   * {@link NetworkLightOptions.identity}. Required to take part in the Fase 1B
-   * identity binding (client `auth` and server `hello_ack.identity`). The
-   * private key stays with the caller (typically core's `IdentityManager`) —
-   * the provider only ever receives signed bytes. Omit to run anonymous.
+   * {@link NetworkLightOptions.identity}. Required: {@link start} fails loudly
+   * without it. It is used for the Fase 1B identity binding (client `auth` and
+   * server `hello_ack.identity`). The private key stays with the caller
+   * (typically core's `IdentityManager`) — the provider only ever receives
+   * signed bytes.
    */
   identitySigner?: (data: Buffer) => Promise<Buffer>;
   /**
@@ -244,6 +245,13 @@ export class NetworkLightProvider implements NetworkProvider {
       return;
     }
 
+    if (!this.identity || !this.identitySigner) {
+      throw new Error(
+        "NetworkLightProvider requires identity and identitySigner — " +
+          "transport identity is mandatory, there is no anonymous mode",
+      );
+    }
+
     const { key, cert } = generateSelfSignedCert();
     this.tlsKey = key;
     this.tlsCert = cert;
@@ -251,10 +259,13 @@ export class NetworkLightProvider implements NetworkProvider {
     this.certFingerprint = certInfo.fingerprint256;
 
     // requestCert + rejectUnauthorized:false (Fase 1B): ask every client for its
-    // certificate but do not fail the handshake when it has none (anonymous
-    // peers stay possible). When a cert is presented, its fingerprint is used to
-    // verify the client's `auth` identity binding. Never flip rejectUnauthorized
-    // on: pinning is done via the mDNS fingerprint + identity signature instead.
+    // certificate but do not hard-fail the TLS handshake when it has none. A
+    // client without a certificate presents an empty fingerprint, so it can
+    // never produce a valid `auth` binding (the signature must match both the
+    // advertised cert fingerprint and the presented one) and its tasks are
+    // refused by default-deny. Identity is mandatory. Never flip
+    // rejectUnauthorized on: pinning is done via the mDNS fingerprint +
+    // identity signature instead.
     this.server = tls.createServer(
       { key, cert, requestCert: true, rejectUnauthorized: false },
       (socket) => {
@@ -434,9 +445,9 @@ export class NetworkLightProvider implements NetworkProvider {
   async sendTask(peer: NetworkPeer, task: TaskRequest): Promise<TaskResult> {
     const { host, port } = parseAddress(peer.address);
     const expectedFingerprint = this.discovered.get(peer.id)?.certFingerprint;
-    // Fase 1B: our identity proof (auth message) is only sent when we have a
-    // signer; the handshake nonce anchors it.
-    const clientNonce = this.canProveIdentity() ? randomNonce() : "";
+    // Fase 1B: our identity proof (auth message) is mandatory; the handshake
+    // nonce anchors it.
+    const clientNonce = randomNonce();
 
     return new Promise<TaskResult>((resolve) => {
       let settled = false;
@@ -483,7 +494,7 @@ export class NetworkLightProvider implements NetworkProvider {
               encodeHello(
                 [NETWORK_PROTOCOL_VERSION],
                 this.skills,
-                clientNonce || undefined,
+                clientNonce,
               ),
             ),
           );
@@ -535,31 +546,29 @@ export class NetworkLightProvider implements NetworkProvider {
                 });
                 return;
               }
-              // Fase 1B: if the server claims an identity, it must prove it —
-              // a valid Ed25519 signature over the binding message AND a cert
-              // fingerprint matching the certificate actually presented.
-              let verifiedServerPeerId: string | undefined;
-              if (body.identity) {
-                const presentedCertFp = normalizeFingerprint(
-                  socket.getPeerCertificate().fingerprint256 ?? "",
-                );
-                const validBinding = this.verifyIdentity(
-                  body.identity,
-                  clientNonce,
-                  body.nonce ?? "",
-                  presentedCertFp,
-                );
-                if (!validBinding) {
-                  socket.destroy();
-                  finish({
-                    taskId: task.id,
-                    status: "error",
-                    error: "peer failed identity binding",
-                  });
-                  return;
-                }
-                verifiedServerPeerId = body.identity.peerId;
+              // Fase 1B: the server MUST prove its identity — a valid Ed25519
+              // signature over the binding message AND a cert fingerprint
+              // matching the certificate actually presented. No anonymous
+              // servers; a missing/invalid identity is refused.
+              const presentedCertFp = normalizeFingerprint(
+                socket.getPeerCertificate().fingerprint256 ?? "",
+              );
+              const validBinding = this.verifyIdentity(
+                body.identity,
+                clientNonce,
+                body.nonce,
+                presentedCertFp,
+              );
+              if (!validBinding) {
+                socket.destroy();
+                finish({
+                  taskId: task.id,
+                  status: "error",
+                  error: "peer failed identity binding",
+                });
+                return;
               }
+              const verifiedServerPeerId = body.identity.peerId;
               this.peerCapabilities.set(peer.id, {
                 skills: [...body.capabilities].slice(0, MAX_CAPABILITIES),
                 limits: body.limits ?? null,
@@ -591,13 +600,8 @@ export class NetworkLightProvider implements NetworkProvider {
               }
               phase = "result";
               // Prove our identity to the server (Fase 1B) before the task.
-              const authFrame = await this.buildAuthFrame(
-                clientNonce,
-                body.nonce ?? "",
-              );
-              if (authFrame) {
-                socket.write(encodeFrame(authFrame));
-              }
+              const authFrame = await this.buildAuthFrame(clientNonce, body.nonce);
+              socket.write(encodeFrame(authFrame));
               socket.write(encodeFrame(taskFrame));
               continue;
             }
@@ -642,11 +646,6 @@ export class NetworkLightProvider implements NetworkProvider {
     });
   }
 
-  /** Whether this instance can prove a claimed identity over the wire. */
-  private canProveIdentity(): boolean {
-    return this.identity !== null && this.identitySigner !== null;
-  }
-
   /**
    * Verify an identity binding: the signature must be valid under the claimed
    * `peerId` AND the bound certificate fingerprint must equal the certificate
@@ -672,17 +671,15 @@ export class NetworkLightProvider implements NetworkProvider {
   }
 
   /**
-   * Build the `auth` frame proving our identity, or `null` when we have
-   * nothing to prove. The signature binds both handshake nonces AND our own
-   * certificate fingerprint to the claimed `peerId`.
+   * Build the `auth` frame proving our identity. The signature binds both
+   * handshake nonces AND our own certificate fingerprint to the claimed
+   * `peerId`. `start()` guarantees identity + signer are present, so this
+   * never returns null.
    */
   private async buildAuthFrame(
     clientNonce: string,
     serverNonce: string,
-  ): Promise<string | null> {
-    if (!this.canProveIdentity()) {
-      return null;
-    }
+  ): Promise<string> {
     const certFingerprint = normalizeFingerprint(this.certFingerprint);
     const signature = await this.identitySigner!(
       buildIdentityBindingMessage(clientNonce, serverNonce, certFingerprint),
@@ -742,14 +739,14 @@ export class NetworkLightProvider implements NetworkProvider {
               return;
             }
             const hello = envelope.body as HelloBody;
-            if (negotiateVersion(hello.versions) === null) {
+            if (supportedVersion(hello.versions) === null) {
               socket.destroy();
               return;
             }
             clearTimeout(handshakeTimer);
             handshakeDone = true;
-            clientNonce = hello.nonce ?? "";
-            serverNonce = this.canProveIdentity() ? randomNonce() : "";
+            clientNonce = hello.nonce;
+            serverNonce = randomNonce();
             const identity = await this.buildServerIdentity(
               clientNonce,
               serverNonce,
@@ -760,7 +757,7 @@ export class NetworkLightProvider implements NetworkProvider {
                   NETWORK_PROTOCOL_VERSION,
                   this.skills,
                   { maxPayloadBytes: this.maxPayloadBytes },
-                  serverNonce || undefined,
+                  serverNonce,
                   identity,
                 ),
               ),
@@ -792,6 +789,12 @@ export class NetworkLightProvider implements NetworkProvider {
             continue;
           }
           if (envelope.type !== "task") {
+            socket.destroy();
+            return;
+          }
+          // Default-deny: a task from an unauthenticated connection is
+          // refused. Identity is mandatory — there is no anonymous traffic.
+          if (authenticatedPeerId === null) {
             socket.destroy();
             return;
           }
@@ -829,18 +832,16 @@ export class NetworkLightProvider implements NetworkProvider {
   }
 
   /**
-   * Our identity proof for `hello_ack`, or `undefined` when anonymous. The
-   * signature binds both handshake nonces AND our certificate fingerprint to
-   * our claimed `peerId`, so the client can verify the full
-   * "claimed id ↔ Ed25519 key ↔ transport cert" chain in one step.
+   * Our identity proof for `hello_ack`. The signature binds both handshake
+   * nonces AND our certificate fingerprint to our claimed `peerId`, so the
+   * client can verify the full "claimed id ↔ Ed25519 key ↔ transport cert"
+   * chain in one step. `start()` guarantees identity + signer are present,
+   * so this never returns `undefined`.
    */
   private async buildServerIdentity(
     clientNonce: string,
     serverNonce: string,
-  ): Promise<IdentityBinding | undefined> {
-    if (!this.canProveIdentity()) {
-      return undefined;
-    }
+  ): Promise<IdentityBinding> {
     const certFingerprint = normalizeFingerprint(this.certFingerprint);
     const signature = await this.identitySigner!(
       buildIdentityBindingMessage(clientNonce, serverNonce, certFingerprint),
@@ -855,7 +856,7 @@ export class NetworkLightProvider implements NetworkProvider {
   private async handleMessage(
     socket: tls.TLSSocket,
     task: TaskBody,
-    authenticatedPeerId: string | null,
+    authenticatedPeerId: string,
     ip: string,
   ): Promise<void> {
     try {
@@ -863,7 +864,7 @@ export class NetworkLightProvider implements NetworkProvider {
         id: task.id,
         skill: task.skill,
         payload: task.payload,
-        ...(authenticatedPeerId ? { peerId: authenticatedPeerId } : {}),
+        peerId: authenticatedPeerId,
       });
       socket.write(encodeFrame(encodeResult(result)));
     } finally {
@@ -924,7 +925,7 @@ export class NetworkLightProvider implements NetworkProvider {
   ): Promise<PeerCapabilities | null> {
     const { host, port } = parseAddress(peer.address);
     const expectedFingerprint = peer.certFingerprint;
-    const clientNonce = this.canProveIdentity() ? randomNonce() : "";
+    const clientNonce = randomNonce();
 
     return new Promise<PeerCapabilities | null>((resolve) => {
       let settled = false;
@@ -962,7 +963,7 @@ export class NetworkLightProvider implements NetworkProvider {
               encodeHello(
                 [NETWORK_PROTOCOL_VERSION],
                 this.skills,
-                clientNonce || undefined,
+                clientNonce,
               ),
             ),
           );
@@ -989,27 +990,25 @@ export class NetworkLightProvider implements NetworkProvider {
             return;
           }
           const body = ack.body as HelloAckBody;
-          // Fase 1B: a claimed server identity must verify, or the peer is
-          // treated as untrustworthy (default-deny) — never probed further.
-          let verifiedServerPeerId: string | undefined;
-          if (body.identity) {
-            const presentedCertFp = normalizeFingerprint(
-              socket.getPeerCertificate().fingerprint256 ?? "",
-            );
-            if (
-              !this.verifyIdentity(
-                body.identity,
-                clientNonce,
-                body.nonce ?? "",
-                presentedCertFp,
-              )
-            ) {
-              socket.destroy();
-              finish(null);
-              return;
-            }
-            verifiedServerPeerId = body.identity.peerId;
+          // Fase 1B: the server identity must verify, or the peer is treated
+          // as untrustworthy (default-deny) — never probed further. There are
+          // no anonymous servers.
+          const presentedCertFp = normalizeFingerprint(
+            socket.getPeerCertificate().fingerprint256 ?? "",
+          );
+          if (
+            !this.verifyIdentity(
+              body.identity,
+              clientNonce,
+              body.nonce,
+              presentedCertFp,
+            )
+          ) {
+            socket.destroy();
+            finish(null);
+            return;
           }
+          const verifiedServerPeerId = body.identity.peerId;
           const caps: PeerCapabilities = {
             skills: [...body.capabilities].slice(0, MAX_CAPABILITIES),
             limits: body.limits ?? null,

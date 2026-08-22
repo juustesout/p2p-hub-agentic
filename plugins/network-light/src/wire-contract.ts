@@ -36,21 +36,21 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  *
  * ```
  * hello      client → server
- *   body: { "versions": number[], "capabilities": string[], "nonce"?: string }
- *   `versions` = the client's supported protocol versions, descending
- *   preference. `capabilities` = the skills the client offers for remote
- *   invocation. `nonce` = a client-chosen hex nonce (16 bytes) that anchors
- *   the identity binding (Fase 1B); optional — a peer without an identity may
- *   omit it and connect anonymously. `hello` MUST be the first message on a
- *   connection.
+ *   body: { "versions": number[], "capabilities": string[], "nonce": string }
+ *   `versions` = the protocol versions the client supports. `capabilities` =
+ *   the skills the client offers for remote invocation. `nonce` = a
+ *   client-chosen hex nonce (16 bytes) that anchors the identity binding
+ *   (Fase 1B). `hello` MUST be the first message on a connection, and it MUST
+ *   carry a nonce — there is no anonymous mode.
  *
  * hello_ack  server → client
  *   body: { "version": number, "capabilities": string[], "limits"?:
- *   { "maxPayloadBytes": number }, "nonce"?: string, "identity"?:
+ *   { "maxPayloadBytes": number }, "nonce": string, "identity":
  *   { "peerId": string, "certFingerprint": string, "signature": string } }
- *   The server picks the highest version from the client's `versions` that it
- *   also supports; no intersection ⇒ close the connection. `capabilities` =
- *   the skills the server offers. `limits.maxPayloadBytes` bounds the
+ *   The server accepts the connection only when the client's `versions`
+ *   include an *exact* supported version — there is no "highest shared"
+ *   negotiation and no downgrade path; no intersection ⇒ close. `capabilities`
+ *   = the skills the server offers. `limits.maxPayloadBytes` bounds the
  *   serialized envelope length (frame body) the server will accept — a
  *   compliant client refuses to send a larger task without putting it on the
  *   wire. `nonce` = a server-chosen hex nonce (16 bytes). `identity` proves
@@ -59,20 +59,20 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  *   signature over `IDENTITY_BINDING_CONTEXT || clientNonce || ":" ||
  *   serverNonce || ":" || certFingerprint`, where `certFingerprint` is the
  *   SHA-256 fingerprint of the certificate actually presented on this
- *   connection. A client MUST close the connection when a present identity
+ *   connection. Both the `nonce` and the `identity` are MANDATORY — there is
+ *   no anonymous server. A client MUST close the connection when the identity
  *   fails verification (peerId format, fingerprint mismatch, bad signature).
  *
  * auth       client → server
  *   body: { "peerId": string, "certFingerprint": string, "signature": string }
- *   Optional proof-of-possession, the mirror image of `hello_ack.identity`:
- *   sent after `hello_ack`, before any `task`, to bind the client's claimed
+ *   Mandatory proof-of-possession, the mirror image of `hello_ack.identity`:
+ *   sent after `hello_ack` and before any `task`, to bind the client's claimed
  *   `peerId` to the certificate it presented on this connection. The server
  *   verifies it exactly like a client verifies `hello_ack.identity`, with the
  *   `clientNonce`/`serverNonce` exchanged in this connection's handshake. A
- *   client that sends `auth` but fails verification is closed (default-deny);
- *   a client that never sends `auth` stays anonymous. A `task` on a
- *   connection whose `auth` already failed is impossible — the connection is
- *   already gone.
+ *   client that fails verification is closed (default-deny); a `task` without
+ *   a preceding successful `auth` is refused (default-deny). There is no
+ *   anonymous client.
  *
  * task       client → server
  *   body: { "id": string, "skill": string, "payload": unknown }
@@ -97,7 +97,9 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  * ## Default-deny rules
  *
  * - Envelope with unknown protocol / unsupported version → close.
- * - `task` before `hello` → close.
+ * - `hello` without a `nonce`, or `hello_ack` without `nonce` + `identity` →
+ *   close (no anonymous peers).
+ * - `task` before `hello`, or `task` before a verified `auth` → close.
  * - Message type that does not fit the current phase (e.g. `result` sent to a
  *   server, `hello_ack` after the handshake) → close.
  * - `auth` or `hello_ack.identity` that fails verification → close.
@@ -108,6 +110,15 @@ export const NETWORK_PROTOCOL_ID = "p2p-hub:network";
 export const NETWORK_PROTOCOL_VERSION = 1;
 /** mDNS TXT form of the protocol version ("1"). */
 export const mDNS_PROTOCOL_VERSION = String(NETWORK_PROTOCOL_VERSION);
+
+/**
+ * The protocol versions this transport accepts. Default-deny and *non-
+ * negotiable*: a connection is only accepted when the client offers an exact
+ * supported version. There is no "pick the highest shared version" and no
+ * downgrade path — a MITM must never be able to steer both sides toward a
+ * weaker common version.
+ */
+export const SUPPORTED_VERSIONS: readonly number[] = [NETWORK_PROTOCOL_VERSION];
 
 /** Time a server waits for `hello` before closing a connection. */
 export const HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -152,18 +163,18 @@ export interface IdentityBinding {
 export interface HelloBody {
   versions: number[];
   capabilities: string[];
-  /** Client-chosen hex nonce anchoring the identity binding (optional). */
-  nonce?: string;
+  /** Client-chosen hex nonce anchoring the identity binding (mandatory). */
+  nonce: string;
 }
 
 export interface HelloAckBody {
   version: number;
   capabilities: string[];
   limits?: { maxPayloadBytes?: number };
-  /** Server-chosen hex nonce anchoring the identity binding (optional). */
-  nonce?: string;
-  /** Server identity proof (optional; absent for anonymous servers). */
-  identity?: IdentityBinding;
+  /** Server-chosen hex nonce anchoring the identity binding (mandatory). */
+  nonce: string;
+  /** Server identity proof (mandatory — no anonymous servers). */
+  identity: IdentityBinding;
 }
 
 export interface TaskBody {
@@ -242,17 +253,17 @@ function isHexString(value: unknown, pattern: RegExp): value is string {
 }
 
 /**
- * Pick the highest protocol version both sides support, or `null` when there
- * is no intersection (default-deny). Only {@link NETWORK_PROTOCOL_VERSION} is
- * supported today, so negotiation is trivial but stays a pure, testable rule.
+ * Strict protocol-version gate: accept the connection only when the client's
+ * advertised versions include an *exact* supported version. There is no
+ * negotiation ("highest shared") and no downgrade path — the server never
+ * agrees to a version it does not itself support. Returns `null` (default
+ * deny) on any other input. Kept pure so the strictness is a testable rule.
  */
-export function negotiateVersion(clientVersions: unknown): number | null {
+export function supportedVersion(clientVersions: unknown): number | null {
   if (!Array.isArray(clientVersions)) {
     return null;
   }
-  return clientVersions.includes(NETWORK_PROTOCOL_VERSION)
-    ? NETWORK_PROTOCOL_VERSION
-    : null;
+  return SUPPORTED_VERSIONS.find((version) => clientVersions.includes(version)) ?? null;
 }
 
 /** Strictly validate a decoded envelope. Returns `null` on any violation. */
@@ -291,7 +302,7 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
       if (!isStringArray(b.capabilities, MAX_CAPABILITIES)) {
         return null;
       }
-      if (b.nonce !== undefined && !isNonce(b.nonce)) {
+      if (!isNonce(b.nonce)) {
         return null;
       }
       return {
@@ -301,7 +312,7 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
         body: {
           versions: b.versions,
           capabilities: b.capabilities,
-          ...(b.nonce !== undefined ? { nonce: b.nonce } : {}),
+          nonce: b.nonce,
         },
       };
     }
@@ -312,7 +323,7 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
       if (!isStringArray(b.capabilities, MAX_CAPABILITIES)) {
         return null;
       }
-      if (b.nonce !== undefined && !isNonce(b.nonce)) {
+      if (!isNonce(b.nonce)) {
         return null;
       }
       let limits: { maxPayloadBytes?: number } | undefined;
@@ -337,13 +348,9 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
             : {}),
         };
       }
-      let identity: IdentityBinding | undefined;
-      if (b.identity !== undefined) {
-        const parsed = parseIdentityBinding(b.identity);
-        if (!parsed) {
-          return null;
-        }
-        identity = parsed;
+      const identity = parseIdentityBinding(b.identity);
+      if (!identity) {
+        return null;
       }
       return {
         protocol: NETWORK_PROTOCOL_ID,
@@ -353,8 +360,8 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
           version: b.version,
           capabilities: b.capabilities,
           limits,
-          ...(b.nonce !== undefined ? { nonce: b.nonce } : {}),
-          ...(identity !== undefined ? { identity } : {}),
+          nonce: b.nonce,
+          identity,
         },
       };
     }
@@ -419,37 +426,29 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
 export function encodeHello(
   versions: number[],
   capabilities: string[],
-  nonce?: string,
+  nonce: string,
 ): string {
-  const body: Record<string, unknown> = { versions, capabilities };
-  if (nonce !== undefined) {
-    body.nonce = nonce;
-  }
   return JSON.stringify({
     protocol: NETWORK_PROTOCOL_ID,
     version: NETWORK_PROTOCOL_VERSION,
     type: "hello",
-    body,
+    body: { versions, capabilities, nonce },
   });
 }
 
 export function encodeHelloAck(
   version: number,
   capabilities: string[],
-  limits?: { maxPayloadBytes?: number },
-  nonce?: string,
-  identity?: IdentityBinding,
+  limits: { maxPayloadBytes?: number } | undefined,
+  nonce: string,
+  identity: IdentityBinding,
 ): string {
   const body: Record<string, unknown> = { version, capabilities };
   if (limits !== undefined && limits.maxPayloadBytes !== undefined) {
     body.limits = { maxPayloadBytes: limits.maxPayloadBytes };
   }
-  if (nonce !== undefined) {
-    body.nonce = nonce;
-  }
-  if (identity !== undefined) {
-    body.identity = identity;
-  }
+  body.nonce = nonce;
+  body.identity = identity;
   return JSON.stringify({
     protocol: NETWORK_PROTOCOL_ID,
     version: NETWORK_PROTOCOL_VERSION,
@@ -500,9 +499,8 @@ export function encodeResult(result: TaskResult): string {
 /**
  * The exact bytes a peer signs to bind its claimed identity to this
  * connection: `CONTEXT || clientNonce || ":" || serverNonce || ":" ||
- * certFingerprint`. Both nonces are hex as exchanged in the handshake (empty
- * string when a side has no identity and therefore no nonce); `certFingerprint`
- * is the normalized (lowercase, colon-stripped) SHA-256 fingerprint of the
+ * certFingerprint`. Both nonces are hex as exchanged in the handshake (both
+ * are mandatory — there is no anonymous side); `certFingerprint` is the normalized (lowercase, colon-stripped) SHA-256 fingerprint of the
  * certificate the signing side actually presented on this connection. The
  * context prefix is required — never sign caller-chosen bytes verbatim.
  */

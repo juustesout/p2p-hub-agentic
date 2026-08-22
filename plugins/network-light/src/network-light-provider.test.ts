@@ -5,7 +5,7 @@ import * as net from "node:net";
 import * as crypto from "node:crypto";
 import * as forge from "node-forge";
 import { NetworkLightProvider } from "./network-light-provider";
-import type { DiscoveredPeer } from "./network-light-provider";
+import type { DiscoveredPeer, NetworkLightOptions } from "./network-light-provider";
 import type { NetworkPeer, PeerIdentity } from "@p2p-hub/sdk";
 import {
   buildIdentityBindingMessage,
@@ -70,12 +70,6 @@ function close(server: tls.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-// A stable identity: peerId = 64 hex chars (32-byte Ed25519 public key).
-const STABLE_IDENTITY: PeerIdentity = {
-  peerId: "a".repeat(64),
-  publicKeyHex: "a".repeat(64),
-};
-
 /** A fresh Ed25519 identity plus a signer proving possession of its key. */
 function makeIdentity(): { identity: PeerIdentity; signer: (data: Buffer) => Promise<Buffer> } {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
@@ -85,6 +79,18 @@ function makeIdentity(): { identity: PeerIdentity; signer: (data: Buffer) => Pro
     identity: { peerId, publicKeyHex: peerId },
     signer: async (data: Buffer) => crypto.sign(null, data, privateKey),
   };
+}
+
+/** A provider that is always equipped with identity + signer (mandatory). */
+function makeProvider(
+  options: Omit<NetworkLightOptions, "identity" | "identitySigner"> = {},
+): NetworkLightProvider {
+  const keyPair = makeIdentity();
+  return new NetworkLightProvider({
+    ...options,
+    identity: keyPair.identity,
+    identitySigner: keyPair.signer,
+  });
 }
 
 async function waitForPeerWithId(
@@ -107,8 +113,8 @@ async function waitForPeerWithId(
 }
 
 test("two local instances discover each other and exchange a task", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
-  const bob = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
+  const bob = makeProvider({ port: 0, skills: ["echo"] });
 
   bob.onTask(async (task) => ({
     taskId: task.id,
@@ -159,7 +165,7 @@ test("discovery survives the heartbeat TTL via periodic re-announcement", async 
   // chain backs off (1s, 4s, 13s…) and the 1.5s prune would drop bob within a
   // few seconds. With it, bob stays discoverable indefinitely.
   const bobIdentity = makeIdentity();
-  const alice = new NetworkLightProvider({
+  const alice = makeProvider({
     port: 0,
     skills: ["echo"],
     heartbeatTtlMs: 1_500,
@@ -198,20 +204,22 @@ test("discovery survives the heartbeat TTL via periodic re-announcement", async 
 });
 
 test("a peer with an identity advertises both certFingerprint and peerId", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bobKey = makeIdentity();
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({
     port: 0,
     skills: ["echo"],
-    identity: STABLE_IDENTITY,
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
   });
 
   await alice.start();
   await bob.start();
 
   try {
-    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bobPeer = await waitForPeerWithId(alice, bobKey.identity.peerId);
 
-    assert.equal(bobPeer.peerId, STABLE_IDENTITY.peerId);
+    assert.equal(bobPeer.peerId, bobKey.identity.peerId);
     // The per-boot certificate fingerprint is still announced alongside the
     // persistent identity — neither replaces the other.
     assert.ok(bobPeer.certFingerprint);
@@ -222,18 +230,20 @@ test("a peer with an identity advertises both certFingerprint and peerId", async
 });
 
 test("peerId is stable across restarts while certFingerprint changes", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const keyPair = makeIdentity();
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob1 = new NetworkLightProvider({
     port: 0,
     skills: ["echo"],
-    identity: STABLE_IDENTITY,
+    identity: keyPair.identity,
+    identitySigner: keyPair.signer,
   });
 
   await alice.start();
   await bob1.start();
 
   try {
-    const bob1Peer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bob1Peer = await waitForPeerWithId(alice, keyPair.identity.peerId);
     assert.ok(bob1Peer.certFingerprint);
 
     // Stop the first instance and bring up a second one with the *same*
@@ -244,7 +254,8 @@ test("peerId is stable across restarts while certFingerprint changes", async () 
     const bob2 = new NetworkLightProvider({
       port: 0,
       skills: ["echo"],
-      identity: STABLE_IDENTITY,
+      identity: keyPair.identity,
+      identitySigner: keyPair.signer,
     });
     await bob2.start();
     try {
@@ -252,7 +263,7 @@ test("peerId is stable across restarts while certFingerprint changes", async () 
       // instance (bob1's "down" event may not have been processed yet).
       const bob2Peer = await waitForPeerWithId(
         alice,
-        STABLE_IDENTITY.peerId,
+        keyPair.identity.peerId,
         bob1Peer.id,
       );
       assert.equal(bob2Peer.peerId, bob1Peer.peerId);
@@ -266,8 +277,8 @@ test("peerId is stable across restarts while certFingerprint changes", async () 
 });
 
 test("task to a peer with a mismatched certificate fingerprint is rejected", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
-  const bob = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
+  const bob = makeProvider({ port: 0, skills: ["echo"] });
   bob.onTask(async (task) => ({
     taskId: task.id,
     status: "ok",
@@ -311,8 +322,8 @@ test("task to a peer with a mismatched certificate fingerprint is rejected", asy
 });
 
 test("discover filters by handshake-negotiated capabilities", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo", "ping"] });
-  const bob = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const alice = makeProvider({ port: 0, skills: ["echo", "ping"] });
+  const bob = makeProvider({ port: 0, skills: ["echo"] });
   await bob.start();
   await alice.start();
 
@@ -342,8 +353,8 @@ test("discover filters by handshake-negotiated capabilities", async () => {
 });
 
 test("a peer's advertised maxPayloadBytes limit is honored before sending", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
-  const bob = new NetworkLightProvider({
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
+  const bob = makeProvider({
     port: 0,
     skills: ["echo"],
     maxPayloadBytes: 128,
@@ -386,11 +397,13 @@ test("a peer's advertised maxPayloadBytes limit is honored before sending", asyn
 });
 
 test("a server denies an unsupported protocol version and closes the connection", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bobKey = makeIdentity();
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({
     port: 0,
     skills: ["echo"],
-    identity: STABLE_IDENTITY,
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
   });
   let handled = false;
   bob.onTask(async (task) => {
@@ -403,20 +416,22 @@ test("a server denies an unsupported protocol version and closes the connection"
 
   let raw: tls.TLSSocket | null = null;
   try {
-    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bobPeer = await waitForPeerWithId(alice, bobKey.identity.peerId);
     const bobPort = Number(bobPeer.address.split(":").pop());
 
     raw = tls.connect(
       { host: "127.0.0.1", port: bobPort, rejectUnauthorized: false },
       () => {
         // Version 2 is not supported by this server — default-deny.
+        // The envelope itself is the supported version 1 so the denial comes
+        // from the strict version-membership gate, not from envelope parsing.
         raw!.write(
           framePayload(
             JSON.stringify({
               protocol: "p2p-hub:network",
-              version: 2,
+              version: 1,
               type: "hello",
-              body: { versions: [2], capabilities: [] },
+              body: { versions: [2], capabilities: [], nonce: randomNonce() },
             }),
           ),
         );
@@ -444,11 +459,13 @@ test("a server denies an unsupported protocol version and closes the connection"
 });
 
 test("a server closes the connection when a task arrives before the handshake", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bobKey = makeIdentity();
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({
     port: 0,
     skills: ["echo"],
-    identity: STABLE_IDENTITY,
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
   });
   let handled = false;
   bob.onTask(async (task) => {
@@ -461,7 +478,7 @@ test("a server closes the connection when a task arrives before the handshake", 
 
   let raw: tls.TLSSocket | null = null;
   try {
-    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bobPeer = await waitForPeerWithId(alice, bobKey.identity.peerId);
     const bobPort = Number(bobPeer.address.split(":").pop());
 
     raw = tls.connect(
@@ -499,11 +516,13 @@ test("a server closes the connection when a task arrives before the handshake", 
 });
 
 test("a server closes the connection on a malformed frame", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  const bobKey = makeIdentity();
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({
     port: 0,
     skills: ["echo"],
-    identity: STABLE_IDENTITY,
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
   });
   let handled = false;
   bob.onTask(async (task) => {
@@ -516,7 +535,7 @@ test("a server closes the connection on a malformed frame", async () => {
 
   let raw: tls.TLSSocket | null = null;
   try {
-    const bobPeer = await waitForPeerWithId(alice, STABLE_IDENTITY.peerId);
+    const bobPeer = await waitForPeerWithId(alice, bobKey.identity.peerId);
     const bobPort = Number(bobPeer.address.split(":").pop());
 
     raw = tls.connect(
@@ -696,10 +715,27 @@ test("identity binding: an auth claiming a peerId the signer does not hold is de
   }
 });
 
-test("identity binding: auth after a task is denied (default-deny)", async () => {
+test("start() fails loudly without identity or identitySigner (no anonymous mode)", async () => {
+  const anonymous = new NetworkLightProvider({ port: 0, skills: ["echo"] });
+  await assert.rejects(anonymous.start(), /identity/);
+
+  const noSigner = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: makeIdentity().identity,
+  });
+  await assert.rejects(noSigner.start(), /identitySigner/);
+});
+
+test("identity binding: a task without prior identity auth is denied (default-deny)", async () => {
+  // There is no anonymous mode: the server closes the connection the moment a
+  // task arrives on a connection that never produced a valid auth.
+  const bobKey = makeIdentity();
   const bob = new NetworkLightProvider({
     port: 0,
     skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
   });
   let handled = false;
   bob.onTask(async (task) => {
@@ -709,20 +745,13 @@ test("identity binding: auth after a task is denied (default-deny)", async () =>
 
   await bob.start();
 
-  const clientKey = makeIdentity();
-  const { key, cert } = generateSelfSignedCert();
-  const clientCertFp = normalizeFingerprint(
-    new crypto.X509Certificate(cert).fingerprint256,
-  );
-
   let raw: tls.TLSSocket | null = null;
   try {
     const bobPort = bob.port;
-    let serverNonce = "";
     const clientNonce = randomNonce();
 
     raw = tls.connect(
-      { host: "127.0.0.1", port: bobPort, key, cert, rejectUnauthorized: false },
+      { host: "127.0.0.1", port: bobPort, rejectUnauthorized: false },
       () => {
         raw!.write(
           framePayload(
@@ -741,10 +770,6 @@ test("identity binding: auth after a task is denied (default-deny)", async () =>
       raw!.on("data", (chunk) => {
         const text = chunk.toString("utf8");
         if (text.includes("hello_ack")) {
-          const ack = JSON.parse(text.slice(text.indexOf("{"))) as {
-            body: { nonce?: string };
-          };
-          serverNonce = ack.body.nonce ?? "";
           resolve();
         }
       });
@@ -756,7 +781,8 @@ test("identity binding: auth after a task is denied (default-deny)", async () =>
       }),
     ]);
 
-    // Send a task first (anonymous is legal).
+    // A task with NO preceding auth must be refused and the connection torn
+    // down — the anonymous traffic path is dead.
     raw!.write(
       framePayload(
         JSON.stringify({
@@ -768,35 +794,16 @@ test("identity binding: auth after a task is denied (default-deny)", async () =>
       ),
     );
 
-    // Now try to authenticate — too late, the connection already saw a task.
-    const signature = await clientKey.signer(
-      buildIdentityBindingMessage(clientNonce, serverNonce, clientCertFp),
-    );
-    raw!.write(
-      framePayload(
-        JSON.stringify({
-          protocol: "p2p-hub:network",
-          version: 1,
-          type: "auth",
-          body: {
-            peerId: clientKey.identity.peerId,
-            certFingerprint: clientCertFp,
-            signature: signature.toString("hex"),
-          },
-        }),
-      ),
-    );
-
     const closed = new Promise<void>((resolve) => {
       raw!.once("close", () => resolve());
     });
     await Promise.race([
       closed,
       delay(3_000).then(() => {
-        throw new Error("server did not close the connection on auth-after-task");
+        throw new Error("server did not close a task-without-auth connection");
       }),
     ]);
-    assert.equal(handled, true, "the anonymous task itself is legal");
+    assert.equal(handled, false, "an unauthenticated task must never be dispatched");
   } finally {
     raw?.destroy();
     await bob.stop();
@@ -804,9 +811,12 @@ test("identity binding: auth after a task is denied (default-deny)", async () =>
 });
 
 test("abuse limits: connection flood is capped per IP", async () => {
+  const bobKey = makeIdentity();
   const bob = new NetworkLightProvider({
     port: 0,
     skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
     peerLimits: { maxConnectionsPerIp: 2 },
   });
   await bob.start();
@@ -867,8 +877,8 @@ test("abuse limits: connection flood is capped per IP", async () => {
 });
 
 test("abuse limits: concurrent task cap refuses the overflow task", async () => {
-  const alice = new NetworkLightProvider({ port: 0, skills: ["echo"] });
-  const bob = new NetworkLightProvider({
+  const alice = makeProvider({ port: 0, skills: ["echo"] });
+  const bob = makeProvider({
     port: 0,
     skills: ["echo"],
     peerLimits: { maxConcurrentTasksPerIp: 1 },

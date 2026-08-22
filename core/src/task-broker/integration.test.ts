@@ -1,12 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { NetworkLightProvider } from "@p2p-hub/network-light";
-import type { NetworkPeer, TaskResult } from "@p2p-hub/sdk";
+import type { NetworkPeer, PeerIdentity, TaskResult } from "@p2p-hub/sdk";
 import { PluginHost } from "../plugin-host/plugin-host";
 import { wireNetworkToBroker } from "./wire-network";
+
+function makeIdentity(): { identity: PeerIdentity; signer: (data: Buffer) => Promise<Buffer> } {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  const jwk = publicKey.export({ format: "jwk" }) as { x: string };
+  const peerId = Buffer.from(jwk.x, "base64url").toString("hex");
+  return {
+    identity: { peerId, publicKeyHex: peerId },
+    signer: async (data: Buffer) => crypto.sign(null, data, privateKey),
+  };
+}
+
+function makeProvider(
+  skills: string[],
+): NetworkLightProvider {
+  const keyPair = makeIdentity();
+  return new NetworkLightProvider({
+    port: 0,
+    skills,
+    identity: keyPair.identity,
+    identitySigner: keyPair.signer,
+  });
+}
 
 async function waitFor<T>(
   check: () => Promise<T | null | undefined>,
@@ -66,11 +89,8 @@ test("a remote task is routed through the broker to the calendar plugin", async 
   };
   await calendar.addEvent({ title: "Lunch", date: "2026-08-20" });
 
-  const alice = new NetworkLightProvider({
-    port: 0,
-    skills: ["calendar.listEvents"],
-  });
-  const bob = new NetworkLightProvider({ port: 0, skills: [] });
+  const alice = makeProvider(["calendar.listEvents"]);
+  const bob = makeProvider([]);
 
   wireNetworkToBroker(alice, host.taskBroker());
 
