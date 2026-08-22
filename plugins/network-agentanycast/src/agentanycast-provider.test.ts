@@ -5,24 +5,32 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AgentAnycastProvider } from "./agentanycast-provider";
 
-test("checkStatus reports ready when daemon is reachable via unix socket", async () => {
-  const socketPath = path.join(
-    os.tmpdir(),
-    `agentanycast-${process.pid}-${Date.now()}.sock`,
-  );
-  const server = net.createServer();
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+test(
+  "checkStatus reports ready when daemon is reachable via unix socket",
+  {
+    skip:
+      process.platform === "win32" &&
+      "unix domain socket probe is skipped on win32 (checkStatus probes TCP/binary there)",
+  },
+  async () => {
+    const socketPath = path.join(
+      os.tmpdir(),
+      `agentanycast-${process.pid}-${Date.now()}.sock`,
+    );
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 
-  const previous = process.env.AGENTANYCAST_SOCKET;
-  process.env.AGENTANYCAST_SOCKET = socketPath;
-  try {
-    const provider = new AgentAnycastProvider("127.0.0.1:59999");
-    assert.equal(await provider.checkStatus(), "ready");
-  } finally {
-    process.env.AGENTANYCAST_SOCKET = previous;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
-});
+    const previous = process.env.AGENTANYCAST_SOCKET;
+    process.env.AGENTANYCAST_SOCKET = socketPath;
+    try {
+      const provider = new AgentAnycastProvider("127.0.0.1:59999");
+      assert.equal(await provider.checkStatus(), "ready");
+    } finally {
+      process.env.AGENTANYCAST_SOCKET = previous;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  },
+);
 
 test("checkStatus reports not-installed when daemon is absent", async () => {
   const provider = new AgentAnycastProvider();

@@ -142,6 +142,13 @@ async function makeSite(): Promise<{ root: string; dataDir: string }> {
   return { root, dataDir };
 }
 
+async function canonicalReal(p: string): Promise<string> {
+  const real = await fs.realpath(p);
+  // On Windows the same directory can be addressed via its 8.3 short name
+  // (e.g. RUNNER~1) or its long name; compare the canonical case-folded form.
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
 // ---------------------------------------------------------------------------
 // setSiteRoot / getSiteRoot (config ownership)
 // ---------------------------------------------------------------------------
@@ -151,7 +158,7 @@ test("setSiteRoot validates, persists and returns the canonical realpath", async
   const { root } = await makeSite();
 
   const real = await plugin.setSiteRoot(root);
-  assert.equal(real, await fs.realpath(root));
+  assert.equal(await canonicalReal(real), await canonicalReal(root));
   assert.equal(await plugin.getSiteRoot(), real);
 
   // Persisted under the plugin's own storage key, so a fresh instance on the

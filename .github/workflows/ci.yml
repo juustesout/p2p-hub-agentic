@@ -25,6 +25,7 @@ jobs:
       - name: Build (tsc -b)
         run: npm run build
       - name: Unit tests (all workspaces)
+        timeout-minutes: 10
         run: npm run test:unit
       - name: Multi-peer smoke scenario (3 in-process PluginHosts, real mDNS/TLS)
         timeout-minutes: 10

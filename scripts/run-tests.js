@@ -30,7 +30,14 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, ["--test", ...files], {
+const timeoutMs = process.env.TEST_TIMEOUT_MS ?? "30000";
+const args = ["--test"];
+if (Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0) {
+  args.push(`--test-timeout=${timeoutMs}`);
+}
+args.push(...files);
+
+const result = spawnSync(process.execPath, args, {
   stdio: "inherit",
 });
 
