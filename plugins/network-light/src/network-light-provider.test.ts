@@ -405,7 +405,7 @@ test("a peer's advertised maxPayloadBytes limit is honored before sending", { sk
   }
 });
 
-test("a server denies an unsupported protocol version and closes the connection", async () => {
+test("a server denies an unsupported protocol version and closes the connection", { skip: MDNS_SKIP }, async () => {
   const bobKey = makeIdentity();
   const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({
@@ -467,7 +467,7 @@ test("a server denies an unsupported protocol version and closes the connection"
   }
 });
 
-test("a server closes the connection when a task arrives before the handshake", async () => {
+test("a server closes the connection when a task arrives before the handshake", { skip: MDNS_SKIP }, async () => {
   const bobKey = makeIdentity();
   const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({
@@ -524,7 +524,7 @@ test("a server closes the connection when a task arrives before the handshake", 
   }
 });
 
-test("a server closes the connection on a malformed frame", async () => {
+test("a server closes the connection on a malformed frame", { skip: MDNS_SKIP }, async () => {
   const bobKey = makeIdentity();
   const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = new NetworkLightProvider({
