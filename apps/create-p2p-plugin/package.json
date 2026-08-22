@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test \"dist/**/*.test.js\""
+    "test": "node ../../scripts/run-tests.js"
   },
   "dependencies": {
     "@p2p-hub/sdk": "0.1.0"

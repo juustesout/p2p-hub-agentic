@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test \"dist/**/*.test.js\"",
+    "test": "node ../../scripts/run-tests.js",
     "start": "node dist/main.js"
   },
   "dependencies": {
