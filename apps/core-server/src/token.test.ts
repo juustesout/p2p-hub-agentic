@@ -32,7 +32,9 @@ function assertOwnerOnlyMode(stat: { mode: number }, file: string): void {
   }
 }
 
-async function startServer(): Promise<{ server: CoreServer; port: number; dataDir: string }> {
+async function startServer(
+  token = TOKEN,
+): Promise<{ server: CoreServer; port: number; dataDir: string }> {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "core-server-token-"));
   const pluginsDir = path.join(dataDir, "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
@@ -41,7 +43,7 @@ async function startServer(): Promise<{ server: CoreServer; port: number; dataDi
     dataDir,
     host: "127.0.0.1",
     port: 0,
-    bootToken: TOKEN,
+    bootToken: token,
   });
   await server.start();
   const addr = server.address();
@@ -257,5 +259,64 @@ test("WebSocket /ws rejects connections without the token and accepts with it", 
     assert.equal(accepted, "accepted");
   } finally {
     await server.stop();
+  }
+});
+
+/**
+ * The WS token travels in the query string (the browser WS API cannot set
+ * headers); this is an accepted risk, mitigated operationally (loopback,
+ * short-lived token, no `?token=` logging). A future access-log or full-URL
+ * request logger would silently undo that mitigation, so this test captures
+ * all console output while exercising the token-bearing paths and asserts the
+ * token never appears in it.
+ */
+test("boot tokens never leak into server console output on any token-bearing path", async () => {
+  const secret = `log-hygiene-secret-${Math.random().toString(36).slice(2)}`;
+  const captured: string[] = [];
+  const methods = ["log", "info", "warn", "error", "debug"] as const;
+  const originals = methods.map((m) => console[m]);
+  for (const m of methods) {
+    console[m] = (...args: unknown[]) => {
+      captured.push(args.map((a) => String(a)).join(" "));
+    };
+  }
+
+  const { server, port } = await startServer(secret);
+  try {
+    // A correct query-string token is accepted on HTTP too (isAuthorized reads
+    // tokenFromQuery for both surfaces); a wrong one must be rejected.
+    const goodTokenInUrl = await request(port, `/api/health?token=${secret}`);
+    assert.equal(goodTokenInUrl.status, 200);
+
+    const wrongTokenInUrl = await request(port, `/api/health?token=wrong-${secret}`);
+    assert.equal(wrongTokenInUrl.status, 401);
+
+    const wrongHeader = await request(port, "/api/health", {
+      headers: { Authorization: `Bearer wrong-${secret}` },
+    });
+    assert.equal(wrongHeader.status, 401);
+
+    const ok = await request(port, "/api/health", {
+      headers: { Authorization: `Bearer ${secret}` },
+    });
+    assert.equal(ok.status, 200);
+
+    const malformedBody = await request(port, `/api/execute?token=${secret}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(malformedBody.status, 400);
+
+    assert.equal(await wsConnect(port, secret), "accepted");
+
+    const output = captured.join("\n");
+    assert.ok(!output.includes(secret), "token leaked into console output");
+    assert.ok(!output.includes("?token="), "full-URL logging would expose ?token=");
+  } finally {
+    await server.stop();
+    for (let i = 0; i < methods.length; i++) {
+      console[methods[i]] = originals[i];
+    }
   }
 });
