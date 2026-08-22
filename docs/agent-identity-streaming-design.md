@@ -127,15 +127,28 @@ peer is an agent by default, so existing deployments see no behavior change.
 peer** is a Tier-2 native-confirm action, never a lighter browser
 `getUserMedia` popup.
 
-- The future `p2p-hub:media:v1` capability must not be invocable through any
-  route that skips the shell's native confirm flow. The transport delivers a
-  media *request* (peer, kind: camera/mic, requested stream params); the shell
-  shows the same Tier-2 native prompt as execute-skill / vault-access /
+- The `p2p-hub:media:v1` capability is **not** invocable through any route
+  that skips the shell's native confirm flow. The transport delivers a media
+  *request* (peer, kind: camera/mic, requested stream params); the shell shows
+  the same Tier-2 native prompt as execute-skill / vault-access /
   `peersite.requestAccess` (`TrustTierGate.confirmPeerAccess` in
-  `apps/core-server/src/app.ts` is the existing integration point to mirror).
-  Only an approved request opens a stream over the P2P transport.
+  `apps/core-server/src/app.ts` is the existing integration point that
+  `confirmMediaRequest` mirrors). Only an approved request mints a grant.
 - The browser's own permission UI stays out of this path entirely.
-- Slice 3 in the plan; no media code exists yet.
+- **Slice 3 (done):** the SDK wire contract (`sdk/src/media-contract.ts`,
+  `p2p-hub:media:v1`, fail-closed parsing, canonical serialization, no
+  identity/token fields), the `media-access-request` tier-2 prompt kind, and
+  the `core.media.request` skill registered by core-server
+  (`apps/core-server/src/media.ts`). The handler parses the envelope
+  fail-closed, requires a transport-verified `context.peerId` (Fase 1B), and
+  gates every grant through `TrustTierGate.confirmMediaRequest` — no confirmer
+  wired, a denial, or a throw all resolve to `denied`. It is
+  `remote: { gate: "verified-contact" }` (media is sensitive, so an established
+  relationship is required before the native prompt is shown), is NOT
+  HTTP-exposed (the local HTTP bridge is not a media-request surface), and a
+  per-peer cooldown stops a peer from spamming native prompts. The actual
+  stream transport is out of scope; a grant is the verified verdict a future
+  transport would consume.
 
 ## Decision 3 — Real-time traffic vs discrete actions
 
@@ -171,7 +184,11 @@ request/response rate-limiters.
   an `agent-task-approval` kind. Cross-node agent recognition (verifying a
   foreign child's certificate and importing it as a declared agent) is not part
   of this slice — the registry is the operator's own child identities.
-- **Slice 3:** `p2p-hub:media:v1` + Tier-2 native-confirm gate (Decision 2).
+- **Slice 3 (done):** `p2p-hub:media:v1` + Tier-2 native-confirm gate
+  (Decision 2). SDK wire contract + `media-access-request` prompt kind +
+  `core.media.request` skill (fail-closed parse, transport-verified peerId
+  required, every grant gated through `confirmMediaRequest`, `verified-contact`
+  remote policy, no HTTP exposure, per-peer cooldown). See Decision 2 above.
 - **Slice 4:** capability type split + per-peer telemetry frequency caps
   (Decision 3).
 

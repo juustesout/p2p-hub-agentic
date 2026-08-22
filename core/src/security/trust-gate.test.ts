@@ -141,3 +141,66 @@ test("confirmPeerAccess fails closed with no confirmer, a denial, or a throw", a
     false,
   );
 });
+
+test("confirmMediaRequest forwards the media-access-request kind with a safe summary", async () => {
+  let seen: unknown = null;
+  const gate = new TrustTierGate({
+    confirmTier2: async (request) => {
+      seen = request;
+      return true;
+    },
+  });
+  const approved = await gate.confirmMediaRequest(
+    "00".repeat(32),
+    "camera",
+    { width: 1280, height: 720, frameRate: 60 },
+    60_000,
+  );
+  assert.equal(approved, true);
+  assert.deepEqual(seen, {
+    kind: "media-access-request",
+    peerId: "00".repeat(32),
+    mediaKind: "camera",
+    requested: { width: 1280, height: 720, frameRate: 60 },
+    summary: "camera access (1280x720, 60 fps)",
+    expiresInMs: 60_000,
+  });
+});
+
+test("confirmMediaRequest renders a default-settings summary when no params are requested", async () => {
+  let summary: string | undefined;
+  const gate = new TrustTierGate({
+    confirmTier2: async (request) => {
+      if (request.kind === "media-access-request") {
+        summary = request.summary;
+      }
+      return true;
+    },
+  });
+  await gate.confirmMediaRequest("00".repeat(32), "microphone", undefined, 60_000);
+  assert.equal(summary, "microphone access with default settings");
+});
+
+test("confirmMediaRequest fails closed with no confirmer, a denial, or a throw", async () => {
+  const noConfirmer = new TrustTierGate();
+  assert.equal(
+    await noConfirmer.confirmMediaRequest("00".repeat(32), "camera", undefined, 1_000),
+    false,
+  );
+
+  const denied = new TrustTierGate({ confirmTier2: async () => false });
+  assert.equal(
+    await denied.confirmMediaRequest("00".repeat(32), "camera", undefined, 1_000),
+    false,
+  );
+
+  const throwing = new TrustTierGate({
+    confirmTier2: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(
+    await throwing.confirmMediaRequest("00".repeat(32), "camera", undefined, 1_000),
+    false,
+  );
+});

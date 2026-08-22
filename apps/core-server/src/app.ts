@@ -4,6 +4,7 @@ import * as fsp from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { isLoopbackHost } from "./host";
+import { createMediaSkillHandler } from "./media";
 import {
   generateBootToken,
   generateSiteToken,
@@ -215,6 +216,7 @@ export class CoreServer {
     await this.initSite();
 
     this.registerCoreSkills();
+    this.registerMediaSkill();
     this.bridgeHookEvents();
     this.registerPeerAccessHandler();
 
@@ -344,6 +346,30 @@ export class CoreServer {
         });
       },
       { localOnly: true, httpExposed: true },
+    );
+  }
+
+  /**
+   * Register the `core.media.request` skill — the `p2p-hub:media:v1` capability
+   * (design doc "Decision 2").
+   *
+   * A remote peer asks for live camera/microphone access. The envelope is
+   * parsed fail-closed through the SDK contract (no identity/token fields on
+   * the wire), then the request must be approved by the shell's native Tier-2
+   * confirmation (`confirmMediaRequest`) — the browser's `getUserMedia` UI is
+   * deliberately not part of this path. A grant is minted only after that
+   * approval; there is no route that skips it.
+   *
+   * Access is `verified-contact` only (media is sensitive, so an established
+   * relationship is required before the native prompt is even shown), it is
+   * NOT HTTP-exposed (the local HTTP bridge is not a media-request surface),
+   * and a per-peer cooldown stops a peer from spamming native prompts.
+   */
+  private registerMediaSkill(): void {
+    this.broker.registerSkill(
+      "core.media.request",
+      createMediaSkillHandler({ trustGate: this.trustGate }),
+      { localOnly: false, httpExposed: false, remote: { gate: "verified-contact" } },
     );
   }
 

@@ -1,5 +1,10 @@
 import {
+  MEDIA_PROTOCOL_ID,
+  MEDIA_PROTOCOL_VERSION,
+  buildMediaRequestSummary,
   requiredTrustTier,
+  type MediaKind,
+  type MediaStreamParams,
   type RiskSeverity,
   type TrustTier,
 } from "@p2p-hub/sdk";
@@ -41,6 +46,14 @@ export type ConfirmationRequest =
       skill: string;
       agentLabel: string;
       peerId: string;
+    }
+  | {
+      kind: "media-access-request";
+      peerId: string;
+      mediaKind: MediaKind;
+      requested?: MediaStreamParams;
+      summary: string;
+      expiresInMs: number;
     };
 
 /**
@@ -146,6 +159,43 @@ export class TrustTierGate {
         kind: "peer-access-request",
         peerId,
         claim,
+        expiresInMs,
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Ask the host to confirm an inbound media request (camera/microphone) from a
+   * remote peer (Decision 2: Tier-2 native-confirm gate). This is the only
+   * approval path for `p2p-hub:media:v1` — the browser's own `getUserMedia`
+   * permission UI is deliberately not part of this flow.
+   *
+   * Fails closed: no confirmer, a confirmer that throws, or a user denial all
+   * resolve to `false`. The caller treats `false` as "deny the request".
+   */
+  async confirmMediaRequest(
+    peerId: string,
+    mediaKind: MediaKind,
+    requested: MediaStreamParams | undefined,
+    expiresInMs: number,
+  ): Promise<boolean> {
+    if (!this.confirmation.confirmTier2) {
+      return false;
+    }
+    try {
+      return await this.confirmation.confirmTier2({
+        kind: "media-access-request",
+        peerId,
+        mediaKind,
+        requested,
+        summary: buildMediaRequestSummary({
+          protocol: MEDIA_PROTOCOL_ID,
+          version: MEDIA_PROTOCOL_VERSION,
+          kind: mediaKind,
+          requested,
+        }),
         expiresInMs,
       });
     } catch {

@@ -162,7 +162,7 @@ publieke webserver hoef te draaien."
 ## Toekomstige Capabilities: Agent Identity & Streaming Guidelines
 
 Formeel vastgelegde architectuurbesluiten. **Status: besluit 1 gebouwd (A1 Slice 1 + 2,
-`ed26400` + volgend), besluiten 2 en 3 nog niet gebouwd.** Details en slice-plan:
+`ed26400` + volgend), besluit 2 gebouwd (A1 Slice 3), besluit 3 nog niet gebouwd.** Details en slice-plan:
 `docs/agent-identity-streaming-design.md`.
 
 ### 1. Agent-identiteit: eigen, afgeleide PeerID (child-keypair)
@@ -224,6 +224,25 @@ Formeel vastgelegde architectuurbesluiten. **Status: besluit 1 gebouwd (A1 Slice
   native bevestigingsflow van de shell lopen als execute-skill, vault-access of
   `peersite.requestAccess`. Een P2P-media-request mag nooit via een lichter
   "browser-popupje" worden afgewikkeld.
+
+#### Implementatiestatus (A1, Slice 3)
+
+- **Gebouwd:** `p2p-hub:media:v1` wire-contract in de SDK
+  (`sdk/src/media-contract.ts`: fail-closed parsing, canonieke bytes, geen
+  identity/token-velden op de wire); nieuw `media-access-request` prompt-kind in
+  `TrustTierGate` via `confirmMediaRequest` (mirrors `confirmPeerAccess`);
+  `core.media.request`-skill in `apps/core-server/src/media.ts`. De skill:
+  - parsed de envelope fail-closed (typed error, nooit doorlaten);
+  - vereist een transport-verified `context.peerId` (Fase 1B-identiteit; een
+    anonymous/caller-supplied identiteit wordt geweigerd);
+  - gate elke grant door `confirmMediaRequest` — geen confirmer, een denial of
+    een throw ⇒ `denied` (fail-closed);
+  - `remote: { gate: "verified-contact" }` (media is gevoelig: alleen een
+    gevestigde relatie bereikt de native prompt);
+  - is niet HTTP-geëxposeerd (de lokale HTTP-bridge is geen media-request-oppervlak);
+  - heeft een per-peer cooldown tegen prompt-spam.
+  De eigenlijke stream-transport is buiten scope; een grant is het geverifieerde
+  oordeel dat een toekomstig transport zou consumeren.
 
 ### 3. Real-time traffic patterns vs. discrete acties
 
