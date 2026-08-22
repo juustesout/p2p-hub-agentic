@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node: [20, 22]
     steps:
       - uses: actions/checkout@v4
@@ -24,8 +24,11 @@ jobs:
         run: npm ci
       - name: Build (tsc -b)
         run: npm run build
-      - name: Test all workspaces (unit + testlab multi-peer)
-        run: npm test
+      - name: Unit tests (all workspaces)
+        run: npm run test:unit
+      - name: Multi-peer smoke scenario (3 in-process PluginHosts, real mDNS/TLS)
+        timeout-minutes: 10
+        run: npm run test:smoke
 
   rust:
     name: Rust check (${{ matrix.os }})
@@ -33,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     defaults:
       run:
         working-directory: apps/desktop-shell/src-tauri
