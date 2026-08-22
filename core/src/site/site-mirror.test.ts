@@ -39,6 +39,19 @@ test("mirrorDestination keeps absolute paths inside the root", () => {
   assert.equal(dest, path.join(path.resolve("/mirror"), "etc", "passwd"));
 });
 
+test("mirrorDestination rejects empty and non-string paths", () => {
+  assert.equal(mirrorDestination("/mirror", ""), null);
+  assert.equal(mirrorDestination("/mirror", "/"), null);
+  assert.equal(
+    mirrorDestination("/mirror", null as unknown as string),
+    null,
+  );
+  assert.equal(
+    mirrorDestination("/mirror", undefined as unknown as string),
+    null,
+  );
+});
+
 test("mirrorFetchAndStore writes decoded bytes byte-exact", async () => {
   const mirrorRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mirror-"));
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0x7f]);

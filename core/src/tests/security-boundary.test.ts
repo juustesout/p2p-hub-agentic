@@ -325,6 +325,78 @@ test("validateActionPayload rejects non-data values in data", () => {
   );
 });
 
+test("validateActionPayload enforces size, count and depth limits", () => {
+  const base = { actionId: "chess.invite", type: "invitation", title: "x" };
+
+  assert.throws(
+    () => validateActionPayload({ ...base, data: { s: "a".repeat(10_001) } }),
+    InvalidActionPayloadError,
+    "data string over the 10k cap",
+  );
+
+  assert.throws(
+    () => validateActionPayload({ ...base, data: { items: Array(501).fill("x") } }),
+    InvalidActionPayloadError,
+    "data array over the 500-item cap",
+  );
+
+  const tooManyKeys = Object.fromEntries(
+    Array.from({ length: 501 }, (_, i) => [`k${i}`, 1]),
+  );
+  assert.throws(
+    () => validateActionPayload({ ...base, data: tooManyKeys }),
+    InvalidActionPayloadError,
+    "data object over the 500-key cap",
+  );
+
+  let deep: unknown = 1;
+  for (let i = 0; i < 10; i++) {
+    deep = [deep];
+  }
+  assert.throws(
+    () => validateActionPayload({ ...base, data: { deep } }),
+    InvalidActionPayloadError,
+    "data nested past MAX_OBJECT_DEPTH",
+  );
+});
+
+test("validateActionPayload rejects empty/oversized identifiers and title", () => {
+  assert.throws(() => validateActionPayload({ actionId: "", type: "invitation", title: "x" }));
+  assert.throws(() => validateActionPayload({ actionId: "a".repeat(129), type: "invitation", title: "x" }));
+  assert.throws(() => validateActionPayload({ actionId: "chess.invite", type: "", title: "x" }));
+  assert.throws(() => validateActionPayload({ actionId: "chess.invite", type: "in vite", title: "x" }));
+  assert.throws(() => validateActionPayload({ actionId: "chess.invite", type: "a".repeat(65), title: "x" }));
+  assert.throws(() => validateActionPayload({ actionId: "chess.invite", type: "invitation", title: "" }));
+  assert.throws(() => validateActionPayload({ actionId: "chess.invite", type: "invitation", title: "a".repeat(501) }));
+});
+
+test("validateActionPayload rejects forbidden keys at any nesting level", () => {
+  assert.throws(
+    () => validateActionPayload({ actionId: "x", type: "y", title: "t", constructor: 1 }),
+    InvalidActionPayloadError,
+  );
+  assert.throws(
+    () =>
+      validateActionPayload({
+        actionId: "x",
+        type: "y",
+        title: "t",
+        data: { nested: { prototype: 1 } },
+      }),
+    InvalidActionPayloadError,
+  );
+});
+
+test("validateActionPayload accepts primitive data values and null", () => {
+  const result = validateActionPayload({
+    actionId: "chess.invite",
+    type: "invitation",
+    title: "x",
+    data: { n: 5, b: true, z: null, arr: [1, "two", false] },
+  });
+  assert.deepEqual(result.data, { n: 5, b: true, z: null, arr: [1, "two", false] });
+});
+
 // ---------------------------------------------------------------------------
 // Deterministic fuzzing: the guards must never crash on arbitrary input
 // ---------------------------------------------------------------------------
