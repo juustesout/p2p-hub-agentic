@@ -283,10 +283,11 @@ test("boot tokens never leak into server console output on any token-bearing pat
 
   const { server, port } = await startServer(secret);
   try {
-    // A correct query-string token is accepted on HTTP too (isAuthorized reads
-    // tokenFromQuery for both surfaces); a wrong one must be rejected.
-    const goodTokenInUrl = await request(port, `/api/health?token=${secret}`);
-    assert.equal(goodTokenInUrl.status, 200);
+    // The query-string token is accepted ONLY on /ws (browser WebSocket API
+    // cannot set headers). On /api/* it must be rejected outright — a query
+    // string would otherwise put the token in access logs / browser history.
+    const tokenInUrl = await request(port, `/api/health?token=${secret}`);
+    assert.equal(tokenInUrl.status, 401, "query-string token must not auth /api/*");
 
     const wrongTokenInUrl = await request(port, `/api/health?token=wrong-${secret}`);
     assert.equal(wrongTokenInUrl.status, 401);
@@ -301,9 +302,9 @@ test("boot tokens never leak into server console output on any token-bearing pat
     });
     assert.equal(ok.status, 200);
 
-    const malformedBody = await request(port, `/api/execute?token=${secret}`, {
+    const malformedBody = await request(port, "/api/execute", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${secret}` },
       body: "{not json",
     });
     assert.equal(malformedBody.status, 400);

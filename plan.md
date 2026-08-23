@@ -283,12 +283,19 @@ Formeel vastgelegde architectuurbesluiten. **Status: besluit 1 gebouwd (A1 Slice
   positie-updates) is een latere uitbreiding; de broker-limiter dekt vandaag de
   Tier-1 telemetry-calls.
 
-## Fase 3: OS-level plugin-sandboxing (proces-isolatie)
+## Fase 3: plugin-isolatie via child-proces (proces-isolatie, GEEN OS-level sandbox)
 
 Na 2B (capability-matrix-verscherping) en het agent-identiteit/media/telemetrie-werk
-(A1) is OS-level proces-isolatie de volgend geaccordeerde stap. De vertrouwensgrens
-blijft "Ed25519-sleutelbezitter = in-process toegang" totdat de sandbox de plugin
-uit het hostproces tilt. Uitgevoerd in slices; Slice 1 is de dependency-vrije IPC
+(A1) is proces-isolatie de volgend geaccordeerde stap. **Belangrijke naamgeving**:
+dit is *process isolation voor crash/abuse-containment*, géén OS-level security
+sandbox — een plugin in het child-proces draait nog steeds als dezelfde OS-user
+met volledige `require("fs")`/`require("net")`/`require("child_process")`-toegang
+binnen dat proces. De `ctx`-shim fail-closed de plugin-facing capability-API maar
+restrict de Node-module-loader niet (geen `--experimental-policy`, geen
+`--permission`-model). De vertrouwensgrens blijft "Ed25519-sleutelbezitter =
+in-process toegang"; de isolatie beschermt de host tegen een *kapotte/kwaadaardig
+misbruikende* plugin (crash, hang, geheugen, spin) maar niet tegen een plugin die
+bewust OS-calls doet. Uitgevoerd in slices; Slice 1 is de dependency-vrije IPC
 engine + wire protocol.
 
 **Slice 1 (gebouwd): sandbox IPC engine (`core/src/sandbox/` + `sdk/src/sandbox/`)**
@@ -348,7 +355,9 @@ spoofing onmogelijk; (3) TaskBroker blijft het enige remote/agent-authorization 
   als iemand het allowlist; env = `filteredEnv(envAllowlist)`. stderr-forwarding optioneel.
 - **`core/src/sandbox/runner.ts`** — niet meer alleen schel: laadt nu de plugin zelf.
   `readSandboxManifest` (id tegen de manifest-id-regel, entry niet-escape uit de dir),
-  entry via `require`, `resolveSandboxActivate` (CJS `{ default }` / dynamic-import-genest),
+  entry via **plain Node `require`** (geen module-loader-restrictie — de child heeft
+  gewoon `require("fs")`/`require("net")`/`require("child_process")`, zie de
+  naamgeving hierboven), `resolveSandboxActivate` (CJS `{ default }` / dynamic-import-genest),
   `activate(ctx)`. **Fail-closed `ctx`-shim**: echt = `skills.register/unregister`
   (child→host request `skill:register` met `{ skill, options }`, wacht op ack),
   `timers` (setTimeout/setInterval → Disposable), `onDispose`; stubs = `storage`/`hooks`/
@@ -391,6 +400,11 @@ spoofing onmogelijk; (3) TaskBroker blijft het enige remote/agent-authorization 
 
 **Open (Slice 3+):** privilege-decoupling (laagste privileges per capability),
 host-side `PluginHost`-integratie (sandboxed lifecycle aan het bestaande boot- en
-deactivate-pad haken), verdere capability-proxy's, en de container-optie als
-enterprise-afweging. De `PluginContext`-capabilities buiten skill-executie blijven
-fail-closed afwezig tot een latere slice ze per-stuk proxied.
+deactivate-pad haken), verdere capability-proxy's, de container-optie als
+enterprise-afweging, én (als OS-level isolatie ooit gewenst wordt) een
+module-loader-restrictie in de child (bijv. `--experimental-policy` of het
+`--permission`-model) die `require("fs")`/`require("net")`/
+`require("child_process")` daadwerkelijk blokkeert — zonder dat is dit GEEN
+security-sandbox tegen kwaadwillige plugins. De `PluginContext`-capabilities
+buiten skill-executie blijven fail-closed afwezig tot een latere slice ze
+per-stuk proxied.

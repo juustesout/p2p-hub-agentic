@@ -1,13 +1,21 @@
 /**
  * Fase 3 Slice 2 — process launcher.
  *
- * Spawns the {@link runner} as an OS-level sandbox process with hardening
+ * Spawns the {@link runner} as a hardened child process with hardening
  * flags and a strictly filtered environment, and wires its stdin/stdout to an
  * {@link IPCSocketTransport}. This is deliberately `spawn`, not `fork`:
  * `fork()` adds Node's internal `'ipc'` channel (`child.send`/`message`),
  * which would bypass the length-prefixed framing that is our security
  * boundary. With plain `spawn` + stdio pipes, *exactly* one channel exists and
  * it is the framed protocol.
+ *
+ * IMPORTANT — what this is, and is not. This is **process isolation for
+ * crash/abuse containment**, not an OS-level security sandbox. The child runs
+ * as the same OS user and retains full access to Node's built-in modules: a
+ * plugin inside the sandbox can still `require("fs")` / `require("net")` /
+ * `require("child_process")` directly. The hardening flags below only close
+ * the obvious escape hatches; the `ctx` shim only fail-closes the
+ * plugin-facing capability API. It does not restrict the module loader.
  *
  * Hardening flags (each is a deliberate fail-closed choice):
  *

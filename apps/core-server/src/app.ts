@@ -490,7 +490,7 @@ export class CoreServer {
   // ---------------------------------------------------------------------
 
   private handleSocket(socket: WebSocket, request: http.IncomingMessage): void {
-    if (!this.isAuthorized(request)) {
+    if (!this.isAuthorizedWs(request)) {
       socket.close(1008, "unauthorized");
       return;
     }
@@ -1390,10 +1390,34 @@ export class CoreServer {
     return token;
   }
 
-  /** Authorize a request via its `Authorization` header or `?token=` query. */
+  /**
+   * Authorize an HTTP `/api/*` request via the `Authorization` header only.
+   * A `?token=` query string on an API request would put the boot token in
+   * server access logs, browser history and any reverse-proxy logs — an
+   * avoidable exposure, because a fetch/XHR caller can always set a header.
+   * The query string remains the *only* accepted path for `/ws` (see
+   * {@link isAuthorizedWs}), where the browser WebSocket API forces it.
+   */
   private isAuthorized(req: http.IncomingMessage): boolean {
+    return safeTokenEqual(
+      tokenFromAuthorization(req.headers.authorization),
+      this.bootToken,
+    );
+  }
+
+  /**
+   * Authorize a `/ws` upgrade via the `Authorization` header or `?token=`
+   * query string. The query string is accepted here only because the browser
+   * WebSocket API cannot attach custom headers to the handshake; this is the
+   * accepted risk documented in CLAUDE.md (mitigated operationally: loopback,
+   * short-lived per-boot token, never logged).
+   */
+  private isAuthorizedWs(req: http.IncomingMessage): boolean {
     return (
-      safeTokenEqual(tokenFromAuthorization(req.headers.authorization), this.bootToken) ||
+      safeTokenEqual(
+        tokenFromAuthorization(req.headers.authorization),
+        this.bootToken,
+      ) ||
       safeTokenEqual(tokenFromQuery(req), this.bootToken)
     );
   }

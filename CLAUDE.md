@@ -223,6 +223,13 @@ This is a deliberate, accepted compromise:
   subprotocol or first-message auth would only move the exposure, not remove
   it.
 
+The query-string path is **restricted to `/ws` only**. Every `/api/*` request
+authenticates via the `Authorization: Bearer` header alone — a fetch/XHR
+caller can always set a header, so a `?token=` on an API request would be pure
+avoidable exposure (query strings land in access logs / browser history /
+referrer). This split is enforced in `isAuthorized` (header-only) vs
+`isAuthorizedWs` (header or query) in `apps/core-server/src/app.ts`.
+
 Do not "fix" this by logging the token or by moving the token into an HTTP
 header the browser cannot set. The mitigation is operational: keep the bridge
 bound to loopback (default), keep the token short-lived (regenerated each
@@ -295,8 +302,21 @@ When asked to review or verify security-relevant work in this repo:
   can receive (but never answer) those calls. Revisit if the bridge protocol
   gains outbound capabilities beyond skill invocation.
 - **Fase 2B scope decision:** capability-matrix tightening without process
-  isolation (Optie 1). OS-level plugin sandboxing is a documented accepted risk
-  deferred to Fase 3 — the Ed25519 key holder is the trust boundary today.
+  isolation (Optie 1). — **updated by Fase 3 Slice 1-2 (see below):** a process
+  sandbox now exists, but it is *process isolation for crash/abuse containment*,
+  NOT an OS-level security sandbox against a malicious plugin. The trust
+  boundary is unchanged: a plugin loaded in the sandbox still runs as the same
+  OS user with full `require("fs")` / `require("net")` / `require("child_process")`
+  access inside its child process — the `ctx` shim only fail-closes the
+  plugin-facing capability API, it does not restrict the Node module loader
+  (no `--experimental-policy`, no `--permission` model). What the sandbox
+  actually guarantees: a crashing/hanging/memory-eating/misbehaving plugin is
+  killed (timeout/heartbeat/SIGKILL) without taking the host down, no native
+  `.node` addons (`--no-addons`), no `eval`/`new Function`
+  (`--disallow-code-generation-from-strings`), a bounded heap, a filtered env
+  (no host credentials, `NODE_OPTIONS` always stripped), and the framed IPC
+  channel is the only host interaction. The Ed25519 key holder is the trust
+  boundary for *malicious* code, still today.
 - Plugin `id` values are allowed to contain `.`, so two plugins with
   colliding dotted ids (e.g. `"a.b"` and `"a"` registering skill `"b.x"`)
   can produce the same broker skill key. Theoretical today (single

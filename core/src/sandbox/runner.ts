@@ -20,6 +20,16 @@
  *   {@link SandboxCapabilityUnavailableError} when touched — Slice 2 only
  *   proxies skill execution. On success, skills announced during `activate`
  *   have been registered with the host.
+ *
+ * NOTE — this is **process isolation for crash containment**, not an OS-level
+ * security sandbox. The entry module is loaded with the plain Node `require`
+ * and the child keeps full access to Node's built-in modules, so a plugin can
+ * still call `require("fs")`/`require("net")`/`require("child_process")`
+ * directly (running as the same OS user). The fail-closed `ctx` and the
+ * hardening flags (`--no-addons`, `--disallow-code-generation-from-strings`,
+ * `--max-old-space-size`) contain accidental bugs and the obvious escape
+ * hatches; they do not stop deliberate module misuse.
+ *
  * - `invokeSkill` `{ skill, payload, context }` — dispatch to a locally
  *   registered handler; resolves `{ ok: true, result }` or `{ ok: false,
  *   error }` (a throwing handler is a normal business outcome, the sandbox
