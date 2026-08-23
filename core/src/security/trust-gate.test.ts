@@ -93,6 +93,7 @@ test("the confirmer receives the critical-settings request", async () => {
   assert.deepEqual(seen, {
     kind: "critical-settings",
     summary: "expose hub beyond loopback",
+    initiator: "operator",
   });
 });
 
@@ -115,6 +116,7 @@ test("confirmPeerAccess forwards the peer-access-request kind and returns true o
     peerId: "00".repeat(32),
     claim: "read your site",
     expiresInMs: 3_600_000,
+    initiator: "operator",
   });
 });
 
@@ -164,6 +166,7 @@ test("confirmMediaRequest forwards the media-access-request kind with a safe sum
     requested: { width: 1280, height: 720, frameRate: 60 },
     summary: "camera access (1280x720, 60 fps)",
     expiresInMs: 60_000,
+    initiator: "operator",
   });
 });
 

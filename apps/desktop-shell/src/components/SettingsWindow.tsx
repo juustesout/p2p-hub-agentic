@@ -116,6 +116,7 @@ export function SettingsWindow() {
       const confirmed = await confirmTier2({
         kind: "critical-settings",
         summary: summaryFor(risk),
+        initiator: "operator",
       });
       if (!confirmed) {
         // Roll back any optimistic toggles to the last server-confirmed state.

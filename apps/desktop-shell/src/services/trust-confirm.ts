@@ -14,13 +14,34 @@
  * locally rather than imported).
  */
 
+/**
+ * Who initiated the change being confirmed. `"operator"` for a human-driven
+ * action; `` `agent:${label}` `` for an action initiated by a declared agent
+ * identity. The native dialog names the agent so an agent-initiated action can
+ * never be mistaken for an operator-initiated one.
+ */
+export type ConfirmationInitiator = "operator" | `agent:${string}`;
+
 export type ConfirmationRequest =
-  | { kind: "critical-settings"; summary: string }
+  | {
+      kind: "critical-settings";
+      summary: string;
+      initiator: ConfirmationInitiator;
+    }
   | {
       kind: "peer-access-request";
       peerId: string;
       claim: string;
       expiresInMs: number;
+      initiator: ConfirmationInitiator;
+    }
+  | {
+      kind: "agent-task-approval";
+      taskId: string;
+      skill: string;
+      agentLabel: string;
+      peerId: string;
+      initiator: ConfirmationInitiator;
     };
 
 const CONFIRM_TIMEOUT_MS = 60_000;

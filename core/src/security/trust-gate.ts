@@ -28,17 +28,36 @@ export class TrustConfirmationDeniedError extends Error {
 }
 
 /**
+ * Who initiated the change being confirmed. `"operator"` for a human-driven
+ * action; `` `agent:${label}` `` for an action initiated by a declared agent
+ * identity. The native dialog must surface the label (`"Agent <label> wants
+ * to ..."`), never a generic "a request is pending". This is a platform
+ * verdict, set at the confirm-request construction site from a
+ * transport/platform-verified initiator — never from a caller-supplied field.
+ */
+export type ConfirmationInitiator = "operator" | `agent:${string}`;
+
+/**
  * A single native-confirmation prompt, discriminated by `kind` so the host can
  * render the right dialog with exactly the fields it needs — never guessing
  * which loose positional parameters belong together.
+ *
+ * Every variant carries a mandatory `initiator` (no default): a confirm call
+ * that omits who initiated the change is a compile-time error, so an
+ * agent-initiated action can never be shown as an operator-initiated one.
  */
 export type ConfirmationRequest =
-  | { kind: "critical-settings"; summary: string }
+  | {
+      kind: "critical-settings";
+      summary: string;
+      initiator: ConfirmationInitiator;
+    }
   | {
       kind: "peer-access-request";
       peerId: string;
       claim: string;
       expiresInMs: number;
+      initiator: ConfirmationInitiator;
     }
   | {
       kind: "agent-task-approval";
@@ -46,6 +65,7 @@ export type ConfirmationRequest =
       skill: string;
       agentLabel: string;
       peerId: string;
+      initiator: ConfirmationInitiator;
     }
   | {
       kind: "media-access-request";
@@ -54,6 +74,7 @@ export type ConfirmationRequest =
       requested?: MediaStreamParams;
       summary: string;
       expiresInMs: number;
+      initiator: ConfirmationInitiator;
     };
 
 /**
@@ -125,6 +146,10 @@ export class TrustTierGate {
       confirmed = await this.confirmation.confirmTier2({
         kind: "critical-settings",
         summary,
+        // Settings changes are operator-driven: only a human interacts with
+        // the settings surface. An agent-driven settings change would route
+        // through its own initiator-tagged confirm (never this default).
+        initiator: "operator",
       });
     } catch {
       throw new TrustConfirmationDeniedError(tier, "confirmation failed");
@@ -160,6 +185,7 @@ export class TrustTierGate {
         peerId,
         claim,
         expiresInMs,
+        initiator: "operator",
       });
     } catch {
       return false;
@@ -197,6 +223,7 @@ export class TrustTierGate {
           requested,
         }),
         expiresInMs,
+        initiator: "operator",
       });
     } catch {
       return false;
