@@ -17,6 +17,37 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 /// The dialog must surface an agent initiator by name ("Agent <label> wants
 /// to ...") so an agent-initiated action can never be mistaken for an
 /// operator-initiated one.
+/// The device class a media-access request asks for. Mirrors the SDK's
+/// `MediaKind` (`"camera" | "microphone"`); there is deliberately no `"both"`
+/// value — a request for both device classes is two separate requests.
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MediaKind {
+    Camera,
+    Microphone,
+}
+
+impl std::fmt::Display for MediaKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MediaKind::Camera => "camera",
+            MediaKind::Microphone => "microphone",
+        })
+    }
+}
+
+/// Requested stream parameters, every field optional. Mirrors the SDK's
+/// `MediaStreamParams`; a bare kind is a valid request for the default.
+#[derive(Deserialize)]
+struct MediaStreamParams {
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default, rename = "frameRate")]
+    frame_rate: Option<u32>,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum ConfirmationRequest {
@@ -40,6 +71,18 @@ enum ConfirmationRequest {
         agent_label: String,
         #[serde(rename = "peerId")]
         peer_id: String,
+        initiator: String,
+    },
+    MediaAccessRequest {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        #[serde(rename = "mediaKind")]
+        media_kind: MediaKind,
+        #[serde(default)]
+        requested: Option<MediaStreamParams>,
+        summary: String,
+        #[serde(rename = "expiresInMs")]
+        expires_in_ms: u64,
         initiator: String,
     },
 }
@@ -93,6 +136,33 @@ fn prompt_for(request: &ConfirmationRequest) -> (String, String) {
                     "{who} wants to run the skill \"{skill}\" (task {task_id}) as peer {peer_id}.\n\nApprove this action?"
                 ),
                 "Approve agent action?".to_string(),
+            )
+        }
+        ConfirmationRequest::MediaAccessRequest {
+            peer_id,
+            media_kind,
+            requested,
+            summary,
+            expires_in_ms,
+            initiator,
+        } => {
+            let device = media_kind.to_string();
+            let settings = match requested {
+                Some(MediaStreamParams { width: Some(w), height: Some(h), frame_rate, .. }) => {
+                    match frame_rate {
+                        Some(fps) => format!(" at {w}x{h}, {fps} fps"),
+                        None => format!(" at {w}x{h}"),
+                    }
+                }
+                _ => String::new(),
+            };
+            let seconds = expires_in_ms / 1000;
+            (
+                format!(
+                    "{} grant peer {peer_id} access to the {device}{settings}.\n\n{summary}\n\nGrant access for {seconds} seconds?",
+                    initiator_wants(initiator)
+                ),
+                "Allow media access?".to_string(),
             )
         }
     }
@@ -259,6 +329,75 @@ mod tests {
             missing.is_err(),
             "a confirmation without an initiator must be rejected"
         );
+    }
+
+    #[test]
+    fn deserializes_media_access_request_with_exact_camel_case_fields() {
+        // Literal wire form as produced by `media-gate.ts` /
+        // `confirmMediaRequest`: `peerId`, `mediaKind`, `expiresInMs` and the
+        // nested `frameRate` are camelCase. Per-field renames make this parse.
+        let request: ConfirmationRequest = serde_json::from_str(
+            r#"{"kind":"media-access-request","peerId":"abc123","mediaKind":"camera","requested":{"width":1280,"height":720,"frameRate":60},"summary":"camera access","expiresInMs":60000,"initiator":"operator"}"#,
+        )
+        .expect("media-access-request wire form must parse");
+        assert!(matches!(
+            request,
+            ConfirmationRequest::MediaAccessRequest {
+                peer_id,
+                media_kind,
+                requested,
+                summary,
+                expires_in_ms,
+                initiator,
+            } if peer_id == "abc123"
+                && matches!(media_kind, MediaKind::Camera)
+                && matches!(requested, Some(MediaStreamParams { width: Some(1280), height: Some(720), frame_rate: Some(60) }))
+                && summary == "camera access"
+                && expires_in_ms == 60_000
+                && initiator == "operator"
+        ));
+    }
+
+    #[test]
+    fn rejects_snake_case_media_fields_that_do_not_match_the_wire_shape() {
+        // Same discipline as the peer-access fixture: snake_case field names
+        // must not parse, and an unknown `mediaKind` value must not parse.
+        let snake_case_fields = serde_json::from_str::<ConfirmationRequest>(
+            r#"{"kind":"media-access-request","peer_id":"abc123","media_kind":"camera","summary":"camera access","expires_in_ms":60000,"initiator":"operator"}"#,
+        );
+        assert!(
+            snake_case_fields.is_err(),
+            "snake_case field names must not match the wire contract"
+        );
+
+        let unknown_kind = serde_json::from_str::<ConfirmationRequest>(
+            r#"{"kind":"media-access-request","peerId":"abc123","mediaKind":"both","summary":"camera access","expiresInMs":60000,"initiator":"operator"}"#,
+        );
+        assert!(
+            unknown_kind.is_err(),
+            "an unknown mediaKind must not parse (no \"both\" on the wire)"
+        );
+    }
+
+    #[test]
+    fn media_access_prompt_names_the_device_and_duration() {
+        let request = ConfirmationRequest::MediaAccessRequest {
+            peer_id: "abc123".to_string(),
+            media_kind: MediaKind::Camera,
+            requested: Some(MediaStreamParams {
+                width: Some(1280),
+                height: Some(720),
+                frame_rate: Some(60),
+            }),
+            summary: "camera access".to_string(),
+            expires_in_ms: 60_000,
+            initiator: "operator".to_string(),
+        };
+        let (message, title) = prompt_for(&request);
+        assert!(message.contains("peer abc123 access to the camera at 1280x720, 60 fps"));
+        assert!(message.contains("camera access"));
+        assert!(message.contains("Grant access for 60 seconds?"));
+        assert_eq!(title, "Allow media access?");
     }
 
     #[test]
