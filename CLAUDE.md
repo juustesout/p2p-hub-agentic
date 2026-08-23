@@ -271,8 +271,9 @@ When asked to review or verify security-relevant work in this repo:
   noted for whenever that plugin gets revisited.~~ — **resolved**: the regex
   now has word boundaries `\b(verjaardag|birthday)\b`
   (`plugins/birthday-cards/src/index.ts`).
-- **Agent identity & streaming guidelines (formal decision, not built):** see
-  plan.md "Toekomstige Capabilities: Agent Identity & Streaming Guidelines".
+- **Agent identity & streaming guidelines (A1, built):** see
+  plan.md "Toekomstige Capabilities: Agent Identity & Streaming Guidelines" and
+  `docs/agent-identity-streaming-design.md` for the implementation design.
   (1) An agent always gets its *own derived* identity (child-keypair / separate
   IdentityManager instance), never the operator's peerId — for auditability,
   differentiated trust-gates (agent-initiated `sendTask`/skill may require a
