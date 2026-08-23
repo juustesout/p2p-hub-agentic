@@ -361,6 +361,52 @@ When asked to review or verify security-relevant work in this repo:
   yet. Don't "fix" the gap with `rejectUnauthorized: false` (CLAUDE.md
   principle #4) — pin the fingerprint via the already-trusted mDNS TXT side
   channel and verify it after `secureConnect`, when that work happens.
+- **`network-libp2p` relay traffic is observable to the relay.** The WAN
+  transport (`plugins/network-libp2p`) reaches peers behind NAT through an
+  operator-configured circuit-relay v2 node, so that relay can observe that
+  "peer A talks to peer B" (the encrypted stream's endpoints), exactly like a
+  public relay/bootstrap in any P2P stack. Nothing is hidden from the relay at
+  the transport layer: the p2p-hub wire contract's Ed25519 identity binding
+  authenticates the *application-level* peers, but the relay still sees the
+  libp2p PeerIds and the volume/timing of traffic between them. This is a
+  deliberate, documented trade-off of the invite-string relay model (compare
+  with the network-light mDNS LAN model, which leaks only that a node with a
+  given fingerprint exists). A future "relay privacy" improvement would be
+  onion- or cascade-routing; it is out of scope for the current slice and
+  should not be silently assumed.
+- **`network-libp2p` channel binding is a transport-*identity* pin, not a
+  per-session one — deliberately.** network-light's `certFingerprint` was the
+  SHA-256 of a *rotating* self-signed TLS cert (new per boot); over libp2p the
+  signed field is `SHA-256(libp2p PeerId)`, which is a long-lived identity key.
+  js-libp2p's Noise exposes **no** session-specific exporter/transcript hash to
+  the application (verified against `@chainsafe/libp2p-noise@17`: the handshake
+  result is only `{ payload, encrypt, decrypt }`, the internal handshake hash
+  `h` never escapes, and `prologueBytes` is a handshake *input*, not an output),
+  so the bind-this-signature-to-this-single-session property cannot be
+  recreated and is deliberately dropped. This is acceptable because (a) the
+  per-session nonces already are the replay defense, and (b) Noise XX
+  authenticates the PeerId into the session transcript *end-to-end* — a
+  circuit-relay node only forwards bytes and never terminates the Noise session,
+  so it cannot substitute its own PeerId/cert, which is exactly the MITM a
+  self-signed-cert pin existed to defeat. Residual accepted gap: a captured
+  valid auth block is defeated only by the nonce check, never by a rotated
+  credential. Do not "fix" this by hashing the PeerId again, and do not describe
+  `peerFingerprint` as a TLS-cert analog — it is a transport-identity pin (see
+  the "Channel binding" section in
+  `plugins/network-libp2p/src/network-libp2p-provider.ts`).
+- **libp2p is an ongoing dependency-maintenance burden.** `network-libp2p`
+  pins a fixed slice of the libp2p v3 ecosystem (`libp2p`, `@libp2p/tcp`,
+  `@libp2p/circuit-relay-v2`, `@libp2p/autonat`, `@libp2p/dcutr`,
+  `@libp2p/identify`, noise, yamux, `peer-id`, `multiaddr`). The libp2p
+  packages move fast (breaking major releases, changing service dependencies —
+  e.g. circuit-relay-v2 needing the `identify` service, and reservation
+  machinery that is partially internal/untyped like the `components` bag), and
+  several are ESM-only, which is why the plugin is built as ESM while the rest
+  of the repo is CJS. Keep the pins exact and re-run the plugin's
+  dependency-surface test on any bump; treat a libp2p dependency upgrade as a
+  review-worthy change, not a routine chore, and be ready for the "reservation
+  via `addresses.listen` on `/p2p-circuit`" mechanism to shift between
+  releases.
 
 ## Known blind spots & CI limitations
 

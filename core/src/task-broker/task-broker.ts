@@ -25,6 +25,13 @@ import {
   TelemetryRateLimitExceededError,
   TelemetryRateLimiter,
 } from "./telemetry-rate-limiter";
+import type { PeerRateLimitConfig } from "./peer-rate-limiter";
+import {
+  DEFAULT_PEER_RATE_LIMIT,
+  PEER_RATE_LIMIT_ERROR_CODE,
+  PeerRateLimitExceededError,
+  PeerRateLimiter,
+} from "./peer-rate-limiter";
 
 /**
  * Key used in the telemetry rate limiter for anonymous remote callers (no
@@ -144,6 +151,17 @@ export interface TaskBrokerOptions {
    * config is never "unlimited").
    */
   telemetryRateLimit?: TelemetryRateLimitConfig;
+  /**
+   * Deel 1: per-peer sliding-window cap on *all* network-originated tasks
+   * (`handleRemote`), across every skill a peer calls. Defaults to
+   * {@link DEFAULT_PEER_RATE_LIMIT} — network tasks are always rate-limited
+   * per peer, even when no config is supplied (fail-closed: a missing config
+   * is never "unlimited"). Local (`handle`) and HTTP-bridge (`handleHttp`)
+   * callers are never counted. network-libp2p refuses to start unless the
+   * broker exposes {@link TaskBroker.hasRateLimiting}, so a peer budget is a
+   * hard precondition for that transport.
+   */
+  peerRateLimit?: PeerRateLimitConfig;
 }
 
 const DEFAULT_MAX_CONCURRENT_TASKS = 100;
@@ -165,6 +183,7 @@ export class TaskBroker {
   private readonly agentGate: AgentGate | undefined;
   private readonly taskApprovalGate: TaskApprovalGate | undefined;
   private readonly telemetryRateLimiter: TelemetryRateLimiter;
+  private readonly peerRateLimiter: PeerRateLimiter;
   private activeTasks = 0;
 
   constructor(options: TaskBrokerOptions = {}) {
@@ -175,6 +194,9 @@ export class TaskBroker {
     this.taskApprovalGate = options.taskApprovalGate;
     this.telemetryRateLimiter = new TelemetryRateLimiter(
       options.telemetryRateLimit ?? DEFAULT_TELEMETRY_RATE_LIMIT,
+    );
+    this.peerRateLimiter = new PeerRateLimiter(
+      options.peerRateLimit ?? DEFAULT_PEER_RATE_LIMIT,
     );
   }
 
@@ -253,6 +275,18 @@ export class TaskBroker {
     return this.execute(task, "http", undefined);
   }
 
+  /**
+   * Deel 1: whether this broker enforces a per-peer budget on network-originated
+   * tasks. Always true — the limiter is constructed with a positive cap and
+   * there is deliberately no "unlimited" configuration. Exposed so a transport
+   * that depends on broker-level flood defence (e.g. `network-libp2p`) can gate
+   * its own start on the feature existing at all: a broker without it must
+   * refuse to host that transport loudly, never silently.
+   */
+  hasRateLimiting(): boolean {
+    return this.peerRateLimiter.isActive();
+  }
+
   private async execute(
     task: TaskRequest,
     gate: "local" | "network" | "http",
@@ -320,6 +354,25 @@ export class TaskBroker {
           taskId: task.id,
           status: "error",
           error: `skill "${task.skill}" is not authorized for this remote peer`,
+        };
+      }
+      // Deel 1: broker-wide per-peer budget on network-originated tasks,
+      // independent of the skill a peer calls (all skills share one budget).
+      // Applied after the gate so a denied caller never consumes a peer's
+      // budget; a peer over budget gets a typed error result, never dispatch
+      // and never a throw escaping the broker. Anonymous remote callers share
+      // one budget so a public `any`-gated skill cannot be flooded from unique
+      // anonymous connections.
+      const peerKey =
+        callerPeerId && callerPeerId.length > 0
+          ? callerPeerId
+          : ANONYMOUS_PEER_KEY;
+      if (!this.peerRateLimiter.allow(peerKey)) {
+        return {
+          taskId: task.id,
+          status: "error",
+          code: PEER_RATE_LIMIT_ERROR_CODE,
+          error: new PeerRateLimitExceededError(peerKey).message,
         };
       }
     }

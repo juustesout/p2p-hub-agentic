@@ -803,3 +803,150 @@ test("A1/Slice 4: listSkills exposes the capability type", async () => {
     ],
   );
 });
+
+// ---------------------------------------------------------------------------
+// Deel 1 — broker-wide per-peer rate limiting on the network path
+// ---------------------------------------------------------------------------
+
+const PEER_RATE_CONFIG = { windowMs: 1000, maxTasks: 2 };
+
+test("Deel 1: a peer over its per-minute task budget gets a typed error result", async () => {
+  const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
+  broker.registerSkill("demo.echo", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  const first = await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+  const second = await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+  const third = await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+
+  assert.equal(first.status, "ok");
+  assert.equal(second.status, "ok");
+  assert.equal(third.status, "error");
+  assert.equal(third.code, "peer-rate-limit");
+  assert.match(third.error ?? "", /per-minute network task budget/);
+});
+
+test("Deel 1: budgets are independent per peer", async () => {
+  const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
+  broker.registerSkill("demo.echo", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+  await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+  const aliceBlocked = await broker.handleRemote(
+    task({ skill: "demo.echo", peerId: ALICE }),
+  );
+  const bobFirst = await broker.handleRemote(task({ skill: "demo.echo", peerId: BOB }));
+
+  assert.equal(aliceBlocked.status, "error");
+  assert.equal(aliceBlocked.code, "peer-rate-limit");
+  assert.equal(bobFirst.status, "ok");
+});
+
+test("Deel 1: all skills share one per-peer budget", async () => {
+  const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
+  broker.registerSkill("demo.one", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+  broker.registerSkill("demo.two", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  const one = await broker.handleRemote(task({ skill: "demo.one", peerId: ALICE }));
+  const two = await broker.handleRemote(task({ skill: "demo.two", peerId: ALICE }));
+  const blocked = await broker.handleRemote(task({ skill: "demo.one", peerId: ALICE }));
+
+  assert.equal(one.status, "ok");
+  assert.equal(two.status, "ok");
+  assert.equal(blocked.status, "error");
+  assert.equal(blocked.code, "peer-rate-limit");
+});
+
+test("Deel 1: local handle() calls are never rate-limited", async () => {
+  const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
+  broker.registerSkill("vault.write", async () => "ok");
+
+  for (let i = 0; i < 20; i++) {
+    const result = await broker.handle(task({ skill: "vault.write" }));
+    assert.equal(result.status, "ok");
+  }
+});
+
+test("Deel 1: HTTP-bridge calls are never rate-limited", async () => {
+  const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
+  broker.registerSkill("calc.add", async () => "ok", {
+    localOnly: true,
+    httpExposed: true,
+  });
+
+  for (let i = 0; i < 20; i++) {
+    const result = await broker.handleHttp(task({ skill: "calc.add" }));
+    assert.equal(result.status, "ok");
+  }
+});
+
+test("Deel 1: a denied caller never consumes the peer's budget", async () => {
+  const broker = new TaskBroker({
+    peerRateLimit: PEER_RATE_CONFIG,
+    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === ALICE }),
+  });
+  broker.registerSkill("demo.read", async () => "data", {
+    localOnly: false,
+    remote: { gate: "verified-contact" },
+  });
+
+  const denied = await broker.handleRemote(task({ skill: "demo.read", peerId: BOB }));
+  assert.equal(denied.status, "error");
+  assert.equal(denied.code, undefined);
+  assert.match(denied.error ?? "", /not authorized/);
+
+  const first = await broker.handleRemote(task({ skill: "demo.read", peerId: ALICE }));
+  const second = await broker.handleRemote(task({ skill: "demo.read", peerId: ALICE }));
+  const blocked = await broker.handleRemote(task({ skill: "demo.read", peerId: ALICE }));
+
+  assert.equal(first.status, "ok");
+  assert.equal(second.status, "ok");
+  assert.equal(blocked.status, "error");
+  assert.equal(blocked.code, "peer-rate-limit");
+});
+
+test("Deel 1: anonymous remote callers share one budget", async () => {
+  const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
+  broker.registerSkill("demo.ping", async () => "pong", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  const first = await broker.handleRemote(task({ skill: "demo.ping" }));
+  const second = await broker.handleRemote(task({ skill: "demo.ping" }));
+  const blocked = await broker.handleRemote(task({ skill: "demo.ping" }));
+
+  assert.equal(first.status, "ok");
+  assert.equal(second.status, "ok");
+  assert.equal(blocked.status, "error");
+  assert.equal(blocked.code, "peer-rate-limit");
+});
+
+test("Deel 1: the window slides and frees the budget again", async () => {
+  const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
+  broker.registerSkill("demo.echo", async () => "ok", {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+  await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+  const blocked = await broker.handleRemote(task({ skill: "demo.echo", peerId: ALICE }));
+  assert.equal(blocked.code, "peer-rate-limit");
+});
+
+test("Deel 1: hasRateLimiting is true by default (network tasks always budgeted)", () => {
+  const broker = new TaskBroker();
+  assert.equal(broker.hasRateLimiting(), true);
+});

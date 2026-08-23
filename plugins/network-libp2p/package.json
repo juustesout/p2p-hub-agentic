@@ -1,0 +1,30 @@
+{
+  "name": "@p2p-hub/network-libp2p",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WAN transport over libp2p (TCP + circuit relay + hole punching) reusing the p2p-hub wire contract as a pure bytepipe",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node ../../scripts/run-tests.js"
+  },
+  "dependencies": {
+    "@p2p-hub/sdk": "0.1.0",
+    "@p2p-hub/network-light": "0.1.0",
+    "libp2p": "3.3.9",
+    "@libp2p/tcp": "11.0.27",
+    "@libp2p/circuit-relay-v2": "4.2.12",
+    "@libp2p/autonat": "3.0.27",
+    "@libp2p/dcutr": "3.0.27",
+    "@chainsafe/libp2p-noise": "17.0.0",
+    "@chainsafe/libp2p-yamux": "8.0.1",
+    "@libp2p/peer-id": "6.0.15",
+    "@multiformats/multiaddr": "13.0.3",
+    "@libp2p/identify": "4.1.13"
+  },
+  "license": "MIT"
+}
