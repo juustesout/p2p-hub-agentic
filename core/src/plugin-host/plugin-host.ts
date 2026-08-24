@@ -24,6 +24,10 @@ import { DisposerBag } from "../disposable";
 import { NetworkLightProvider } from "@p2p-hub/network-light";
 import { loadManifest, loadPlugin } from "../plugin-loader/plugin-loader";
 import { wireNetworkToBroker } from "../task-broker/wire-network";
+import {
+  CertificationError,
+  CertificationService,
+} from "../certification/certification-service";
 
 /** Strict ceiling for a single plugin's `activate()` during boot. */
 export const DEFAULT_ACTIVATION_TIMEOUT_MS = 5000;
@@ -74,6 +78,28 @@ export interface PluginHostOptions {
    * unsigned and therefore untrusted.
    */
   requireSignedPlugins?: boolean;
+  /**
+   * Fase 3 Stap 3 certification gate. When true, any plugin whose
+   * `certification.json` is missing, invalid, expired, content-mismatched or
+   * revoked is refused at boot with a typed {@link CertificationError} — only
+   * human-reviewed, certifiably-intact plugins can load. Defaults to `false`
+   * so local development keeps working; every boot still reports which plugins
+   * are uncertified. Independent of {@link requireSignedPlugins}: a plugin can
+   * be signed but uncertified and vice versa.
+   */
+  requireCertifiedPlugins?: boolean;
+  /**
+   * Known reviewer/operator public keys (64-hex, peerId format) that may have
+   * issued certificates. A certificate whose Ed25519 signature verifies under
+   * none of these keys is treated as invalid. Empty ⇒ nothing is ever
+   * certified (fail-closed).
+   */
+  reviewerPublicKeys?: string[];
+  /**
+   * Path of the revocation register JSON file. Defaults to
+   * `<dataDir>/certifications/revocations.json`.
+   */
+  certificationRevocationListPath?: string;
   /**
    * Test-only seam: constructs the network transport instead of the default
    * `NetworkLightProvider`. Tests inject a provider whose `start()` rejects so
@@ -134,12 +160,23 @@ export class PluginHost {
   private readonly pluginDirs = new Map<string, string>();
   private readonly states = new Map<string, PluginState>();
   private readonly signatures = new Map<string, "signed" | "unsigned">();
+  private readonly certificationStatus = new Map<
+    string,
+    "certified" | "uncertified"
+  >();
+  private readonly certification: CertificationService;
   private readonly activationTimeoutMs: number;
 
   constructor(private readonly options: PluginHostOptions) {
     const hooks = new HookRegistry();
     this.hooks = hooks;
     this.storages = new StorageManager(options.dataDir);
+    this.certification = new CertificationService({
+      revocationListPath:
+        options.certificationRevocationListPath ??
+        CertificationService.defaultRevocationListPath(options.dataDir),
+      reviewerPublicKeys: options.reviewerPublicKeys ?? [],
+    });
     // Fase 2A: one shared access-pass store backs both `ctx.access` (plugins)
     // and the broker's `access-pass` remote gate. A1/Slice 2: the broker's
     // agent gate resolves declared agent identities from this host's own
@@ -185,7 +222,13 @@ export class PluginHost {
       .map((entry) => entry.name)
       .sort();
 
+    // Load the revocation register before any plugin is evaluated: a corrupt
+    // register is a loud infrastructure failure (CLAUDE.md principle #9) — it
+    // must stop boot, never silently let a revoked plugin through.
+    await this.certification.load();
+
     const unsignedIds: string[] = [];
+    const uncertifiedIds: string[] = [];
 
     for (const name of subdirs) {
       const pluginDir = path.join(this.options.pluginsDir, name);
@@ -209,6 +252,33 @@ export class PluginHost {
           continue;
         }
         unsignedIds.push(manifest.id);
+      }
+
+      // Fase 3 Stap 3: the certification gate — a human-reviewed certificate
+      // whose content hash matches the plugin on disk and that is neither
+      // expired nor revoked. Always evaluated (for status reporting); only
+      // enforced when requireCertifiedPlugins is set.
+      const certCheck = await this.certification.verifyPluginCertification(
+        pluginDir,
+        manifest,
+      );
+      this.certificationStatus.set(
+        manifest.id,
+        certCheck.certified ? "certified" : "uncertified",
+      );
+      if (this.options.requireCertifiedPlugins && !certCheck.certified) {
+        const certError = new CertificationError(
+          manifest.id,
+          certCheck.reason,
+        );
+        this.states.set(manifest.id, "FAILED_ACTIVATION");
+        console.error(
+          `[plugin-host] skipping "${manifest.id}": ${certError.message}`,
+        );
+        continue;
+      }
+      if (!certCheck.certified) {
+        uncertifiedIds.push(manifest.id);
       }
 
       const disposers = new DisposerBag();
@@ -261,6 +331,16 @@ export class PluginHost {
       console.warn(
         `[plugin-host] ${unsignedIds.length} plugin(s) are unsigned and ` +
           `treated as untrusted: ${unsignedIds.join(", ")}`,
+      );
+    }
+
+    // Fase 3 Stap 3: an uncertified plugin has no human review — same
+    // discipline, loud once. A certificate missing here is not an error (dev
+    // default), it is a trust state the operator must be able to see.
+    if (uncertifiedIds.length > 0) {
+      console.warn(
+        `[plugin-host] ${uncertifiedIds.length} plugin(s) are uncertified ` +
+          `(no valid human-reviewed certificate): ${uncertifiedIds.join(", ")}`,
       );
     }
 
@@ -333,6 +413,7 @@ export class PluginHost {
     this.activated.delete(pluginId);
     this.states.delete(pluginId);
     this.signatures.delete(pluginId);
+    this.certificationStatus.delete(pluginId);
     this.pluginDirs.delete(pluginId);
     const idx = this.plugins.findIndex((p) => p.id === pluginId);
     if (idx !== -1) {
@@ -356,6 +437,23 @@ export class PluginHost {
    */
   pluginSignature(pluginId: string): "signed" | "unsigned" | undefined {
     return this.signatures.get(pluginId);
+  }
+
+  /**
+   * Fase 3 Stap 3 review status: `"certified"` when the plugin carries a valid
+   * `certification.json` whose reviewer signature, content hash, expiry and
+   * revocation state all verified at boot, `"uncertified"` otherwise,
+   * `undefined` when not active.
+   */
+  pluginCertification(
+    pluginId: string,
+  ): "certified" | "uncertified" | undefined {
+    return this.certificationStatus.get(pluginId);
+  }
+
+  /** The host's shared {@link CertificationService} (revocation register). */
+  certificationService(): CertificationService {
+    return this.certification;
   }
 
   hookRegistry(): HookRegistry {

@@ -229,13 +229,20 @@ export function hashFileContent(data: Buffer): string {
 }
 
 /** File/dir names that are never part of the signed payload. */
-const HASH_EXCLUSIONS = new Set(["manifest.json", "node_modules", ".git"]);
+const HASH_EXCLUSIONS = new Set([
+  "manifest.json",
+  "certification.json",
+  "node_modules",
+  ".git",
+]);
 
 /**
  * Walk `pluginDir` and compute the SHA-256 of every shipped file, keyed by
  * posix-style relative path. Excluded: `manifest.json` (the signature
- * carrier), `node_modules`, `.git`, and `*.tsbuildinfo`. Symlinks are never
- * followed and never hashed — the payload must be self-contained plain files.
+ * carrier), `certification.json` (the review artifact — like the manifest, a
+ * self-authenticating carrier, never plugin payload), `node_modules`, `.git`,
+ * and `*.tsbuildinfo`. Symlinks are never followed and never hashed — the
+ * payload must be self-contained plain files.
  */
 export async function collectPluginFileHashes(
   pluginDir: string,
