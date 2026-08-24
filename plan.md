@@ -431,3 +431,37 @@ volgende bouwfase.** Kernbesluiten:
   beoordelaar beslist, het rapport liegt niet.
 - **Anti-schijnvertrouwen:** "scanner schoon" is geen certificaat — beperkingen staan in de brief
   (undefined-behaviour-only plugins, minimale npm-install-time window, post-scan deps).
+
+### Stap 3 — Plugin Certification Service v1 (gebouwd)
+
+Geïmplementeerd en getest (core 366 → 398 tests, 20/20 workspaces groen). Beslissingen uit de
+brief werkend gemaakt:
+
+- **Scanner (Pijler B) als TS-service** (`core/src/certification/scanner.ts`, runtime-dep `typescript`):
+  AST-scanner port van de gevalideerde cross-check, flagt eval/`(0, eval)`/`globalThis["eval"]`/`new
+  Function` als critical, sensitive-module-require als critical/advisory, runtime-computed require als
+  critical, `process.env`-read als advisory (1×/file), constant-folding incl. template-literals,
+  `import type`-skip (runtime-erased), permission-cross-check (network-module zonder `network:*`-permissie
+  + fs zonder capability). `passed` = geen critical findings; advisories falen nooit en worden nooit
+  onderdrukt; beperkingen staan altijd loud in `ScanReport.limitations`. Eval-alias via variabele
+  (`const e = globalThis["eval"]; e("x")`) is bewust NIET statisch vangbaar — dat is runtime-redirection,
+  een gedocumenteerde beperking.
+- **Certificatie = mens-in-de-lus, los van 2C-signing** (`core/src/certification/certification-service.ts`):
+  `certification.json` bevat record {pluginId, contentHash, certifiedAt, expiresAt?, certificateVersion,
+  reviewerId, signature}. De reviewer ondertekent exact `{pluginId, contentHash, certifiedAt}` (Ed25519);
+  reviewerId/expiresAt zijn metadata, niet ondertekend. `contentHash` = deterministische aggregatie
+  (sorted-key canonical JSON → SHA-256) over de 2C-file-hashkaart — elke byte-change breekt de binding.
+  `certification.json` is aan `HASH_EXCLUSIONS` toegevoegd (SDK), zodat het review-artefact de 2C-handtekening
+  van de author nooit breekt en de reviewer de author-PK niet nodig heeft.
+- **Host-gate** (`plugin-host.ts`): `requireCertifiedPlugins`/`reviewerPublicKeys`/`certificationRevocationListPath`
+  (default `<dataDir>/certifications/revocations.json`). `requireCertifiedPlugins: true` weigert direct met
+  getypeerde `CertificationError` (ontbrekend/ongeldig/verlopen/contentHash-mismatch/herroepen), gemarkeerd
+  `FAILED_ACTIVATION`; default `false` laadt ongescertificeerd met luide end-of-boot-warn. Lege
+  reviewerPublicKeys ⇒ niets verifieert (default-deny). Corrupt register stopt de boot luid (CLAUDE.md #9).
+- **Revocation**: herroepen per contentHash (+ optioneel pluginId), atomair gepersisteerd op het register;
+  gecertificeerd-maar-herroepen laadt niet.
+- **CLI** (`create-p2p-plugin`): `scan <dir>`, `certify <dir> --key <reviewer-key> [--reviewer <name>]
+  [--expires <ISO>]` (weigert bij critical findings), `revoke <contentHash> --reason "<why>" [--plugin <id>]
+  [--revocations <path>] [--data-dir <dir>]`. Reviewer-key = 64-hex raw Ed25519 (peerId-formaat).
+- **Volgende slices uit de brief (open):** Pijler A eslint-integratie (hard-only 9-regel set naast de AST),
+  UI-review-flow, npm-install-time window, undefined-behaviour-only-plugins-beoordeling.
