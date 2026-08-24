@@ -319,3 +319,42 @@ test("runner: default envAllowlist (no params) still never leaks secrets", async
 
   await cleanup();
 });
+
+test("runner: initialize rejects a plugin whose entry symlink escapes the directory", async () => {
+  const pluginRoot = await makePluginFixture(
+    `exports.default = async function activate() {};`,
+  );
+  // Point the entry at a file outside the plugin directory.
+  const outside = path.join(os.tmpdir(), `sandbox-outside-${Date.now()}.js`);
+  await fs.writeFile(outside, `module.exports = {};`);
+  await fs.rm(path.join(pluginRoot, "index.js"));
+  await fs.symlink(outside, path.join(pluginRoot, "index.js"));
+  try {
+    const child = spawn(
+      process.execPath,
+      [path.join(__dirname, "runner.js"), "--plugin-root", pluginRoot],
+      { stdio: ["pipe", "pipe", "pipe"], env: { PATH: "/usr/bin" } },
+    );
+    const received: IPCMessageEnvelope[] = [];
+    const host = new IPCSocketTransport(child.stdout, child.stdin);
+    host.onMessage((m) => received.push(m));
+    await waitFor(() => child.pid !== undefined);
+
+    host.send({
+      type: "request",
+      jsonrpc: "2.0",
+      id: REQUEST_ID,
+      method: "initialize",
+      params: { pluginId: PLUGIN_ID },
+    });
+    await waitFor(() => received.length === 1);
+    const response = received[0] as { error?: { code: number; message: string } };
+    assert.equal(response.error?.code, IPCErrorCodes.INTERNAL_ERROR);
+    assert.match(response.error?.message ?? "", /plugin directory rejected:.*symlink/);
+    host.close();
+    child.kill("SIGKILL");
+  } finally {
+    await fs.rm(pluginRoot, { recursive: true, force: true });
+    await fs.rm(outside, { force: true });
+  }
+});

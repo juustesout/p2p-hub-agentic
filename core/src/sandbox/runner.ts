@@ -67,6 +67,7 @@ import type {
   SkillRegistrationOptions,
 } from "../task-broker/task-broker";
 import type { PluginContext } from "../plugin-loader/plugin-context";
+import { assertPluginDirNoEscapingSymlinks } from "../plugin-loader/plugin-dir";
 import { IPCSocketTransport } from "./ipc-transport";
 
 /** The host's sandbox may inherit no environment by default. */
@@ -525,6 +526,18 @@ export function runSandboxRunner(options: RunnerOptions = {}): IPCSocketTranspor
               request.id,
               IPCErrorCodes.INVALID_PARAMS,
               `manifest id "${manifest.id}" does not match initialized pluginId "${pluginId}"`,
+            );
+          }
+          // Mirror the in-process loader: a lexical containment check is blind
+          // to symlinks, and this child is exactly where a hostile plugin would
+          // run. Reject the directory up front when any symlink escapes it.
+          try {
+            await assertPluginDirNoEscapingSymlinks(runtime.pluginRoot);
+          } catch (err) {
+            return error(
+              request.id,
+              IPCErrorCodes.INTERNAL_ERROR,
+              `plugin directory rejected: ${err instanceof Error ? err.message : String(err)}`,
             );
           }
           const entryPath = path.resolve(runtime.pluginRoot, manifest.entry);

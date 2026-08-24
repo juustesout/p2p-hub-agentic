@@ -929,4 +929,61 @@ test("Fase 2B: a UI with a matching skills allowlist loads and exposes it", asyn
   assert.equal(taskBroker.hasSkill("ui-ok.list"), true);
 });
 
+test("a plugin entry that is a symlink escaping the directory is rejected", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const outside = path.join(root, "outside.js");
+  await fs.writeFile(outside, `export default async function activate() {}`);
+
+  const dir = await writePlugin(
+    root,
+    "linky",
+    {
+      id: "linky",
+      version: "1.0.0",
+      kind: "generic",
+      permissions: [],
+      entry: "./index.mjs",
+    },
+    `export default async function activate() {}`,
+  );
+  // Replace the entry with a symlink pointing outside the plugin directory.
+  await fs.rm(path.join(dir, "index.mjs"));
+  await fs.symlink(outside, path.join(dir, "index.mjs"));
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(dir, storageManager, new HookRegistry()),
+    /symlink.*resolves outside the plugin directory/,
+  );
+});
+
+test("a symlink inside the plugin directory that stays inside is allowed", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const taskBroker = new TaskBroker();
+
+  const dir = await writePlugin(
+    root,
+    "linksafe",
+    {
+      id: "linksafe",
+      version: "1.0.0",
+      kind: "generic",
+      permissions: [],
+      entry: "./index.mjs",
+    },
+    `export default async function activate(ctx) {
+      ctx.skills.register("ok", async () => "works", {});
+      return {};
+    }`,
+  );
+  // A self-referential (in-dir) symlink must not trip the scan.
+  await fs.symlink("index.mjs", path.join(dir, "alias.mjs"));
+
+  const storageManager = new StorageManager(dataDir);
+  await loadPlugin(dir, storageManager, new HookRegistry(), taskBroker);
+  assert.equal(taskBroker.hasSkill("linksafe.ok"), true);
+});
+
 

@@ -26,6 +26,7 @@ import type { StorageManager } from "../storage/storage-manager";
 import type { PluginContext, NetworkCapability } from "./plugin-context";
 import { isPathInsideDataDir } from "../site/site-files";
 import { verifyManifestSignature, verifyPluginFiles } from "@p2p-hub/sdk";
+import { assertPluginDirNoEscapingSymlinks } from "./plugin-dir";
 
 /**
  * Raised when a plugin `manifest.json` cannot be read, parsed or validated.
@@ -432,6 +433,12 @@ export async function loadPlugin(
   };
 
   const pluginDirResolved = path.resolve(pluginDir);
+  // Fase 3 follow-up: a lexical containment check is blind to symlinks — a
+  // `node_modules`/`.bin`/crafted link could resolve the entry (or the future
+  // permission-model fs grant) outside the plugin directory. Reject the
+  // directory up front when any symlink escapes it (same realpath discipline
+  // as PeerSite).
+  await assertPluginDirNoEscapingSymlinks(pluginDir);
   const entryPath = path.resolve(pluginDirResolved, manifest.entry);
   if (
     entryPath !== pluginDirResolved &&

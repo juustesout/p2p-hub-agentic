@@ -494,6 +494,63 @@ test("spawnSandboxProcess forwards child stderr through the callback", async (t)
   spawned.transport.close();
 });
 
+test("spawnSandboxProcess leaks no host file descriptors into the child", async (t) => {
+  if (process.platform !== "linux") {
+    t.skip("fd enumeration requires /proc/self/fd (Linux-only)");
+    return;
+  }
+  // The Node Permission Model is bypassable through inherited fds (a child
+  // reading via an fd the launcher passed in skips the fs grants). So the
+  // launcher must never leak a host fd into the sandbox: only stdin/stdout/
+  // stderr. This test opens a sensitive host fd, spawns a sandboxed probe,
+  // and asserts the child's fd table contains no path pointing at it.
+  const secretPath = path.join(os.tmpdir(), `sandbox-fd-secret-${randomUUID()}.txt`);
+  await fs.writeFile(secretPath, "super-secret-host-file");
+  const secretHandle = await fs.open(secretPath, "r");
+  t.after(async () => {
+    await secretHandle.close();
+    await fs.rm(secretPath, { force: true });
+  });
+
+  const probeDir = await fs.mkdtemp(path.join(os.tmpdir(), "sandbox-fd-probe-"));
+  await fs.writeFile(
+    path.join(probeDir, "probe.js"),
+    `
+      const fs = require("fs");
+      const fds = fs.readdirSync("/proc/self/fd").map(Number).sort((a, b) => a - b);
+      const targets = [];
+      for (const fd of fds) {
+        try { targets.push(fs.readlinkSync("/proc/self/fd/" + fd)); }
+        catch { targets.push("(gone)"); }
+      }
+      process.stderr.write(JSON.stringify({ fdTargets: targets }) + "\\n");
+      process.exit(0);
+    `,
+  );
+  t.after(() => fs.rm(probeDir, { recursive: true, force: true }));
+
+  const chunks: string[] = [];
+  const spawned = spawnSandboxProcess({
+    pluginRoot: "/nonexistent",
+    runnerPath: path.join(probeDir, "probe.js"),
+    stderr: (chunk) => chunks.push(chunk),
+  });
+  t.after(() => {
+    spawned.child.kill("SIGKILL");
+  });
+
+  await waitFor(() => chunks.join("").includes('"fdTargets"'), 3000);
+  const payload = JSON.parse(
+    chunks.join("").split("\n").find((l) => l.includes('"fdTargets"'))!,
+  );
+  const targets = payload.fdTargets as string[];
+  assert.ok(
+    !targets.includes(secretPath),
+    `host fd for ${secretPath} must not be inherited by the sandbox (got: ${targets.join(", ")})`,
+  );
+  spawned.transport.close();
+});
+
 test("filteredEnv drops secret-looking keys even when allowlisted", () => {
   const out = filteredEnv(
     ["API_KEY", "HOME", "PATH"],

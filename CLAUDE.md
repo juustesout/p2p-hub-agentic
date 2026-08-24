@@ -317,6 +317,49 @@ When asked to review or verify security-relevant work in this repo:
   (no host credentials, `NODE_OPTIONS` always stripped), and the framed IPC
   channel is the only host interaction. The Ed25519 key holder is the trust
   boundary for *malicious* code, still today.
+- **Node Permission Model (`--permission`): empirically researched, raises the
+  bar but is NOT a security boundary.** Before any brief is written that wires
+  the Permission Model into the sandbox launcher, its guarantee was verified
+  against Node v22 and the official docs (see the Slice-4 research; the
+  `Permission Model constraints` / `Limitations` section of
+  `nodejs.org/docs/latest-v22.x/api/permissions.html`). What it does: with
+  `--permission` it blocks fs read/write (scoped via `--allow-fs-read`/
+  `--allow-fs-write`), child-process, worker-threads, native addons, WASI and
+  the inspector, and scoped fs grants work as advertised (an
+  `--allow-fs-read=<scoped-pad>` blocks `/etc/passwd`). What it does NOT do —
+  verified empirically, not assumed: (1) **network is not covered at all**
+  (`net`/`http`/`dns` connect freely under `--permission`; there is no
+  network scope in the model, and `process.permission.has("net")` returning
+  `false` is misleading — it is a non-existent scope, not an enforced one);
+  (2) Node's own docs state the model is a "seat belt" that does **not**
+  protect against malicious code — "Malicious code can bypass the permission
+  model". The exact framing to use in every future text: the Permission Model
+  **raises the bar against accidental bugs and half-hearted attempts, it is
+  not a guarantee against determined malicious code** — never describe it as
+  "sandboxing" without that qualification, same lesson as the Fase-3
+  process-isolation correction, this time before building instead of after.
+  Confirmed bypasses a brief must know: symlinks *inside* a granted path are
+  followed outside it (a scoped plugin with `--allow-fs-write` cannot *create*
+  one — `fs.symlinkSync` requires full `*` grants — but a link shipped with the
+  plugin or left by package-install is followed; `assertPluginDirNoEscapingSymlinks`
+  in `core/src/plugin-loader/plugin-dir.ts` rejects those at load time on both
+  the in-process and sandbox load paths); an fd inherited from the launcher
+  bypasses the fs grants (the launcher passes only stdin/stdout/stderr — a
+  regression test asserts the child sees no host fd, see the `leaks no host
+  file descriptors` sandbox test); `--env-file`/`--openssl-config` read before
+  model init; `v8.setFlagsFromString` can re-enable code-gen at runtime (the
+  sandbox already ships `--disallow-code-generation-from-strings`). The
+  network gap means any future network restriction needs its own mechanism
+  (e.g. a `--require`-injected hook), and that mechanism was also empirically
+  tested to be the same class of bar-raiser, not a boundary: a module-object
+  monkey-patch holds against `require`-after-hook, `require.cache` purge,
+  `process.getBuiltinModule` and ESM `import("node:net")`, but is bypassed by
+  `new net.Socket().connect()` (only fixed by patching the prototype), by
+  `fetch()` (undici's own stack), by `process.binding("tcp_wrap"/"udp_wrap"/
+  "pipe_wrap")` (raw libuv handles below the module layer), and — the
+  decisive one — by a `child_process` spawn of a fresh, unhooked node (so a
+  network hook is only meaningful *combined with* the Permission Model
+  blocking child-process, and even then stays a bar-raiser).
 - Plugin `id` values are allowed to contain `.`, so two plugins with
   colliding dotted ids (e.g. `"a.b"` and `"a"` registering skill `"b.x"`)
   can produce the same broker skill key. Theoretical today (single
