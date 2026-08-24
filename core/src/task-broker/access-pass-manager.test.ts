@@ -72,3 +72,19 @@ test("listPasses never reports expired passes", () => {
     }, 5);
   });
 });
+
+test("inspectPass distinguishes none, valid and expired without dropping", () => {
+  const manager = new AccessPassManager();
+  assert.equal(manager.inspectPass(ALICE, "site-read-only"), "none");
+  manager.issue(ALICE, "site-read-only", 1);
+  assert.equal(manager.inspectPass(ALICE, "site-read-only"), "valid");
+  return new Promise<void>((resolve) => {
+    setTimeout(() => {
+      // Expired still reports "expired" (inspect is report-only) ...
+      assert.equal(manager.inspectPass(ALICE, "site-read-only"), "expired");
+      // ... while hasValidPass sees the same slot as absent.
+      assert.equal(manager.hasValidPass(ALICE, "site-read-only"), false);
+      resolve();
+    }, 5);
+  });
+});

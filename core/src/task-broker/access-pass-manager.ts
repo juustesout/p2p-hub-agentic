@@ -86,6 +86,21 @@ export class AccessPassManager {
     return true;
   }
 
+  /**
+   * Report-only inspection of a pass slot: `"none"` (no pass ever / already
+   * dropped), `"valid"` (unexpired), or `"expired"` (still recorded but past
+   * its expiry). Unlike {@link hasValidPass} this never drops the entry — it
+   * exists so the peer-access gate can report an honest `expired_access_pass`
+   * reason instead of collapsing "expired" into "absent".
+   */
+  inspectPass(peerId: string, scope: string): "none" | "valid" | "expired" {
+    const pass = this.passes.get(`${peerId}\u0000${scope}`);
+    if (!pass) {
+      return "none";
+    }
+    return Date.now() > pass.expiresAt ? "expired" : "valid";
+  }
+
   /** Snapshot of every currently-held (unexpired) pass. */
   listPasses(): AccessPass[] {
     const now = Date.now();

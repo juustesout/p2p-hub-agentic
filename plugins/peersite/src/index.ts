@@ -11,6 +11,7 @@ import type { WebsiteErrorCode } from "@p2p-hub/sdk";
 import type { PluginContext } from "@p2p-hub/core";
 import {
   buildKnockData,
+  checkPeerAccess,
   contentTypeForPath,
   PEER_ID_RE,
   PEERSITE_KNOCK_CONTEXT,
@@ -18,6 +19,7 @@ import {
   resolveSiteRootOutsideDataDir,
   signAuthChallenge,
 } from "@p2p-hub/core";
+import type { PeerAccessContext } from "@p2p-hub/core";
 
 /**
  * PeerSite: publish a directory as a static site that is reachable both over
@@ -194,29 +196,28 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
   }
 
   /**
-   * Challenge-response proof of key possession, *without* any contact check.
-   * The peer must answer a `signAuthChallenge` challenge signed with the key
-   * behind `peerId`. Deny-by-default when there is no network seam.
-   *
-   * Kept as a standalone possession capability for peer-to-peer verification
-   * flows (a peer proves it holds the key behind its advertised peerId).
-   * `fetchAsset` no longer runs it: since Fase 1B the transport proves
-   * possession during the handshake identity binding, and since Fase 2A the
-   * broker enforces the gate on that transport-verified identity.
+   * Stap 2: de verified-contact/access-pass-controle is gegeneraliseerd naar
+   * de centrale `checkPeerAccess` primitive (core/src/security). Deze context
+   * injecteert alleen de plugin-gebonden capabilities; de gate zelf evalueert
+   * fail-closed. `signAuthChallenge` blijft een standalone possession
+   * capability: `fetchAsset` voert het niet meer uit — sinds Fase 1B bewijst
+   * het transport possession tijdens de handshake identity binding, en sinds
+   * Fase 2A handhaaft de broker de gate op die transport-verified identiteit.
    */
-  async function isVerifiedContact(peerId: string): Promise<boolean> {
-    if (!ctx.trust) {
-      return false;
-    }
-    const contact = await ctx.trust.getContact(peerId);
-    return contact?.trustState === "verified";
-  }
-
-  function hasValidAccessPass(peerId: string): Promise<boolean> {
-    // Fase 2A: passes live in the core AccessPassManager (backing `ctx.access`),
-    // the same store the broker's `access-pass` gate consults.
-    return ctx.access.hasPass(peerId, SITE_READ_SCOPE);
-  }
+  const peerAccessContext: PeerAccessContext = {
+    contacts: ctx.trust
+      ? {
+          isVerifiedContact: async (peerId: string) =>
+            (await ctx.trust!.getContact(peerId))?.trustState === "verified",
+        }
+      : undefined,
+    accessPasses: {
+      // Fase 2A: passes leven in de core AccessPassManager (backing `ctx.access`),
+      // dezelfde store die de broker's `access-pass` gate consulteert.
+      hasValidPass: (peerId: string, scope: string) =>
+        ctx.access.hasPass(peerId, scope),
+    },
+  };
 
   async function setAcceptIncomingRequests(enabled: boolean): Promise<void> {
     acceptIncoming = enabled;
@@ -348,14 +349,18 @@ export default function activate(ctx: PluginContext): PeerSitePlugin {
     }
 
     // Access requires either a verified contact or a valid site-read-only pass.
-    // (Fase 2A: the same decision is enforced broker-side by fetchAsset's
-    // `remote` policy; this is defense-in-depth for the in-process API.
-    // Possession is proven by the Fase 1B transport identity binding, not by
-    // another challenge round trip.)
-    if (
-      !(await isVerifiedContact(peerId)) &&
-      !(await hasValidAccessPass(peerId))
-    ) {
+    // Stap 2: de beslissing is gecentraliseerd in `checkPeerAccess`
+    // (core/src/security), geëvalueerd op de transport-verified `peerId` — de
+    // broker handhaaft dezelfde policy (`remote: { gate: [...] }`) vóór
+    // dispatch; dit is defense-in-depth voor de in-process API. Possession
+    // wordt bewezen door de Fase 1B transport identity binding, niet door
+    // een extra challenge round trip.
+    const decision = await checkPeerAccess(
+      peerId,
+      { modes: ["verified-contact", "access-pass"], accessPassScope: SITE_READ_SCOPE },
+      peerAccessContext,
+    );
+    if (!decision.granted) {
       return { ok: false, error: "unauthorized" };
     }
 
