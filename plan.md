@@ -155,7 +155,8 @@ publieke webserver hoef te draaien."
     4. **Core-server `/remote-site/<peerId>/*`** — loopback/lanSiteAllowed-gate, GET/HEAD-only (405), peerId-RE + niet-bestaande mirror → 404, `resolveAndContainFile`-containment (traversal/encoded/backslashes/NUL → 404), hardened UI-CSP (incl. `connect-src 'none'`, `form-action 'none'`, `no-store`), **geen boot-token** (2B-principe #10 — de site-inhoud is niet geheim, de boot-token wel), fetch-on-miss naar `peersite.fetchAsset` (netwerk uit → stille 404), directory/index-fallbacks.
     5. **Shell viewer** — `SiteViewer`-component: sandboxed iframe (`allow-scripts allow-same-origin`, géén top-navigation/forms/popups) naar `/remote-site/<peerId>/`; **source-pinning** in `plugin-bridge.ts` (`bindSource`: alleen windows die de shell zelf bond mag de bridge aanroepen — de remote-site deelt de core-server-origin met plugin-UI maar krijgt nooit een binding, dus kan nooit `ui.skills`/bridge-capabilities aanroepen); vite-proxy `/remote-site`; StartMenu "View site"-entry bij peers die `peersite.fetchAsset` exposen.
     6. **Tests** — SDK 58, core 217, core-server 57, peersite 19, testlab 3 (Fase 2A-toetssteen gemigreerd naar envelopevorm + nieuwe website-v1-matrix: byte-exacte PNG, unsupported-version, malformed, traversal, oversize, expired/revoked pass). Topologie-agnostiek gedekt door de bestaande chained-call (A→B→C via `testnode.forward`) — geen relay/shard gebouwd (geaccordeerde minimale mirror).
-    Open follow-ups: cross-origin `fetch`/subresource-bundling voor sites (nu één asset per request + `<link>`/inline), optionele `contentHash`-veld per asset voor B's cache, en render-time verrijking van de mirror-CSP met `img-src`-allowlist per site.
+     Open follow-ups: cross-origin `fetch`/subresource-bundling voor sites (nu één asset per request + `<link>`/inline), optionele `contentHash`-veld per asset voor B's cache, en render-time verrijking van de mirror-CSP met `img-src`-allowlist per site.
+  - **Stap 2 — `checkPeerAccess` centrale security-primitive — GEDONE** (`core/src/security/peer-access-gate.ts`): één fail-closed evaluatie-primitive die de peer-level toegangsbeslissingen centraliseert en PeerSite's hand-gerolde `isVerifiedContact`/`hasValidAccessPass` vervangt. `checkPeerAccess(peerId, options, context)` evalueert OR-semantiek over `options.modes` (`verified-contact` / `access-pass` / `open-lan`|`public`), met optioneel `allowSelf` (host-own peerId ⇒ `self`, alleen uit `context.selfPeerId`, nooit van de caller). Rede-set: granted = `verified_contact|valid_access_pass|public_policy|self`; denied = `not_a_contact|invalid_access_pass|expired_access_pass|denied_by_policy`. Fail-closed op elke manier: ontbrekende/ongeldige options of lege `modes` ⇒ `denied_by_policy`; een werpende lookup is een denial, nooit een open deur; `blocked`-contact wint zelfs over `open-lan`/`public` (blacklist boven permissiviteit). Eerlijk expired-vs-ongeldig-onderscheid via nieuwe `AccessPassManager.inspectPass` (report-only `"none"|"valid"|"expired"`; `hasValidPass` dropt expired wél, `inspectPass` niet). **Bewust GEEN `accessPassToken`/bearer-token-variant uit het oorspronkelijke design-voorstel** (CLAUDE.md: passes zijn nooit bearer tokens — de peer bewijst possession over het transport) — peerId-gebonden `hasPass`/`inspectPass` in plaats daarvan. Peersite-refactor: `fetchAsset`-gate → `checkPeerAccess` met `{ modes: ["verified-contact","access-pass"], accessPassScope: "site-read-only" }`; de media-gate is bewust NIET mee overgezet (Tier-2 native-confirm, geen policy-evaluatie — mens uit de lus vermijden). Publiek via `@p2p-hub/core`. Tests: 21 in `core/src/security/peer-access-gate.test.ts` + 2 access-pass-manager-tests; peersite 19/19 + core-server-peersite 14/14 ongewijzigd groen (geen regressie). Follow-up: broker-`RemoteGate` (`remote-access.ts`) migreren naar dezelfde primitive — vandaag een eigen OR-implementatie met identieke semantiek.
 - **Fase 2-eindcriterium — vier-assen-scheiding (architectuur-richtlijn)**
   De introductie-prompts leggen vier orthogonale assen vast die toekomstig werk moet behouden: **Identity** (wie is de peer — Ed25519 peerId, contactrecords, straks ENS als naamresolver), **Capability** (wat mag die peer doen — capability-naamconventie `p2p-hub:<cap>:v1`, default-deny, TaskBroker-gates), **Transport** (hoe praat ik met die peer — `network-light` TLS vandaag, WebRTC = transport-implementatie, nooit in de capability-laag), **Content** (welke assets — website = content/assets, apart van authorisatie).   Mens én agent zijn peers (default-deny blijft); de world-topology wordt geabstraheerd (relay/forward is een transport-zaak, geen capability-zaak); géén speculatieve dependencies nu. Drie bijbehorende architectuurbesluiten (agent-identiteit, media-gate, telemetrie-type-onderscheid) zijn formeel vastgelegd — zie [Toekomstige Capabilities: Agent Identity & Streaming Guidelines](#toekomstige-capabilities-agent-identity--streaming-guidelines) hieronder.
 
@@ -408,3 +409,25 @@ module-loader-restrictie in de child (bijv. `--experimental-policy` of het
 security-sandbox tegen kwaadwillige plugins. De `PluginContext`-capabilities
 buiten skill-executie blijven fail-closed afwezig tot een latere slice ze
 per-stuk proxied.
+
+## Open slice: plugin-certificatie-scanner (brief afgerond, bouw open)
+
+De brief staat in `docs/plugin-certification-scanner.md` en is gevalideerd met empirische
+metingen, niet aannames. Status: **brief afgerond; de certificatie-service (Slice 1/2) is de
+volgende bouwfase.** Kernbesluiten:
+
+- **Pijler A — hard-only ruleset:** een 9-regel hard-only eslint-set is de basis. De aanbevolen
+  `eslint-plugin-security`-set (42 findings: 38× detect-object-injection + 4× detect-unsafe-regex)
+  bevat 0 echte bevindingen — de object-injections zijn plugin-config-keys (vast schema, nooit
+  indexering op caller-input) en de regexes zijn legitieme literals. 8/8 plugins CLEAN op hard-only.
+- **Pijler B — AST-cross-check:** de eigen TS-compiler-API-scanner
+  (`/tmp/opencode/lint-test/ast-crosscheck.cjs`) vangt alle module-vormen (incl. `node:`-prefix,
+  constant-folding, dynamische import, `(0, eval)`, `import type`-skip) waar een regex-v1 fout-negatief
+  op was (peersite's `node:fs/promises`). Beide scanners (eslint + AST) draaien; de AST-scanner is de
+  gezaghebbende.
+- **Pijler C — rapport + mens-in-de-lus:** rode vlaggen worden nooit onderdrukt. Peersite's
+  `node:fs/promises` blijft een legitieme maar terechte vlag (read-only site-mirror met
+  `resolveAndContainFile` + `MAX_WEBSITE_ASSET_BYTES`-cap, peersite/src/index.ts:377-387) — de
+  beoordelaar beslist, het rapport liegt niet.
+- **Anti-schijnvertrouwen:** "scanner schoon" is geen certificaat — beperkingen staan in de brief
+  (undefined-behaviour-only plugins, minimale npm-install-time window, post-scan deps).
