@@ -8,6 +8,17 @@ import {
   verifyManifestSignature,
   verifyPluginFiles,
 } from "@p2p-hub/sdk";
+import {
+  CertificationService,
+  scanPluginDirectory,
+  signCertificationRecord,
+} from "@p2p-hub/core";
+import type {
+  CertificationRecord,
+  RevocationList,
+  ScanFinding,
+  ScanReport,
+} from "@p2p-hub/core";
 
 /**
  * Pure, testable command implementations for the `create-p2p-plugin` CLI
@@ -221,4 +232,92 @@ export async function verifyPluginDir(dir: string): Promise<VerifyResult> {
     publicKey: sig.publicKey,
     fileCount: Object.keys(files).length,
   };
+}
+
+export interface CertifyOptions {
+  /** ISO 8601 expiry; omit for a non-expiring certificate. */
+  expiresAt?: string;
+  /** Human-readable reviewer identity (defaults to the reviewer public key). */
+  reviewerId?: string;
+}
+
+export interface CertifyResult {
+  contentHash: string;
+  reviewerId: string;
+  publicKeyHex: string;
+  passed: boolean;
+  findings: ScanFinding[];
+  record: CertificationRecord;
+}
+
+/**
+ * Scan a plugin directory and — if the scanner finds no critical pattern —
+ * stamp a signed `certification.json` (the reviewer's Ed25519 signature over
+ * pluginId + contentHash + certifiedAt) into the plugin directory.
+ *
+ * The scanner never approves: `passed: false` refuses to certify; `passed:
+ * true` means "no statically-critical pattern", and the human operator is
+ * expected to read the full report (advisories included) before running this.
+ */
+export async function certifyPluginDir(
+  dir: string,
+  reviewerKeyPem: string,
+  options: CertifyOptions = {},
+): Promise<CertifyResult> {
+  const report = await scanPluginDirectory(dir);
+  const critical = report.findings.filter((f) => f.severity === "critical");
+  if (critical.length > 0) {
+    throw new Error(
+      `scan blocked certification of "${dir}": ${critical
+        .map((f) => `${f.detail} (${f.file}${f.line ? `:${f.line}` : ""})`)
+        .join("; ")}`,
+    );
+  }
+  const publicKeyHex = publicKeyHexFromPrivateKey(reviewerKeyPem);
+  const record = signCertificationRecord(
+    {
+      pluginId: report.pluginId,
+      contentHash: report.contentHash,
+      certifiedAt: new Date().toISOString(),
+      expiresAt: options.expiresAt,
+      certificateVersion: "1.0",
+      reviewerId: options.reviewerId ?? publicKeyHex,
+    },
+    reviewerKeyPem,
+  );
+  await fs.writeFile(
+    path.join(dir, "certification.json"),
+    `${JSON.stringify(record, null, 2)}\n`,
+  );
+  return {
+    contentHash: report.contentHash,
+    reviewerId: record.reviewerId,
+    publicKeyHex,
+    passed: report.passed,
+    findings: report.findings,
+    record,
+  };
+}
+
+/**
+ * Revoke a content hash (optionally bound to a plugin id) by appending it to
+ * the revocation register and persisting atomically. Idempotent.
+ */
+export async function revokePluginCertification(
+  contentHash: string,
+  reason: string,
+  revocationListPath: string,
+  pluginId?: string,
+): Promise<RevocationList> {
+  const service = new CertificationService({ revocationListPath });
+  await service.load();
+  return service.revokeCertificate(contentHash, reason, pluginId);
+}
+
+/** Scan a plugin directory and return the structured report (never throws on
+ * findings — only on an unreadable manifest/bundle). */
+export async function scanPluginForCertification(
+  dir: string,
+): Promise<ScanReport> {
+  return scanPluginDirectory(dir);
 }
