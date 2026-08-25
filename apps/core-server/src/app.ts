@@ -4,6 +4,7 @@ import * as fsp from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { isLoopbackHost } from "./host";
+import { DEFAULT_HTTP_PORT } from "./config";
 import { createMediaSkillHandler } from "./media";
 import {
   generateBootToken,
@@ -61,6 +62,19 @@ export interface CoreServerOptions {
   dataDir: string;
   host?: string;
   port?: number;
+  /**
+   * Port for the network-light P2P transport (mDNS advertisement + TLS).
+   * Defaults to 0 (ephemeral). The config loader feeds `P2P_HUB_P2P_PORT` →
+   * `P2P_PORT` → `32837` here.
+   */
+  p2pPort?: number;
+  /**
+   * Bind host for the network-light P2P transport. Defaults to `0.0.0.0`
+   * (the transport authenticates every peer on the wire and never holds the
+   * boot token, so a wildcard bind is safe). The config loader feeds
+   * `P2P_BIND_HOST` here.
+   */
+  p2pBindHost?: string;
   /** Vault master passphrase (falls back to env / dev key). */
   masterKey?: string;
   /** Explicit boot token; overrides env and auto-generation. */
@@ -254,7 +268,7 @@ export class CoreServer {
       this.handleSocket(socket, request),
     );
 
-    const port = this.options.port ?? 8787;
+    const port = this.options.port ?? DEFAULT_HTTP_PORT;
     const host = this.options.host ?? "127.0.0.1";
     await new Promise<void>((resolve, reject) => {
       this.httpServer!.once("error", reject);
@@ -320,7 +334,8 @@ export class CoreServer {
     const identity = await this.host.identityManager().getOrCreateIdentity();
     this.peerId = identity.peerId;
     this.provider = new NetworkLightProvider({
-      port: 0,
+      port: this.options.p2pPort ?? 0,
+      host: this.options.p2pBindHost ?? "0.0.0.0",
       skills: remoteSkills,
       identity,
       // Fase 1B: prove this identity on the wire. The private key stays in

@@ -66,11 +66,20 @@ test("canonical serializations are pinned byte-for-byte", () => {
     '{"protocol":"p2p-hub:network","version":1,"type":"result",' +
       '"body":{"taskId":"t","status":"error","result":{"x":1},"error":"boom"}}',
   );
+  // The 3-arg hello (no reverse-registration hints) is the canonical minimal
+  // form; the hints form below is pinned too so the byte layout stays stable.
+  assert.equal(
+    encodeHello([1], ["echo"], nonce, { instanceId: "inst-1", listenPort: 43210 }),
+    '{"protocol":"p2p-hub:network","version":1,"type":"hello",' +
+      `"body":{"versions":[1],"capabilities":["echo"],"nonce":"${nonce}",` +
+      '"instanceId":"inst-1","listenPort":43210}}',
+  );
 });
 
 test("every encoded message round-trips through parseEnvelope", () => {
   const messages = [
     encodeHello([1], ["a", "b"], nonce),
+    encodeHello([1], ["a"], nonce, { instanceId: "inst-x", listenPort: 4242 }),
     encodeHelloAck(1, ["a"], { maxPayloadBytes: 1000 }, nonce, binding),
     encodeHelloAck(1, [], undefined, nonce, binding),
     encodeTask({ id: "t1", skill: "s", payload: { deep: [1, 2, 3] } }),
@@ -82,6 +91,50 @@ test("every encoded message round-trips through parseEnvelope", () => {
     assert.ok(envelope, `must parse: ${raw}`);
     assert.equal(envelope.protocol, NETWORK_PROTOCOL_ID);
     assert.equal(envelope.version, NETWORK_PROTOCOL_VERSION);
+  }
+  // The hints survive a round-trip in canonical order.
+  const parsed = parseEnvelope(
+    JSON.parse(encodeHello([1], ["a"], nonce, { instanceId: "inst-x", listenPort: 4242 })),
+  ) as { body: { instanceId?: string; listenPort?: number } };
+  assert.equal(parsed.body.instanceId, "inst-x");
+  assert.equal(parsed.body.listenPort, 4242);
+  // Absent hints round-trip as absent.
+  const plain = parseEnvelope(JSON.parse(encodeHello([1], ["a"], nonce))) as {
+    body: { instanceId?: string; listenPort?: number };
+  };
+  assert.equal(plain.body.instanceId, undefined);
+  assert.equal(plain.body.listenPort, undefined);
+});
+
+test("parseEnvelope default-denies malformed reverse-registration hints", () => {
+  const base = {
+    protocol: NETWORK_PROTOCOL_ID,
+    version: 1,
+    type: "hello",
+  };
+  const valid = { versions: [1], capabilities: [], nonce };
+  // A valid hints pair parses.
+  assert.ok(
+    parseEnvelope({
+      ...base,
+      body: { ...valid, instanceId: "inst-1", listenPort: 43210 },
+    }),
+  );
+  // Bad instanceId (spaces, too long, empty, leading dash).
+  for (const bad of ["bad id", "a".repeat(65), "", "-lead"]) {
+    assert.equal(
+      parseEnvelope({ ...base, body: { ...valid, instanceId: bad, listenPort: 43210 } }),
+      null,
+      `instanceId ${JSON.stringify(bad)} must be denied`,
+    );
+  }
+  // Bad listenPort (0, >65535, negative, non-integer, string).
+  for (const bad of [0, 65536, -1, 1.5, "43210"]) {
+    assert.equal(
+      parseEnvelope({ ...base, body: { ...valid, instanceId: "inst-1", listenPort: bad } }),
+      null,
+      `listenPort ${JSON.stringify(bad)} must be denied`,
+    );
   }
 });
 

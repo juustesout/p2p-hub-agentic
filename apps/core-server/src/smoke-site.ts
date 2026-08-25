@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { PluginHost } from "@p2p-hub/core";
 import { CoreServer } from "./app";
+import { loadConfig } from "./config";
 
 /**
  * Local smoke harness for the Fase 2-eindcriterium "View site" flow.
@@ -81,12 +82,15 @@ async function main(): Promise<void> {
 
   // Peer B — the core-server behind the shell.
   const bRoot = await fs.mkdtemp(path.join(os.tmpdir(), "smoke-core-b-"));
-  const port = process.env.P2P_HUB_PORT ? Number(process.env.P2P_HUB_PORT) : 8787;
+  const loaded = loadConfig(process.env);
+  if ("error" in loaded) {
+    throw new Error(loaded.error);
+  }
   const server = new CoreServer({
     pluginsDir: REPO_PLUGINS,
     dataDir: bRoot,
     host: "127.0.0.1",
-    port,
+    port: loaded.config.port,
     networking: true,
     masterKey: crypto.randomBytes(16).toString("hex"),
   });
@@ -123,7 +127,7 @@ async function main(): Promise<void> {
   }
 
   // Confirm the shell-facing side can see A before declaring readiness.
-  const capabilitiesUrl = `http://127.0.0.1:${port}/api/capabilities`;
+  const capabilitiesUrl = `http://127.0.0.1:${loaded.config.port}/api/capabilities`;
   const listed = await waitFor(async () => {
     try {
       const res = await fetch(capabilitiesUrl, {
@@ -148,9 +152,9 @@ async function main(): Promise<void> {
   console.log(`  Peer A (site owner)   : ${peerIdA}`);
   console.log(`  Peer B (shell server) : ${peerIdB}`);
   console.log(`  Site root (on A)      : ${realRoot}`);
-  console.log(`  HTTP bridge           : http://127.0.0.1:${port}`);
+  console.log(`  HTTP bridge           : http://127.0.0.1:${loaded.config.port}`);
   console.log(`  Boot token            : ${bootToken}`);
-  console.log(`  Demo URL              : http://127.0.0.1:${port}/remote-site/${peerIdA}/`);
+  console.log(`  Demo URL              : http://127.0.0.1:${loaded.config.port}/remote-site/${peerIdA}/`);
   console.log("  In the shell: Start Menu → Remote peer services → A → \"View site\".");
 
   await new Promise<void>((resolve) => {

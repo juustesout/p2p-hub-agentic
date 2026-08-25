@@ -36,12 +36,24 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  *
  * ```
  * hello      client → server
- *   body: { "versions": number[], "capabilities": string[], "nonce": string }
+ *   body: { "versions": number[], "capabilities": string[], "nonce": string,
+ *           "instanceId"?: string, "listenPort"?: number }
  *   `versions` = the protocol versions the client supports. `capabilities` =
  *   the skills the client offers for remote invocation. `nonce` = a
  *   client-chosen hex nonce (16 bytes) that anchors the identity binding
  *   (Fase 1B). `hello` MUST be the first message on a connection, and it MUST
  *   carry a nonce — there is no anonymous mode.
+ *
+ *   `instanceId` and `listenPort` are optional *reverse-registration hints*
+ *   (proactive-peer-handshake): they tell the server where to reach the
+ *   client back (its mDNS instance id and its listening port). The server uses
+ *   them ONLY to build a discoverable route for a peer that connects without
+ *   first being seen via mDNS (e.g. when the client's outbound multicast is
+ *   blocked). They are informational — the server registers the route only
+ *   after the client's identity has been *verified* via `auth`, and it never
+ *   trusts the hints for anything security-relevant: the registered peerId
+ *   comes from the verified `auth` and the registered certificate fingerprint
+ *   from the certificate actually presented on the wire.
  *
  * hello_ack  server → client
  *   body: { "version": number, "capabilities": string[], "limits"?:
@@ -165,6 +177,17 @@ export interface HelloBody {
   capabilities: string[];
   /** Client-chosen hex nonce anchoring the identity binding (mandatory). */
   nonce: string;
+  /**
+   * Reverse-registration hint: the sender's mDNS instance id. Optional; used
+   * by the server to key a discovered route for a peer that connects without
+   * being seen via mDNS. Informational — identity is still proven via `auth`.
+   */
+  instanceId?: string;
+  /**
+   * Reverse-registration hint: the sender's listening port. Optional; used by
+   * the server to reach the client back. Informational only.
+   */
+  listenPort?: number;
 }
 
 export interface HelloAckBody {
@@ -223,6 +246,22 @@ const NONCE_RE = /^[0-9a-f]{2,64}$/;
 
 function isNonce(value: unknown): value is string {
   return typeof value === "string" && NONCE_RE.test(value);
+}
+
+/**
+ * A reverse-registration instance id: 1..64 chars of `[A-Za-z0-9-]`. It is
+ * used only as a discovered-map key, but it MUST be strictly bounded anyway —
+ * never trust a peer-supplied identifier for anything, even a map key.
+ */
+const INSTANCE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+
+function isInstanceId(value: unknown): value is string {
+  return typeof value === "string" && INSTANCE_ID_RE.test(value);
+}
+
+/** A valid TCP port a peer may claim to listen on. */
+function isListenPort(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 65535;
 }
 
 /**
@@ -305,15 +344,30 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
       if (!isNonce(b.nonce)) {
         return null;
       }
+      // Reverse-registration hints are optional but strictly validated when
+      // present (default-deny on a malformed hint).
+      if (b.instanceId !== undefined && !isInstanceId(b.instanceId)) {
+        return null;
+      }
+      if (b.listenPort !== undefined && !isListenPort(b.listenPort)) {
+        return null;
+      }
+      const body: HelloBody = {
+        versions: b.versions,
+        capabilities: b.capabilities,
+        nonce: b.nonce,
+      };
+      if (b.instanceId !== undefined) {
+        body.instanceId = b.instanceId as string;
+      }
+      if (b.listenPort !== undefined) {
+        body.listenPort = b.listenPort as number;
+      }
       return {
         protocol: NETWORK_PROTOCOL_ID,
         version: NETWORK_PROTOCOL_VERSION,
         type,
-        body: {
-          versions: b.versions,
-          capabilities: b.capabilities,
-          nonce: b.nonce,
-        },
+        body,
       };
     }
     case "hello_ack": {
@@ -423,16 +477,29 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
 // Each encoder builds the envelope with fields in the exact contract order, so
 // the serialized bytes are deterministic and reimplementable from the spec.
 
+export interface HelloHints {
+  /** The sender's mDNS instance id (reverse-registration key). */
+  instanceId: string;
+  /** The sender's listening port (reverse-registration connect-back). */
+  listenPort: number;
+}
+
 export function encodeHello(
   versions: number[],
   capabilities: string[],
   nonce: string,
+  hints?: HelloHints,
 ): string {
+  const body: Record<string, unknown> = { versions, capabilities, nonce };
+  if (hints) {
+    body.instanceId = hints.instanceId;
+    body.listenPort = hints.listenPort;
+  }
   return JSON.stringify({
     protocol: NETWORK_PROTOCOL_ID,
     version: NETWORK_PROTOCOL_VERSION,
     type: "hello",
-    body: { versions, capabilities, nonce },
+    body,
   });
 }
 

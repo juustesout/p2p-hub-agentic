@@ -1,8 +1,9 @@
 import * as tls from "node:tls";
 import * as crypto from "node:crypto";
 import Bonjour from "bonjour-service";
-import type { Browser, Service } from "bonjour-service";
+import type { Browser, Service, ServiceConfig } from "bonjour-service";
 import * as forge from "node-forge";
+import { detectLanIPv4 } from "./lan-interface";
 import type {
   NetworkPeer,
   NetworkProvider,
@@ -31,6 +32,7 @@ import {
   verifyIdentityBinding,
   type HelloAckBody,
   type HelloBody,
+  type HelloHints,
   type IdentityBinding,
   type TaskBody,
 } from "./wire-contract";
@@ -91,6 +93,26 @@ export interface NetworkLightOptions {
   sweepIntervalMs?: number;
   /** Invoked whenever a peer is removed because it went silent. */
   onPeerDisconnected?: (peer: DiscoveredPeer) => void;
+  /**
+   * Explicit IPv4 multicast interface for the mDNS socket (passed through to
+   * `bonjour-service` as the `interface` option, which drives both
+   * `addMembership` and `setMulticastInterface`). Defaults to the physical
+   * LAN IPv4 detected by {@link detectLanIPv4} (the fix for the one-sided
+   * mDNS discovery problem on Windows). Set to a specific address to pin the
+   * interface, or pass any non-empty value to force a particular one.
+   */
+  mdnsInterface?: string;
+  /**
+   * Proactive unicast reply ("proactive peer handshake"): when an mDNS
+   * announcement is heard from a peer, connect back to its advertised P2P
+   * address and complete a verified hello+auth handshake so the peer can
+   * register us even if our own outbound multicast never reaches it. Also
+   * re-pings throttled on each re-announcement so a reverse-registered route
+   * stays fresh. Defaults to `true`.
+   */
+  unicastPing?: boolean;
+  /** Minimum gap between unicast pings to the same peer instance. */
+  unicastPingMinIntervalMs?: number;
 }
 
 export interface DiscoveredPeer extends NetworkPeer {
@@ -182,6 +204,9 @@ export class NetworkLightProvider implements NetworkProvider {
   private readonly heartbeatTtlMs: number;
   private readonly sweepIntervalMs: number;
   private readonly onPeerDisconnected: ((peer: DiscoveredPeer) => void) | null;
+  private readonly mdnsInterface: string | null;
+  private readonly unicastPingEnabled: boolean;
+  private readonly pingMinIntervalMs: number;
 
   private server: tls.Server | null = null;
   private bonjour: Bonjour | null = null;
@@ -200,6 +225,8 @@ export class NetworkLightProvider implements NetworkProvider {
   private publishedService: Service | null = null;
   private reannounceTimer: ReturnType<typeof setInterval> | null = null;
   private announceSeq = 0;
+  /** Last unicast-ping time per peer instance id (reverse-registration). */
+  private readonly pingedAt = new Map<string, number>();
 
   constructor(options: NetworkLightOptions = {}) {
     this.host = options.host ?? "0.0.0.0";
@@ -217,10 +244,28 @@ export class NetworkLightProvider implements NetworkProvider {
       options.sweepIntervalMs ??
       Math.max(1, Math.floor(this.heartbeatTtlMs / 2));
     this.onPeerDisconnected = options.onPeerDisconnected ?? null;
+    this.mdnsInterface = options.mdnsInterface ?? null;
+    this.unicastPingEnabled = options.unicastPing ?? true;
+    this.pingMinIntervalMs =
+      options.unicastPingMinIntervalMs ??
+      Math.max(1_000, Math.floor(this.heartbeatTtlMs / 2));
   }
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  /**
+   * Reverse-registration hints carried in every outbound `hello` (when we have
+   * a bound port): our mDNS instance id and listening port. The peer uses them
+   * to register us into its discovered map after it has verified our identity
+   * over `auth` — the proactive-peer-handshake route that keeps discovery
+   * working even when our outbound multicast is blocked.
+   */
+  private helloHints(): HelloHints | undefined {
+    return this.boundPort > 0
+      ? { instanceId: this.instanceId, listenPort: this.boundPort }
+      : undefined;
   }
 
   /** Bound listening port (0 before `start()`, or when using port 0). */
@@ -285,7 +330,33 @@ export class NetworkLightProvider implements NetworkProvider {
       });
     });
 
-    this.bonjour = new Bonjour();
+    // Explicit multicast-interface fix: multicast-dns's default interface is
+    // "0.0.0.0" on non-darwin platforms, which on Windows can pick a virtual
+    // adapter (Hyper-V/WSL/VPN) instead of the physical NIC — the classic
+    // one-sided mDNS discovery problem. Passing `interface` makes the mDNS
+    // socket bind to a concrete LAN address so both `addMembership` and
+    // `setMulticastInterface` use that adapter deterministically. An explicit
+    // `mdnsInterface` option wins over the detected physical LAN IPv4.
+    const mdnsInterface = this.mdnsInterface ?? detectLanIPv4() ?? undefined;
+    // `interface` and `bind` are not part of bonjour-service's TS
+    // `ServiceConfig`, but both are passed straight through to multicast-dns
+    // (verified in the installed mdns-server.js and multicast-dns index.js).
+    // multicast-dns uses `opts.interface` for BOTH the socket bind and the
+    // addMembership/setMulticastInterface calls. Binding the socket to a
+    // specific adapter IP breaks loopback multicast delivery (two in-process
+    // peers on the same host can no longer hear each other), which is what
+    // the discovery tests and local-only setups rely on. So we bind wildcard
+    // (`bind: "0.0.0.0"`) and restrict only membership + egress
+    // (`interface`) to the physical LAN adapter — that is the actual
+    // one-sided-discovery fix: the socket still receives on every adapter,
+    // but queries and responses go out the physical NIC and the group is
+    // joined on it, never on a virtual adapter.
+    const bonjourOptions: Partial<ServiceConfig> & { interface?: string; bind?: string } = {};
+    if (mdnsInterface) {
+      bonjourOptions.interface = mdnsInterface;
+      bonjourOptions.bind = "0.0.0.0";
+    }
+    this.bonjour = new Bonjour(bonjourOptions);
     // `probe: false`: this instance owns its name on this host, and skipping
     // the probe lets us re-announce the same service on a heartbeat below
     // without a spurious "name already in use" teardown.
@@ -372,6 +443,7 @@ export class NetworkLightProvider implements NetworkProvider {
     this.peerCapabilities.clear();
     this.capabilityProbes.clear();
     this.probeFailures.clear();
+    this.pingedAt.clear();
     this.limiter.clear();
     this.taskHandler = null;
   }
@@ -494,6 +566,7 @@ export class NetworkLightProvider implements NetworkProvider {
                 [NETWORK_PROTOCOL_VERSION],
                 this.skills,
                 clientNonce,
+                this.helloHints(),
               ),
             ),
           );
@@ -705,6 +778,13 @@ export class NetworkLightProvider implements NetworkProvider {
     let serverNonce = "";
     let authenticatedPeerId: string | null = null;
     let sawTask = false;
+    // Reverse-registration hints from the client's `hello` (proactive peer
+    // handshake). Used only to register a discovered route once the client's
+    // identity has been verified via `auth` — never before, never for anything
+    // security-relevant.
+    let helloInstanceId: string | undefined;
+    let helloListenPort: number | undefined;
+    let presentedCertFp = "";
     const handshakeTimer = setTimeout(() => {
       socket.destroy();
     }, HANDSHAKE_TIMEOUT_MS);
@@ -742,6 +822,8 @@ export class NetworkLightProvider implements NetworkProvider {
               socket.destroy();
               return;
             }
+            helloInstanceId = hello.instanceId;
+            helloListenPort = hello.listenPort;
             clearTimeout(handshakeTimer);
             handshakeDone = true;
             clientNonce = hello.nonce;
@@ -770,7 +852,7 @@ export class NetworkLightProvider implements NetworkProvider {
               return;
             }
             const binding = envelope.body as IdentityBinding;
-            const presentedCertFp = normalizeFingerprint(
+            presentedCertFp = normalizeFingerprint(
               socket.getPeerCertificate().fingerprint256 ?? "",
             );
             if (
@@ -785,6 +867,18 @@ export class NetworkLightProvider implements NetworkProvider {
               return;
             }
             authenticatedPeerId = binding.peerId;
+            // Reverse registration: only now that the client's identity is
+            // verified do we add it to our discovered map (default-deny — an
+            // unauthenticated connection registers nothing). The route lets us
+            // reach the client back even if its outbound multicast never
+            // reached us.
+            this.registerReversePeer({
+              instanceId: helloInstanceId,
+              listenPort: helloListenPort,
+              peerId: binding.peerId,
+              certFingerprint: presentedCertFp,
+              sourceIp: ip,
+            });
             continue;
           }
           if (envelope.type !== "task") {
@@ -850,6 +944,51 @@ export class NetworkLightProvider implements NetworkProvider {
       certFingerprint,
       signature: signature.toString("hex"),
     };
+  }
+
+  /**
+   * Reverse registration (proactive-peer-handshake receive side): add a peer
+   * that just verified its identity over an inbound connection to our
+   * discovered map, keyed by the mDNS instance id it announced in `hello`, so
+   * we can reach it back even when its outbound multicast never reaches us.
+   *
+   * Called ONLY after `auth` verification (default-deny: an unauthenticated
+   * connection registers nothing). The hints are informational: the registered
+   * `peerId` is the *verified* auth identity, the `certFingerprint` is the
+   * fingerprint of the certificate actually presented on the wire, and the
+   * connect-back address is `remoteAddress:listenPort` (the source IP is the
+   * transport's, never a caller-supplied field). A missing/malformed hint
+   * registers nothing.
+   */
+  private registerReversePeer(info: {
+    instanceId?: string;
+    listenPort?: number;
+    peerId: string;
+    certFingerprint: string;
+    sourceIp: string;
+  }): void {
+    const { instanceId, listenPort, peerId, certFingerprint, sourceIp } = info;
+    if (!instanceId || !listenPort) {
+      return;
+    }
+    if (instanceId === this.instanceId) {
+      return;
+    }
+    const ip = normalizeIPv4(sourceIp);
+    if (!ip) {
+      return;
+    }
+    const existing = this.discovered.get(instanceId);
+    this.discovered.set(instanceId, {
+      id: instanceId,
+      address: `${ip}:${listenPort}`,
+      skills: existing?.skills ?? [],
+      name: existing?.name,
+      certFingerprint,
+      peerId,
+      protocolVersion: String(NETWORK_PROTOCOL_VERSION),
+      lastSeen: Date.now(),
+    });
   }
 
   private async handleMessage(
@@ -918,12 +1057,26 @@ export class NetworkLightProvider implements NetworkProvider {
     return probe;
   }
 
-  /** Open a handshake-only connection to a peer and read its capabilities. */
-  private probeCapabilities(
-    peer: DiscoveredPeer,
+  /**
+   * Open a handshake-only connection to a peer, verify its certificate
+   * fingerprint (mDNS-announced) and its Fase 1B identity binding, and read
+   * its capabilities. When `options.proveIdentity` is set, our own `auth`
+   * (identity proof) is sent after `hello_ack` so the peer can register us as
+   * a reverse-discovered route — the proactive-peer-handshake reply. This is
+   * the shared connection core for {@link probeCapabilities} and
+   * {@link unicastPing}; `sendTask` keeps its own flow because it also
+   * exchanges a task and a result on the same session.
+   *
+   * Returns `null` (never throws) on any failure — a probe/ping failure is
+   * best-effort and must never break discovery. On success the learned
+   * capabilities are cached under `peerId` (the peer's instance id).
+   */
+  private openHandshake(
+    address: string,
+    expectedFingerprint: string | undefined,
+    options: { proveIdentity?: boolean },
   ): Promise<PeerCapabilities | null> {
-    const { host, port } = parseAddress(peer.address);
-    const expectedFingerprint = peer.certFingerprint;
+    const { host, port } = parseAddress(address);
     const clientNonce = randomNonce();
 
     return new Promise<PeerCapabilities | null>((resolve) => {
@@ -934,9 +1087,6 @@ export class NetworkLightProvider implements NetworkProvider {
         }
         settled = true;
         clearTimeout(timer);
-        if (!caps) {
-          this.probeFailures.set(peer.id, Date.now());
-        }
         resolve(caps);
       };
 
@@ -963,6 +1113,7 @@ export class NetworkLightProvider implements NetworkProvider {
                 [NETWORK_PROTOCOL_VERSION],
                 this.skills,
                 clientNonce,
+                this.helloHints(),
               ),
             ),
           );
@@ -1007,14 +1158,23 @@ export class NetworkLightProvider implements NetworkProvider {
             finish(null);
             return;
           }
-          const verifiedServerPeerId = body.identity.peerId;
           const caps: PeerCapabilities = {
             skills: [...body.capabilities].slice(0, MAX_CAPABILITIES),
             limits: body.limits ?? null,
-            peerId: verifiedServerPeerId,
+            peerId: body.identity.peerId,
             fetchedAt: Date.now(),
           };
-          this.peerCapabilities.set(peer.id, caps);
+          if (options.proveIdentity) {
+            // Prove our identity so the peer can register us (reverse
+            // discovery). Once `auth` is flushed we are done — the peer
+            // verifies it asynchronously and the connection can close.
+            void this.buildAuthFrame(clientNonce, body.nonce).then((authFrame) => {
+              socket.write(encodeFrame(authFrame));
+              socket.end();
+              finish(caps);
+            });
+            return;
+          }
           socket.destroy();
           finish(caps);
         } catch {
@@ -1026,6 +1186,59 @@ export class NetworkLightProvider implements NetworkProvider {
       socket.once("error", () => finish(null));
       socket.once("close", () => finish(null));
     });
+  }
+
+  /** Open a handshake-only connection to a peer and read its capabilities. */
+  private probeCapabilities(
+    peer: DiscoveredPeer,
+  ): Promise<PeerCapabilities | null> {
+    const caps = this.openHandshake(peer.address, peer.certFingerprint, {});
+    void caps.then((result) => {
+      if (result) {
+        this.peerCapabilities.set(peer.id, result);
+      } else {
+        this.probeFailures.set(peer.id, Date.now());
+      }
+    });
+    return caps;
+  }
+
+  /**
+   * Proactive unicast reply ("proactive peer handshake"): complete a verified
+   * hello+auth handshake with a peer we discovered via mDNS, so it can
+   * register us into its discovered map even when our outbound multicast is
+   * blocked (the one-sided Windows mDNS discovery problem). Best-effort: a
+   * failure is swallowed — discovery must never depend on it.
+   */
+  private async unicastPing(peer: DiscoveredPeer): Promise<void> {
+    try {
+      const caps = await this.openHandshake(peer.address, peer.certFingerprint, {
+        proveIdentity: true,
+      });
+      if (caps) {
+        this.peerCapabilities.set(peer.id, caps);
+      }
+    } catch {
+      // best-effort — ignore
+    }
+  }
+
+  /**
+   * Fire a (throttled) unicast ping toward `peer`. Called when its mDNS
+   * announcement is first heard and again, at most every
+   * `unicastPingMinIntervalMs`, on each re-announcement so a reverse-
+   * registered route on the peer stays fresh past its heartbeat TTL.
+   */
+  private pingPeer(peer: DiscoveredPeer): void {
+    if (!this.unicastPingEnabled) {
+      return;
+    }
+    const last = this.pingedAt.get(peer.id) ?? 0;
+    if (Date.now() - last < this.pingMinIntervalMs) {
+      return;
+    }
+    this.pingedAt.set(peer.id, Date.now());
+    void this.unicastPing(peer);
   }
 
   private onServiceUp(service: Service): void {
@@ -1056,6 +1269,10 @@ export class NetworkLightProvider implements NetworkProvider {
       protocolVersion,
       lastSeen: Date.now(),
     });
+    // Proactive peer handshake: as soon as this announcement is heard, reply
+    // with a verified unicast hello+auth so the announcing peer can register
+    // us even when our own outbound multicast is blocked.
+    this.pingPeer(this.discovered.get(id)!);
   }
 
   private onServiceDown(service: Service): void {
@@ -1090,6 +1307,9 @@ export class NetworkLightProvider implements NetworkProvider {
       peer.address = address;
     }
     peer.lastSeen = Date.now();
+    // Keep the reverse-registered route on the peer fresh: throttled unicast
+    // pings at most every `unicastPingMinIntervalMs`.
+    this.pingPeer(peer);
   }
 
   /**
@@ -1211,4 +1431,14 @@ function fingerprintsMatch(expected: string, presented: string): boolean {
   const normalizedExpected = normalizeFingerprint(expected);
   const normalizedPresented = normalizeFingerprint(presented);
   return normalizedExpected.length > 0 && normalizedExpected === normalizedPresented;
+}
+
+/**
+ * Normalize a `socket.remoteAddress` to a plain IPv4 string, or `null` when it
+ * is not one. IPv6-mapped addresses (`::ffff:a.b.c.d`) are unwrapped so the
+ * connect-back address matches the IPv4 form the rest of the stack uses.
+ */
+function normalizeIPv4(remote: string): string | null {
+  const ip = remote.startsWith("::ffff:") ? remote.slice("::ffff:".length) : remote;
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(ip) ? ip : null;
 }

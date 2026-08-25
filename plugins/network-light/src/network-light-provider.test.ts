@@ -4,6 +4,7 @@ import * as tls from "node:tls";
 import * as net from "node:net";
 import * as crypto from "node:crypto";
 import * as forge from "node-forge";
+import type { Service } from "bonjour-service";
 import { NetworkLightProvider } from "./network-light-provider";
 import type { DiscoveredPeer, NetworkLightOptions } from "./network-light-provider";
 import type { NetworkPeer, PeerIdentity } from "@p2p-hub/sdk";
@@ -923,5 +924,291 @@ test("abuse limits: concurrent task cap refuses the overflow task", { skip: MDNS
   } finally {
     await alice.stop();
     await bob.stop();
+  }
+});
+
+/**
+ * Read the next complete frame(s) from a raw TLS socket. Resolves with the
+ * first frame so callers can chain reads (hello_ack then nothing further).
+ */
+function readNextFrame(socket: tls.TLSSocket): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let buffer: Buffer = Buffer.alloc(0);
+    const timer = setTimeout(
+      () => reject(new Error("timed out waiting for a frame")),
+      5_000,
+    );
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      try {
+        if (buffer.length < 4) {
+          return;
+        }
+        const len = buffer.readUInt32BE(0);
+        if (buffer.length < 4 + len) {
+          return;
+        }
+        const raw = buffer.subarray(4, 4 + len).toString("utf8");
+        clearTimeout(timer);
+        socket.removeListener("data", onData);
+        resolve(JSON.parse(raw));
+      } catch (err) {
+        clearTimeout(timer);
+        reject(err);
+      }
+    };
+    socket.on("data", onData);
+    socket.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function helloFrame(
+  nonce: string,
+  hints?: { instanceId?: string; listenPort?: number },
+): Buffer {
+  return framePayload(
+    JSON.stringify({
+      protocol: "p2p-hub:network",
+      version: 1,
+      type: "hello",
+      body: {
+        versions: [1],
+        capabilities: [],
+        nonce,
+        ...(hints?.instanceId !== undefined ? { instanceId: hints.instanceId } : {}),
+        ...(hints?.listenPort !== undefined ? { listenPort: hints.listenPort } : {}),
+      },
+    }),
+  );
+}
+
+test("a verified inbound handshake reverse-registers the client into the discovered map", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  await bob.start();
+
+  const clientKey = makeIdentity();
+  const { key, cert } = generateSelfSignedCert();
+  const clientCertFp = normalizeFingerprint(
+    new crypto.X509Certificate(cert).fingerprint256,
+  );
+  const clientInstanceId = "client-inst-1";
+  const clientListenPort = 43210;
+
+  let raw: tls.TLSSocket | null = null;
+  try {
+    const clientNonce = randomNonce();
+    raw = tls.connect(
+      { host: "127.0.0.1", port: bob.port, key, cert, rejectUnauthorized: false },
+      () => {
+        raw!.write(helloFrame(clientNonce, { instanceId: clientInstanceId, listenPort: clientListenPort }));
+      },
+    );
+
+    const ack = (await readNextFrame(raw)) as { body: { nonce: string } };
+    const serverNonce = ack.body.nonce;
+    const signature = await clientKey.signer(
+      buildIdentityBindingMessage(clientNonce, serverNonce, clientCertFp),
+    );
+    raw.write(
+      framePayload(
+        JSON.stringify({
+          protocol: "p2p-hub:network",
+          version: 1,
+          type: "auth",
+          body: {
+            peerId: clientKey.identity.peerId,
+            certFingerprint: clientCertFp,
+            signature: signature.toString("hex"),
+          },
+        }),
+      ),
+    );
+
+    const registered = await waitFor<DiscoveredPeer>(async () => {
+      const peer = bob.listPeers().find((p) => p.id === clientInstanceId);
+      return peer ?? null;
+    });
+
+    // The route points back at the client's announced listen port, keyed by
+    // its mDNS instance id, with the *verified* identity and the certificate
+    // fingerprint that was actually presented on the wire.
+    assert.equal(registered.peerId, clientKey.identity.peerId);
+    assert.equal(registered.address, `127.0.0.1:${clientListenPort}`);
+    assert.equal(registered.certFingerprint, clientCertFp);
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("an inbound handshake without a verified auth registers nothing (default-deny)", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  await bob.start();
+
+  const { key, cert } = generateSelfSignedCert();
+  const clientInstanceId = "client-inst-noauth";
+  const clientListenPort = 44444;
+
+  let raw: tls.TLSSocket | null = null;
+  try {
+    raw = tls.connect(
+      { host: "127.0.0.1", port: bob.port, key, cert, rejectUnauthorized: false },
+      () => {
+        raw!.write(helloFrame(randomNonce(), { instanceId: clientInstanceId, listenPort: clientListenPort }));
+      },
+    );
+    // The server answers the handshake but the client never proves its
+    // identity — no `auth`. Wait for the ack, then close.
+    await readNextFrame(raw);
+    raw.destroy();
+
+    await delay(300);
+    assert.equal(
+      bob.listPeers().find((p) => p.id === clientInstanceId),
+      undefined,
+      "an unauthenticated peer must never be reverse-registered",
+    );
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("hearing an mDNS announcement triggers a unicast hello+auth reply to the sender", async () => {
+  const aliceKey = makeIdentity();
+  const alice = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: aliceKey.identity,
+    identitySigner: aliceKey.signer,
+  });
+  await alice.start();
+
+  // Fake remote peer: a TLS server that completes the hello_ack handshake and
+  // records the client's hello (with reverse-registration hints) and auth.
+  const bobKey = makeIdentity();
+  const { key, cert } = generateSelfSignedCert();
+  const bobCertFp = normalizeFingerprint(
+    new crypto.X509Certificate(cert).fingerprint256,
+  );
+  const received: {
+    hello?: { instanceId?: string; listenPort?: number; capabilities?: string[] };
+    auth?: { peerId?: string };
+  } = {};
+  const server = tls.createServer({ key, cert }, (socket) => {
+    let buffer: Buffer = Buffer.alloc(0);
+    socket.on("data", async (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      try {
+        for (;;) {
+          if (buffer.length < 4) {
+            return;
+          }
+          const len = buffer.readUInt32BE(0);
+          if (buffer.length < 4 + len) {
+            return;
+          }
+          const raw = buffer.subarray(4, 4 + len).toString("utf8");
+          buffer = buffer.subarray(4 + len);
+          const envelope = JSON.parse(raw) as { type: string; body: Record<string, unknown> };
+          if (envelope.type === "hello") {
+            received.hello = envelope.body as never;
+            const serverNonce = randomNonce();
+            const signature = await bobKey.signer(
+              buildIdentityBindingMessage(
+                String(envelope.body.nonce),
+                serverNonce,
+                bobCertFp,
+              ),
+            );
+            socket.write(
+              framePayload(
+                JSON.stringify({
+                  protocol: "p2p-hub:network",
+                  version: 1,
+                  type: "hello_ack",
+                  body: {
+                    version: 1,
+                    capabilities: ["echo"],
+                    nonce: serverNonce,
+                    identity: {
+                      peerId: bobKey.identity.peerId,
+                      certFingerprint: bobCertFp,
+                      signature: signature.toString("hex"),
+                    },
+                  },
+                }),
+              ),
+            );
+          } else if (envelope.type === "auth") {
+            received.auth = envelope.body as never;
+            socket.end();
+          }
+        }
+      } catch {
+        socket.destroy();
+      }
+    });
+    socket.on("error", () => socket.destroy());
+  });
+  const fakePort = await listen(server);
+
+  try {
+    const fakeService = {
+      name: "p2p-hub-fake",
+      txt: {
+        id: "fake-instance",
+        certFingerprint: bobCertFp,
+        version: "1",
+        peerId: bobKey.identity.peerId,
+      },
+      addresses: ["127.0.0.1"],
+      port: fakePort,
+      host: "fake.local",
+    } as unknown as Service;
+
+    // Simulate hearing the announcement: the handler registers the peer and
+    // fires the proactive unicast reply.
+    (alice as unknown as { onServiceUp(service: Service): void }).onServiceUp(fakeService);
+
+    await waitFor(async () => (received.auth ? true : null));
+
+    // The unicast reply carries the reverse-registration hints so the sender
+    // can register us, and proves our identity so that registration is
+    // accepted (default-deny on the receiving side).
+    assert.equal(
+      received.hello?.instanceId,
+      (alice as unknown as { instanceId: string }).instanceId,
+      "hello must carry our mDNS instance id",
+    );
+    assert.equal(
+      received.hello?.listenPort,
+      alice.port,
+      "hello must carry our listening port",
+    );
+    assert.deepEqual(received.hello?.capabilities, ["echo"]);
+    assert.equal(
+      received.auth?.peerId,
+      aliceKey.identity.peerId,
+      "auth must prove our identity so the sender registers us",
+    );
+  } finally {
+    await close(server);
+    await alice.stop();
   }
 });
