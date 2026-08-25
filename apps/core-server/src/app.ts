@@ -298,6 +298,10 @@ export class CoreServer {
     }
     this.clients.clear();
     if (this.provider) {
+      // Drop the provider from both registries so a stopped server leaves no
+      // stale reference for plugin `ctx.network` lookups or API listings.
+      this.registry.unregister(this.provider.id);
+      this.host.networkRegistry().unregister(this.provider.id);
       await this.provider.stop();
       this.provider = null;
     }
@@ -343,6 +347,17 @@ export class CoreServer {
       identitySigner: (data) => this.host.identityManager().sign(data),
     });
     this.registry.register(this.provider);
+    // Plugin code reads `ctx.network`, which is a LIVE reference to the
+    // PluginHost's own network registry (the capability resolves
+    // `host.networkRegistry().selectActive()` on every call — see
+    // buildNetworkCapability). This CoreServer boots its host without
+    // `enableNetworking`, so the host never starts its own transport and its
+    // registry would stay empty — every plugin would see "no active network
+    // provider" no matter how healthy THIS provider is. Register the same
+    // provider into the host's registry so `contacts.verifyPeer` →
+    // `ctx.network.sendTask` routes over the real transport. There is exactly
+    // one provider in the process: the host starts none of its own.
+    this.host.networkRegistry().register(this.provider);
     wireNetworkToBroker(this.provider, this.broker);
     await this.provider.start();
   }

@@ -3,11 +3,19 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CoreServer } from "./app";
+import { PluginHost } from "@p2p-hub/core";
 
 const BOOT_TOKEN = "contacts-glue-token";
 
 const PEER_ID = "a".repeat(64);
 const OTHER_ID = "b".repeat(64);
+
+// Real mDNS multicast discovery is not delivered on GitHub-hosted macOS
+// runners, so the two-node discovery-based test is skipped there (same rule as
+// the network-light / plugin-host networking suites).
+const MDNS_SKIP =
+  process.platform === "darwin" &&
+  "real mDNS multicast discovery is not delivered on GitHub macOS runners; the raw-TLS tests still run";
 
 /**
  * Temp dirs that boot a real PluginHost — under node_modules/.cache so the
@@ -38,6 +46,62 @@ async function bootContactsServer(): Promise<{ server: CoreServer; port: number 
   const addr = server.address();
   assert.ok(addr, "server should report its bound address");
   return { server, port: addr.port };
+}
+
+/** CoreServer with the P2P transport enabled (provider wired for plugins). */
+async function bootContactsNetworkingServer(): Promise<{ server: CoreServer; port: number }> {
+  await fs.mkdir(TEST_TMP_ROOT, { recursive: true });
+  const dataDir = await fs.mkdtemp(path.join(TEST_TMP_ROOT, "core-server-contacts-net-"));
+  const pluginsDir = path.join(dataDir, "plugins");
+  await fs.mkdir(pluginsDir, { recursive: true });
+  await fs.cp(CONTACTS_SRC, path.join(pluginsDir, "contacts"), { recursive: true });
+
+  const server = new CoreServer({
+    pluginsDir,
+    dataDir,
+    host: "127.0.0.1",
+    port: 0,
+    bootToken: BOOT_TOKEN,
+    networking: true,
+  });
+  await server.start();
+  const addr = server.address();
+  assert.ok(addr, "server should report its bound address");
+  return { server, port: addr.port };
+}
+
+/** A second P2P node running the contacts plugin (serves signChallenge). */
+async function bootPeerHost(): Promise<{ host: PluginHost; peerId: string }> {
+  await fs.mkdir(TEST_TMP_ROOT, { recursive: true });
+  const dataDir = await fs.mkdtemp(path.join(TEST_TMP_ROOT, "contacts-peer-"));
+  const pluginsDir = path.join(dataDir, "plugins");
+  await fs.mkdir(pluginsDir, { recursive: true });
+  await fs.cp(CONTACTS_SRC, path.join(pluginsDir, "contacts"), { recursive: true });
+
+  const host = new PluginHost({
+    pluginsDir,
+    dataDir,
+    enableNetworking: true,
+  });
+  await host.boot();
+  const peerId = (await host.identityManager().getOrCreateIdentity()).peerId;
+  return { host, peerId };
+}
+
+async function waitFor<T>(
+  check: () => Promise<T | null>,
+  timeoutMs = 15_000,
+  intervalMs = 150,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await check();
+    if (value) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`condition not met within ${timeoutMs}ms`);
 }
 
 async function execute(
@@ -165,6 +229,56 @@ test("verifyPeer over HTTP returns the graceful no-network error, never a throw"
     // graceful failure is the stub's "no active network provider", never a throw.
     assert.deepEqual(verified.result, { verified: false, error: "no active network provider" });
   } finally {
+    await server.stop();
+  }
+});
+
+test("verifyPeer over HTTP reaches a real peer once the transport is wired into the plugin host registry", { skip: MDNS_SKIP }, async () => {
+  const { server, port } = await bootContactsNetworkingServer();
+  const peer = await bootPeerHost();
+  try {
+    // Wait until the core-server's transport has discovered the peer node.
+    await waitFor(async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/capabilities`, {
+        headers: { Authorization: `Bearer ${BOOT_TOKEN}` },
+      });
+      if (res.status !== 200) {
+        return null;
+      }
+      const body = (await res.json()) as {
+        remote?: { peers?: Array<{ peerId?: string }> };
+      };
+      return (body.remote?.peers ?? []).some((p) => p.peerId === peer.peerId)
+        ? true
+        : null;
+    });
+
+    await execute(port, {
+      serviceId: "contacts",
+      method: "addContact",
+      arguments: { peerId: peer.peerId, publicKeyHex: peer.peerId, displayName: "Peer B" },
+    });
+
+    // The contacts plugin's `ctx.network` must resolve the CoreServer's real
+    // provider (registered into the host's network registry), route the
+    // challenge to the peer's signChallenge skill, verify the returned
+    // signature and promote the contact to "verified". Before the registry
+    // wiring this returned "no active network provider" even though the
+    // transport was healthy.
+    const verified = await execute(port, {
+      serviceId: "contacts",
+      method: "verifyPeer",
+      arguments: { peerId: peer.peerId },
+    });
+    assert.equal(verified.status, "ok");
+    assert.deepEqual(verified.result, { verified: true });
+
+    const listed = await execute(port, { serviceId: "contacts", method: "listContacts" });
+    const records = listed.result as Array<{ peerId: string; trustState: string }>;
+    const promoted = records.find((c) => c.peerId === peer.peerId);
+    assert.equal(promoted?.trustState, "verified");
+  } finally {
+    await peer.host.stop();
     await server.stop();
   }
 });
