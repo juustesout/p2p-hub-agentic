@@ -1,0 +1,15 @@
+{
+  "id": "media",
+  "name": "P2P Media",
+  "version": "0.1.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": [
+    "network:skill:media.offer",
+    "network:skill:media.answer",
+    "network:skill:media.iceCandidate",
+    "network:http:media.requestSession",
+    "network:http:media.closeSession",
+    "network:http:media.getStreamStatus"
+  ]
+}

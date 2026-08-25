@@ -170,6 +170,17 @@ interface PeerSitePlugin {
 }
 
 /**
+ * Structural view of the activated `media` plugin. Core-server only resolves
+ * the media-access confirmation requests the plugin raises: it listens for
+ * `media:accessRequested`, runs the native Tier-2 confirmation (the
+ * `TrustConfirmation` it already owns — same route as peersite's
+ * `resolveAccessRequest`), and resolves back into the plugin.
+ */
+interface MediaPlugin {
+  resolveMediaAccess?(requestId: string, granted: boolean): Promise<boolean>;
+}
+
+/**
  * Thin HTTP + WebSocket bridge that exposes a running `@p2p-hub/core` host to
  * the desktop shell. It is the only place where raw vault values are read, and
  * it deliberately never returns secret values over HTTP — the vault API only
@@ -219,6 +230,7 @@ export class CoreServer {
     this.registerMediaSkill();
     this.bridgeHookEvents();
     this.registerPeerAccessHandler();
+    this.registerMediaAccessHandler();
 
     if (this.options.networking !== false) {
       await this.startNetworking();
@@ -443,6 +455,52 @@ export class CoreServer {
     const plugin = this.peersite();
     if (plugin?.resolveAccessRequest) {
       await plugin.resolveAccessRequest(req.requestId, approved);
+    }
+  }
+
+  /**
+   * Handle a `media:accessRequested` event emitted by the media plugin before
+   * any SDP/ICE exchange with a peer. The request is resolved through the
+   * host's native tier-2 confirmation (`confirmMediaRequest`, fail-closed —
+   * the same `TrustConfirmation` core-server already owns for peersite), then
+   * passed back to the plugin via `resolveMediaAccess`. The plugin never
+   * calls `requestMediaAccess` itself; it only raises the hook.
+   */
+  private registerMediaAccessHandler(): void {
+    this.host
+      .hookRegistry()
+      .on("media:accessRequested", (payload) => {
+        void this.handleMediaAccessRequest(payload);
+      });
+  }
+
+  private async handleMediaAccessRequest(payload: unknown): Promise<void> {
+    const req = (payload ?? {}) as {
+      requestId?: unknown;
+      peerId?: unknown;
+      kind?: unknown;
+      direction?: unknown;
+      expiresInMs?: unknown;
+    };
+    if (
+      typeof req.requestId !== "string" ||
+      typeof req.peerId !== "string" ||
+      (req.kind !== "camera" && req.kind !== "microphone") ||
+      typeof req.expiresInMs !== "number"
+    ) {
+      return;
+    }
+
+    const granted = await this.trustGate.confirmMediaRequest(
+      req.peerId,
+      req.kind,
+      undefined,
+      req.expiresInMs,
+    );
+
+    const plugin = this.media();
+    if (plugin?.resolveMediaAccess) {
+      await plugin.resolveMediaAccess(req.requestId, granted);
     }
   }
 
@@ -1483,6 +1541,20 @@ export class CoreServer {
       typeof (instance as { getSiteRoot?: unknown }).getSiteRoot === "function"
     ) {
       return instance as PeerSitePlugin;
+    }
+    return null;
+  }
+
+  /** Activated `media` plugin, duck-typed (fail-closed) — never a blind cast. */
+  private media(): MediaPlugin | null {
+    const instance = this.host.getActivated("media");
+    if (
+      typeof instance === "object" &&
+      instance !== null &&
+      typeof (instance as { resolveMediaAccess?: unknown }).resolveMediaAccess ===
+        "function"
+    ) {
+      return instance as MediaPlugin;
     }
     return null;
   }

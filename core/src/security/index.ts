@@ -1,6 +1,7 @@
 export * from "./action-validator";
 export * from "./peer-access-gate";
 export * from "./trust-gate";
+export * from "./telemetry-gate";
 export {
   evaluateSettingsRisk,
   highestSeverity,

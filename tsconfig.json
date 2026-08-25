@@ -14,6 +14,7 @@
     { "path": "./plugins/paint" },
     { "path": "./plugins/contacts" },
     { "path": "./plugins/peersite" },
+    { "path": "./plugins/media" },
     { "path": "./plugins/ens" },
     { "path": "./plugins/chat" },
     { "path": "./plugins/tasks" },
