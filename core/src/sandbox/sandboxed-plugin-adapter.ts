@@ -147,7 +147,7 @@ function assertSandboxRegistrationAllowed(
       );
     }
   }
-  if (options.httpExposed === true) {
+  if (options.httpExposed === true || options.httpBridgeOnly === true) {
     const permission = `network:http:${manifest.id}.${skillName}`;
     if (!manifest.permissions.includes(permission)) {
       throw new Error(

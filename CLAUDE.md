@@ -131,6 +131,22 @@ payload field. Access passes are core-owned (`AccessPassManager` via `ctx.access
 ephemeral, scoped and expiring — never bearer tokens (the peer still proves
 possession over the transport).
 
+### Local-operator HTTP bridge (`httpBridgeOnly` — a third, separate exposure dimension)
+
+Since the contacts lifecycle (add/list/verify/block/unblock/remove), there is a
+deliberate third exposure flag next to `localOnly` (P2P) and `httpExposed`
+(local HTTP bridge): **`httpBridgeOnly`** — "reachable over the local HTTP
+bridge (`/api/execute` with the per-boot token, i.e. Hermes/the desktop shell),
+structurally never over the network." The TaskBroker enforces it by
+construction: registration forces `localOnly: true`, drops any `remote` policy,
+and rejects `localOnly: false`/`remote` contradictions loudly at registration;
+`handleRemote` additionally checks the flag itself (defense-in-depth). The same
+`network:http:<id>.<skill>` manifest permission as `httpExposed` is required
+(in-process loader and sandbox adapter alike). Do NOT reuse this flag for
+genuine remote skills — those stay `localOnly: false` + a `remote` policy. When
+adding an operator-only management skill (block, delete, audit, …), `httpBridgeOnly`
+is the shape: a local operator privilege, never a peer-facing surface.
+
 ### Capability-level wire contracts & shared-origin surfaces (Fase 2-eindcriterium)
 
 The P2P static-website slice (`p2p-hub:website:v1`, `sdk/src/website-contract.ts`)

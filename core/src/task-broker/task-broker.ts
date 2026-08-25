@@ -92,6 +92,21 @@ export interface SkillRegistrationOptions {
    */
   httpExposed?: boolean;
   /**
+   * Local-operator-only HTTP exposure (the "local operator privilege" — Hermes
+   * and the desktop shell talk to localhost with a per-boot token; a LAN/WAN
+   * peer is a different threat model and cannot opt in). When true the skill is
+   * reachable over the local HTTP bridge (`handleHttp` / `/api/execute`, the
+   * same surface as `httpExposed: true`) but is STRUCTURALLY never reachable
+   * over the network: `localOnly` is forced to `true` and any `remote` policy
+   * is dropped, so `handleRemote` denies it regardless of what the author also
+   * passed. Passing `localOnly: false` or a `remote` policy together with
+   * `httpBridgeOnly: true` is a contradiction and is rejected loudly at
+   * registration. This is the flag for operator-only management skills (e.g.
+   * contacts add/verify/block/remove) — not for skills that need genuine remote
+   * reachability, which must use `localOnly: false` + a `remote` policy instead.
+   */
+  httpBridgeOnly?: boolean;
+  /**
    * Fase 2A: who may invoke this skill over the network. Without a policy, a
    * skill registered with `localOnly: false` is *denied* on the network path —
    * this is the fail-closed default (see `remote-access.ts`). A policy does
@@ -114,6 +129,7 @@ interface SkillRecord {
   handler: SkillHandler;
   localOnly: boolean;
   httpExposed: boolean;
+  httpBridgeOnly: boolean;
   remote: RemoteAccessPolicy | undefined;
   capabilityType: CapabilityType;
 }
@@ -206,11 +222,31 @@ export class TaskBroker {
     options: SkillRegistrationOptions = {},
   ): void {
     validateRemotePolicy(options.remote);
+    const bridgeOnly = options.httpBridgeOnly === true;
+    if (bridgeOnly) {
+      // The structural guarantee behind `httpBridgeOnly`: this skill is a local
+      // operator privilege, never a network one. A contradiction is a loud
+      // registration-time error rather than a silent override, so a plugin
+      // author cannot half-opt in to the network by accident.
+      if (options.localOnly === false) {
+        throw new Error(
+          `skill "${skill}" is registered with httpBridgeOnly: true and cannot also set localOnly: false`,
+        );
+      }
+      if (options.remote !== undefined) {
+        throw new Error(
+          `skill "${skill}" is registered with httpBridgeOnly: true and cannot declare a remote access policy`,
+        );
+      }
+    }
     this.skills.set(skill, {
       handler,
-      localOnly: options.localOnly ?? true,
-      httpExposed: options.httpExposed ?? false,
-      remote: options.remote,
+      // `httpBridgeOnly` forces local-only + HTTP-exposed, independently of the
+      // `localOnly`/`httpExposed` defaults and of any other option.
+      localOnly: bridgeOnly ? true : options.localOnly ?? true,
+      httpExposed: bridgeOnly ? true : options.httpExposed ?? false,
+      httpBridgeOnly: bridgeOnly,
+      remote: bridgeOnly ? undefined : options.remote,
       // Fail-closed: only an explicit `"telemetry"` opts a capability into
       // rate limiting; anything missing or unknown is an action.
       capabilityType: isCapabilityType(options.capabilityType)
@@ -232,6 +268,7 @@ export class TaskBroker {
     skill: string;
     localOnly: boolean;
     httpExposed: boolean;
+    httpBridgeOnly: boolean;
     remote?: RemoteAccessPolicy;
     capabilityType: CapabilityType;
   }> {
@@ -239,6 +276,7 @@ export class TaskBroker {
       skill,
       localOnly: record.localOnly,
       httpExposed: record.httpExposed,
+      httpBridgeOnly: record.httpBridgeOnly,
       capabilityType: record.capabilityType,
       ...(record.remote ? { remote: record.remote } : {}),
     }));
@@ -300,7 +338,11 @@ export class TaskBroker {
         error: `no skill registered for "${task.skill}"`,
       };
     }
-    if (gate === "network" && record.localOnly) {
+    // A `httpBridgeOnly` skill is a local operator privilege: `localOnly` is
+    // forced to true at registration, and the check is repeated here so the
+    // network boundary is independently fail-closed even if that normalization
+    // ever changes.
+    if (gate === "network" && (record.localOnly || record.httpBridgeOnly)) {
       return {
         taskId: task.id,
         status: "error",

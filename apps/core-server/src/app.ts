@@ -1215,6 +1215,7 @@ export class CoreServer {
       skill: s.skill,
       localOnly: s.localOnly,
       httpExposed: s.httpExposed,
+      httpBridgeOnly: s.httpBridgeOnly,
       capabilityType: s.capabilityType,
       pluginId: s.skill.split(".")[0] ?? "",
     }));

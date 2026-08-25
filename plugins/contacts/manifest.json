@@ -6,6 +6,12 @@
   "entry": "./dist/index.js",
   "permissions": [
     "network:skill:contacts.signChallenge",
-    "network:public:contacts.signChallenge"
+    "network:public:contacts.signChallenge",
+    "network:http:contacts.addContact",
+    "network:http:contacts.listContacts",
+    "network:http:contacts.removeContact",
+    "network:http:contacts.verifyPeer",
+    "network:http:contacts.blockContact",
+    "network:http:contacts.unblockContact"
   ]
 }

@@ -34,6 +34,8 @@ export interface CapabilityPlugin {
 export interface CapabilitySkill {
   skill: string;
   localOnly: boolean;
+  httpExposed: boolean;
+  httpBridgeOnly: boolean;
   pluginId: string;
 }
 

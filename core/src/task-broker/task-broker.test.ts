@@ -104,6 +104,86 @@ test("handleHttp allows skills explicitly opted in to HTTP exposure", async () =
   assert.deepEqual(result.result, { ok: true });
 });
 
+// ---------------------------------------------------------------------------
+// httpBridgeOnly — the local-operator privilege: reachable over the local HTTP
+// bridge, structurally never over the network.
+// ---------------------------------------------------------------------------
+
+test("httpBridgeOnly skills are reachable over the local HTTP bridge", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("contacts.listContacts", async () => [], {
+    httpBridgeOnly: true,
+  });
+
+  const result = await broker.handleHttp(task({ skill: "contacts.listContacts" }));
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.result, []);
+});
+
+test("httpBridgeOnly skills are denied over the network even without an explicit localOnly flag", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("contacts.addContact", async () => ({}), {
+    httpBridgeOnly: true,
+  });
+
+  const result = await broker.handleRemote(task({ skill: "contacts.addContact" }));
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /local-only/);
+});
+
+test("httpBridgeOnly forces localOnly and httpExposed and drops any remote policy", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("contacts.blockContact", async () => ({}), {
+    httpBridgeOnly: true,
+  });
+
+  const [listed] = broker.listSkills().filter((s) => s.skill === "contacts.blockContact");
+  assert.equal(listed.httpBridgeOnly, true);
+  assert.equal(listed.localOnly, true, "httpBridgeOnly must force local-only");
+  assert.equal(listed.httpExposed, true, "httpBridgeOnly must imply HTTP exposure");
+  assert.equal(listed.remote, undefined, "httpBridgeOnly must drop any remote policy");
+});
+
+test("httpBridgeOnly still allows in-process handle (local callers)", async () => {
+  const broker = new TaskBroker();
+  broker.registerSkill("contacts.removeContact", async (payload) => payload, {
+    httpBridgeOnly: true,
+  });
+
+  const result = await broker.handle(task({ skill: "contacts.removeContact", payload: { peerId: "x" } }));
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.result, { peerId: "x" });
+});
+
+test("httpBridgeOnly rejects a contradictory localOnly: false loudly at registration", async () => {
+  const broker = new TaskBroker();
+  assert.throws(
+    () =>
+      broker.registerSkill("contacts.bad", async () => ({}), {
+        httpBridgeOnly: true,
+        localOnly: false,
+      }),
+    /httpBridgeOnly: true and cannot also set localOnly: false/,
+  );
+  assert.equal(broker.hasSkill("contacts.bad"), false);
+});
+
+test("httpBridgeOnly rejects a contradictory remote policy loudly at registration", async () => {
+  const broker = new TaskBroker();
+  assert.throws(
+    () =>
+      broker.registerSkill("contacts.bad", async () => ({}), {
+        httpBridgeOnly: true,
+        remote: { gate: "any" },
+      }),
+    /httpBridgeOnly: true and cannot declare a remote access policy/,
+  );
+  assert.equal(broker.hasSkill("contacts.bad"), false);
+});
+
 test("a payload nested deeper than MAX_OBJECT_DEPTH is rejected, not thrown", async () => {
   const broker = new TaskBroker();
   broker.registerSkill("demo.echo", async (payload) => payload);

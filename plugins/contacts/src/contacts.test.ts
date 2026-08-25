@@ -105,6 +105,66 @@ test("verifyPeer returns a graceful error when no network is available", async (
   assert.equal(listed[0].trustState, "pending");
 });
 
+test("blockContact sets the trust state to blocked and is persisted", async () => {
+  const contacts = await loadContacts();
+
+  await contacts.addContact({
+    peerId: PEER_ID,
+    publicKeyHex: PEER_ID,
+    displayName: "Alice",
+  });
+
+  const blocked = await contacts.blockContact(PEER_ID);
+  assert.equal(blocked.trustState, "blocked");
+
+  const listed = await contacts.listContacts();
+  assert.equal(listed[0].trustState, "blocked");
+});
+
+test("unblockContact returns a blocked contact to pending", async () => {
+  const contacts = await loadContacts();
+
+  await contacts.addContact({
+    peerId: PEER_ID,
+    publicKeyHex: PEER_ID,
+    displayName: "Alice",
+  });
+  await contacts.blockContact(PEER_ID);
+
+  const unblocked = await contacts.unblockContact(PEER_ID);
+  assert.equal(unblocked.trustState, "pending");
+
+  const listed = await contacts.listContacts();
+  assert.equal(listed[0].trustState, "pending");
+});
+
+test("blockContact and unblockContact fail loudly for an unknown peer", async () => {
+  const contacts = await loadContacts();
+
+  await assert.rejects(contacts.blockContact(PEER_ID), /contact .* not found/);
+  await assert.rejects(contacts.unblockContact(PEER_ID), /contact .* not found/);
+  await assert.rejects(contacts.blockContact(123 as unknown as string), /expect \{ peerId: string \}/);
+});
+
+test("verifyPeer after unblock can promote the contact back to verified", async () => {
+  const contacts = await loadContacts();
+
+  await contacts.addContact({
+    peerId: PEER_ID,
+    publicKeyHex: PEER_ID,
+    displayName: "Alice",
+  });
+  await contacts.blockContact(PEER_ID);
+  await contacts.unblockContact(PEER_ID);
+
+  // No network in this harness — the point is that unblock does not clear the
+  // contact (verifyPeer now runs against a pending, not blocked, contact).
+  const result = await contacts.verifyPeer({ peerId: PEER_ID });
+  assert.equal(result.verified, false);
+  assert.equal(result.error, "no network provider available");
+  assert.equal((await contacts.listContacts())[0].trustState, "pending");
+});
+
 test("getContact returns null for an unknown peer", async () => {
   const contacts = await loadContacts();
   assert.equal(await contacts.getContact(PEER_ID), null);

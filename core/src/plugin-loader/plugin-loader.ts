@@ -337,7 +337,7 @@ export async function loadPlugin(
         if (options?.localOnly === false) {
           assertNetworkSkillPermission(manifest, skillName);
         }
-        if (options?.httpExposed === true) {
+        if (options?.httpExposed === true || options?.httpBridgeOnly === true) {
           assertHttpExposedPermission(manifest, skillName);
         }
         if (assertsPublicRemote(options)) {

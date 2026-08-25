@@ -63,6 +63,10 @@ export interface ContactsPlugin extends ContactLookup {
   listContacts(): Promise<ContactRecord[]>;
   removeContact(peerId: string): Promise<boolean>;
   verifyPeer(input: VerifyPeerInput): Promise<VerifyResult>;
+  /** Set a contact's trust state to `"blocked"`. Throws if the contact is unknown. */
+  blockContact(peerId: string): Promise<ContactRecord>;
+  /** Set a blocked contact back to `"pending"` (re-verify to restore `"verified"`). */
+  unblockContact(peerId: string): Promise<ContactRecord>;
 }
 
 const CONTACT_BOOK_CLASS = "P2P.ContactBook";
@@ -211,6 +215,35 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
     return true;
   }
 
+  /**
+   * The single write path behind `blockContact`/`unblockContact`. Only an
+   * existing contact can change trust state, and only between the two
+   * operator-reachable states — the `"verified"` state is exclusively earned
+   * by a passing challenge-response in `verifyPeer`, never assigned here.
+   * Unknown peerIds fail loudly (throw), never silently.
+   */
+  async function setTrustState(peerId: string, state: "blocked" | "pending"): Promise<ContactRecord> {
+    if (typeof peerId !== "string") {
+      throw new Error("blockContact/unblockContact expect { peerId: string }");
+    }
+    const book = await loadBook();
+    const contact = findContact(book, peerId);
+    if (!contact) {
+      throw new Error(`contact "${peerId}" not found`);
+    }
+    contact.trustState = state;
+    await saveBook(book);
+    return toRecord(contact);
+  }
+
+  async function blockContact(peerId: string): Promise<ContactRecord> {
+    return setTrustState(peerId, "blocked");
+  }
+
+  async function unblockContact(peerId: string): Promise<ContactRecord> {
+    return setTrustState(peerId, "pending");
+  }
+
   async function verifyPeer(input: VerifyPeerInput): Promise<VerifyResult> {
     const { peerId } = (input ?? {}) as { peerId?: unknown };
     if (typeof peerId !== "string") {
@@ -279,12 +312,18 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
     return { trustState: contact.trustState as TrustState };
   }
 
+  // All contact-management skills are local-operator privileges
+  // (`httpBridgeOnly`): reachable over the local HTTP bridge (`/api/execute`
+  // with the per-boot token, so Hermes/the shell can manage contacts) but
+  // structurally never over the P2P/network path — a remote peer can never
+  // add, list, remove, verify, block or unblock contacts on this node. The
+  // peer-facing surface is the single `signChallenge` skill below.
   ctx.skills.register("addContact", async (payload) => addContact(payload as AddContactInput), {
-    localOnly: true,
+    httpBridgeOnly: true,
   });
 
   ctx.skills.register("listContacts", async () => listContacts(), {
-    localOnly: true,
+    httpBridgeOnly: true,
   });
 
   ctx.skills.register("removeContact", async (payload) => {
@@ -294,11 +333,31 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
     }
     return removeContact(peerId);
   }, {
-    localOnly: true,
+    httpBridgeOnly: true,
   });
 
   ctx.skills.register("verifyPeer", async (payload) => verifyPeer(payload as VerifyPeerInput), {
-    localOnly: true,
+    httpBridgeOnly: true,
+  });
+
+  ctx.skills.register("blockContact", async (payload) => {
+    const { peerId } = (payload ?? {}) as { peerId?: unknown };
+    if (typeof peerId !== "string") {
+      throw new Error("blockContact expects { peerId: string }");
+    }
+    return blockContact(peerId);
+  }, {
+    httpBridgeOnly: true,
+  });
+
+  ctx.skills.register("unblockContact", async (payload) => {
+    const { peerId } = (payload ?? {}) as { peerId?: unknown };
+    if (typeof peerId !== "string") {
+      throw new Error("unblockContact expects { peerId: string }");
+    }
+    return unblockContact(peerId);
+  }, {
+    httpBridgeOnly: true,
   });
 
   // The only network-reachable skill: a peer invokes it to prove possession of
@@ -325,5 +384,5 @@ export default function activate(ctx: PluginContext): ContactsPlugin {
     { localOnly: false, remote: { gate: "any" } },
   );
 
-  return { addContact, listContacts, removeContact, verifyPeer, getContact };
+  return { addContact, listContacts, removeContact, verifyPeer, blockContact, unblockContact, getContact };
 }

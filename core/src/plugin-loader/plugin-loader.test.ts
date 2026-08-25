@@ -607,6 +607,56 @@ test("Fase 2B: an httpExposed skill loads when the network:http permission is pr
   assert.equal(skill.httpExposed, true);
 });
 
+test("httpBridgeOnly requires the same network:http permission as httpExposed", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: [], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { httpBridgeOnly: true });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await assert.rejects(
+    () => loadPlugin(pluginG, storageManager, new HookRegistry(), new TaskBroker()),
+    /network:http:g\.x/,
+  );
+});
+
+test("httpBridgeOnly loads with the network:http permission and normalizes the record", async () => {
+  const root = await makeTmpRoot();
+  const dataDir = path.join(root, "data");
+  const taskBroker = new TaskBroker();
+
+  const pluginG = await writePlugin(
+    root,
+    "g",
+    { id: "g", version: "1.0.0", kind: "generic", permissions: ["network:http:g.x"], entry: "./index.mjs" },
+    `export default function activate(ctx) {
+      ctx.skills.register("x", async () => "y", { httpBridgeOnly: true });
+      return {};
+    }`,
+  );
+
+  const storageManager = new StorageManager(dataDir);
+  await loadPlugin(pluginG, storageManager, new HookRegistry(), taskBroker);
+
+  const skill = taskBroker.listSkills().find((s) => s.skill === "g.x");
+  assert.ok(skill, "g.x should be registered");
+  assert.equal(skill.httpBridgeOnly, true);
+  assert.equal(skill.httpExposed, true);
+  assert.equal(skill.localOnly, true);
+
+  const remote = await taskBroker.handleRemote({ id: "t", skill: "g.x", payload: null });
+  assert.equal(remote.status, "error");
+  assert.match(remote.error ?? "", /local-only/);
+});
+
 test("Fase 2B: httpExposed and network exposure permissions are independent", async () => {
   const root = await makeTmpRoot();
   const dataDir = path.join(root, "data");
