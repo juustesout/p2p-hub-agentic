@@ -277,6 +277,28 @@ test("verifyPeer over HTTP reaches a real peer once the transport is wired into 
     const records = listed.result as Array<{ peerId: string; trustState: string }>;
     const promoted = records.find((c) => c.peerId === peer.peerId);
     assert.equal(promoted?.trustState, "verified");
+
+    // End-to-end transport smoke: the peer node's own transport invokes
+    // `core.echo` (localOnly: false, remote gate "any") back on the
+    // CoreServer. This proves the full loop — mDNS discovery, TLS +
+    // identity-binding handshake, broker dispatch — independent of the
+    // contacts plugin, and it exercises the reverse direction (peer →
+    // CoreServer) of the wiring.
+    const serverHost = server as unknown as { host: PluginHost };
+    const serverPeerId = (await serverHost.host.identityManager().getOrCreateIdentity()).peerId;
+    const active = peer.host.networkRegistry().selectActive();
+    assert.ok(active, "peer node should have an active network provider");
+    const target = await waitFor(async () => {
+      const peers = active.listPeers ? active.listPeers() : [];
+      return peers.find((p) => p.peerId === serverPeerId) ?? null;
+    });
+    const echoed = await active.sendTask(target, {
+      id: "echo-1",
+      skill: "core.echo",
+      payload: "remote round-trip",
+    });
+    assert.equal(echoed.status, "ok");
+    assert.equal(echoed.result, "remote round-trip");
   } finally {
     await peer.host.stop();
     await server.stop();
