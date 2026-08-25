@@ -230,3 +230,233 @@ test("a network start failure does not block plugin boot", async () => {
     console.error = original;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Stap 5: cross-host event pub/sub via `ctx.events`.
+// ---------------------------------------------------------------------------
+
+const VIEWER_MANIFEST = {
+  id: "viewer",
+  version: "1.0.0",
+  kind: "generic",
+  permissions: [],
+  entry: "./index.mjs",
+};
+
+const VIEWER_SOURCE = `export default function activate(ctx) {
+  const received = [];
+  const subscribe = async (peerId, topic) => {
+    const sub = await ctx.events.subscribeRemote(peerId, topic, (event) =>
+      received.push(event),
+    );
+    return { subscriptionId: sub.subscriptionId };
+  };
+  const subscribeDenied = async (peerId, topic) => {
+    try {
+      await ctx.events.subscribeRemote(peerId, topic, () => {});
+      return { denied: false };
+    } catch (err) {
+      return { denied: true, reason: err.name };
+    }
+  };
+  ctx.skills.register("subscribe", (payload) =>
+    subscribe(payload.peerId, payload.topic),
+  );
+  ctx.skills.register("subscribeDenied", (payload) =>
+    subscribeDenied(payload.peerId, payload.topic),
+  );
+  return {
+    subscribe,
+    subscribeDenied,
+    received: () => received,
+  };
+}`;
+
+const SENSOR_MANIFEST = {
+  id: "sensor",
+  version: "1.0.0",
+  kind: "generic",
+  permissions: [],
+  exposedEvents: ["sensor:update"],
+  entry: "./index.mjs",
+};
+
+const SENSOR_SOURCE = `export default function activate(ctx) {
+  const publish = async (payload) => {
+    await ctx.events.publishRemote("sensor:update", payload);
+    return { ok: true };
+  };
+  const publishNotExposed = async () => {
+    try {
+      await ctx.events.publishRemote("sensor:other", { nope: true });
+      return { threw: false };
+    } catch (err) {
+      return { threw: true, name: err.name };
+    }
+  };
+  ctx.skills.register("publish", (payload) => publish(payload));
+  ctx.skills.register("publishNotExposed", () => publishNotExposed());
+  return { publish, publishNotExposed };
+}`;
+
+interface ViewerEvent {
+  peerId: string;
+  subscriptionId: string;
+  topic: string;
+  timestamp: number;
+  sequenceNumber: number;
+  payload: { reading: number };
+}
+
+interface ViewerApi {
+  subscribe(peerId: string, topic: string): Promise<{ subscriptionId: string }>;
+  subscribeDenied(
+    peerId: string,
+    topic: string,
+  ): Promise<{ denied: boolean; reason: string }>;
+  received(): ViewerEvent[];
+}
+
+interface SensorApi {
+  publish(payload: { reading: number }): Promise<{ ok: boolean }>;
+  publishNotExposed(): Promise<{ threw: boolean; name?: string }>;
+}
+
+async function writeViewerPlugin(root: string): Promise<void> {
+  const dir = path.join(root, "plugins", "viewer");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "manifest.json"),
+    JSON.stringify(VIEWER_MANIFEST, null, 2),
+  );
+  await fs.writeFile(path.join(dir, "index.mjs"), VIEWER_SOURCE);
+}
+
+async function writeSensorPlugin(root: string): Promise<void> {
+  const dir = path.join(root, "plugins", "sensor");
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    path.join(dir, "manifest.json"),
+    JSON.stringify(SENSOR_MANIFEST, null, 2),
+  );
+  await fs.writeFile(path.join(dir, "index.mjs"), SENSOR_SOURCE);
+}
+
+async function bootEventHosts(rootA: string, rootB: string): Promise<{
+  hostA: PluginHost;
+  hostB: PluginHost;
+}> {
+  const hostA = new PluginHost({
+    pluginsDir: path.join(rootA, "plugins"),
+    dataDir: path.join(rootA, "data"),
+    enableNetworking: true,
+  });
+  const hostB = new PluginHost({
+    pluginsDir: path.join(rootB, "plugins"),
+    dataDir: path.join(rootB, "data"),
+    enableNetworking: true,
+  });
+  await hostA.boot();
+  await hostB.boot();
+  return { hostA, hostB };
+}
+
+test(
+  "events: A subscribes to B's exposed topic and receives publishRemote payloads",
+  { skip: MDNS_SKIP },
+  async () => {
+    const rootA = await fs.mkdtemp(path.join(os.tmpdir(), "host-ev-a-"));
+    const rootB = await fs.mkdtemp(path.join(os.tmpdir(), "host-ev-b-"));
+    await writeViewerPlugin(rootA);
+    await writeSensorPlugin(rootB);
+
+    const { hostA, hostB } = await bootEventHosts(rootA, rootB);
+    try {
+      const peerB = (await hostB.identityManager().getOrCreateIdentity()).peerId;
+
+      // A must have discovered (and handshake-verified) B before it can
+      // subscribe — `subscribeRemote` resolves the peer from `listPeers`.
+      await waitFor(() =>
+        hostA
+          .networkRegistry()
+          .selectActive()
+          ?.listPeers?.()
+          .some((peer) => peer.peerId === peerB)
+          ? true
+          : null,
+      );
+
+      const viewer = hostA.getActivated("viewer") as ViewerApi;
+      const sensor = hostB.getActivated("sensor") as SensorApi;
+
+      const subResult = await viewer.subscribe(peerB, "sensor:update");
+      assert.ok(subResult.subscriptionId, "subscription should be accepted");
+      assert.match(subResult.subscriptionId, /^sub-[a-f0-9]+$/);
+
+      // B publishes twice; A receives both payloads in order.
+      await sensor.publish({ reading: 1 });
+      await sensor.publish({ reading: 2 });
+
+      await waitFor(() =>
+        viewer.received().length >= 2 ? viewer.received() : null,
+      );
+
+      const events = viewer.received();
+      assert.deepEqual(
+        events.map((event) => event.payload),
+        [{ reading: 1 }, { reading: 2 }],
+      );
+      assert.equal(events[0].topic, "sensor:update");
+      assert.equal(events[0].peerId, peerB, "publisherPeerId = B's verified id");
+      assert.ok(
+        events[1].sequenceNumber > events[0].sequenceNumber,
+        "per-subscription monotonic sequence numbers",
+      );
+    } finally {
+      await hostA.stop();
+      await hostB.stop();
+    }
+  },
+);
+
+test(
+  "events: non-exposed subscribe and publish both fail closed",
+  { skip: MDNS_SKIP },
+  async () => {
+    const rootA = await fs.mkdtemp(path.join(os.tmpdir(), "host-ev-neg-a-"));
+    const rootB = await fs.mkdtemp(path.join(os.tmpdir(), "host-ev-neg-b-"));
+    await writeViewerPlugin(rootA);
+    await writeSensorPlugin(rootB);
+
+    const { hostA, hostB } = await bootEventHosts(rootA, rootB);
+    try {
+      const peerB = (await hostB.identityManager().getOrCreateIdentity()).peerId;
+      await waitFor(() =>
+        hostA
+          .networkRegistry()
+          .selectActive()
+          ?.listPeers?.()
+          .some((peer) => peer.peerId === peerB)
+          ? true
+          : null,
+      );
+
+      const viewer = hostA.getActivated("viewer") as ViewerApi;
+      const sensor = hostB.getActivated("sensor") as SensorApi;
+
+      // A's subscription to a topic B does not expose is rejected by B's hub.
+      const denied = await viewer.subscribeDenied(peerB, "sensor:secret");
+      assert.equal(denied.denied, true);
+      assert.equal(denied.reason, "SubscriptionRejectedError");
+      assert.equal(viewer.received().length, 0, "no event ever dispatched");
+
+      // B cannot publish on an exposed topic that is not in its manifest.
+      const publish = await sensor.publishNotExposed();
+      assert.equal(publish.threw, true);
+      assert.equal(publish.name, "TopicNotExposedError");
+    } finally {
+      await hostA.stop();
+      await hostB.stop();
+    }
+  },
+);

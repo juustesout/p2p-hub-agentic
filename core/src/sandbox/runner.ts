@@ -370,6 +370,11 @@ function createSandboxPluginContext(runtime: SandboxRuntime): PluginContext {
       peerId: unavailable("ctx.identity.peerId"),
     },
     network: null,
+    events: {
+      publishRemote: unavailable("ctx.events.publishRemote"),
+      subscribeRemote: unavailable("ctx.events.subscribeRemote"),
+      unsubscribeRemote: unavailable("ctx.events.unsubscribeRemote"),
+    },
     access: {
       issue: unavailable("ctx.access.issue"),
       revoke: unavailable("ctx.access.revoke"),

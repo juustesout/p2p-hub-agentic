@@ -146,6 +146,7 @@ test("unproxied capabilities are fail-closed loud in the sandbox", async (t) => 
         try { await ctx.ai.generateText({ prompt: "x" }); } catch (e) { out.ai = e.message; }
         try { await ctx.identity.peerId(); } catch (e) { out.identity = e.message; }
         try { await ctx.storage.get("k"); } catch (e) { out.storage = e.message; }
+        try { await ctx.events.publishRemote("plugin:x", {}); } catch (e) { out.events = e.message; }
         try { const d = ctx.dataDir; return { got: d }; } catch (e) { out.dataDir = e.message; }
         return out;
       });
@@ -161,6 +162,7 @@ test("unproxied capabilities are fail-closed loud in the sandbox", async (t) => 
   assert.match(out.ai, /ctx\.ai\.generateText/);
   assert.match(out.identity, /ctx\.identity\.peerId/);
   assert.match(out.storage, /ctx\.storage\.get/);
+  assert.match(out.events, /ctx\.events\.publishRemote/);
   assert.match(out.dataDir, /ctx\.dataDir/);
   assert.match(out.vault, /not available in the sandbox/);
 

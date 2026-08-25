@@ -359,6 +359,9 @@ export class CoreServer {
     // one provider in the process: the host starts none of its own.
     this.host.networkRegistry().register(this.provider);
     wireNetworkToBroker(this.provider, this.broker);
+    // Stap 5: route inbound event-transport frames (sub_req → hub,
+    // event_emit → adapter) for this provider through the host's event layer.
+    this.host.wireEventsToProvider(this.provider);
     await this.provider.start();
   }
 

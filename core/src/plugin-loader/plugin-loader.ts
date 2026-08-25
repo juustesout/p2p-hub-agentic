@@ -23,10 +23,31 @@ import {
   withTimeout,
 } from "../network/retry";
 import type { StorageManager } from "../storage/storage-manager";
-import type { PluginContext, NetworkCapability } from "./plugin-context";
+import type {
+  PluginContext,
+  NetworkCapability,
+  EventsCapability,
+} from "./plugin-context";
 import { isPathInsideDataDir } from "../site/site-files";
 import { verifyManifestSignature, verifyPluginFiles } from "@p2p-hub/sdk";
 import { assertPluginDirNoEscapingSymlinks } from "./plugin-dir";
+import type { SubscriptionHub } from "../events/subscription-hub";
+import { TopicNotExposedError } from "../events/subscription-hub";
+import type { RemoteEventAdapter } from "../events/remote-event-adapter";
+import { SubscriptionRejectedError } from "../events/remote-event-adapter";
+
+/**
+ * Lazily resolves the host's Stap 5 event layer (SubscriptionHub +
+ * RemoteEventAdapter). The host builds the layer on first use (it needs the
+ * host identity), so the loader calls this at *call* time, not activation
+ * time — a plugin that subscribes/publishes from a skill handler long after
+ * boot always sees the real layer, while a bare `loadPlugin` without a host
+ * resolves `null` and every `ctx.events` method fails closed.
+ */
+export type EventLayerResolver = () => Promise<{
+  hub: SubscriptionHub;
+  adapter: RemoteEventAdapter;
+} | null>;
 
 /**
  * Raised when a plugin `manifest.json` cannot be read, parsed or validated.
@@ -235,6 +256,7 @@ export async function loadPlugin(
   disposers: DisposerBag = new DisposerBag(),
   resolveTrustLookup: (() => ContactLookup | null) | null = null,
   accessManager: AccessPassManager = new AccessPassManager(),
+  resolveEventLayer: EventLayerResolver = async () => null,
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   if (manifest.signature !== undefined) {
@@ -390,6 +412,7 @@ export async function loadPlugin(
       peerId: async () => (await identityManager.getOrCreateIdentity()).peerId,
     },
     network: buildNetworkCapability(networkRegistry),
+    events: buildEventsCapability(manifest, resolveEventLayer, networkRegistry),
     access: {
       issue: async (peerId, scope, ttlMs) => {
         try {
@@ -631,6 +654,68 @@ function buildNetworkCapability(
           error: err instanceof Error ? err.message : String(err),
         };
       }
+    },
+  };
+}
+
+/**
+ * Build the Stap 5 `ctx.events` capability. The hub and adapter live in the
+ * host's lazily-built event layer and are resolved here at *call* time; a bare
+ * `loadPlugin` call (no host) resolves `null` and gets the fail-closed stub —
+ * never a null field that forces plugins to special-case "no events".
+ *
+ * `publishRemote` is namespace-bound (same rule as `hooks.emit`): a plugin can
+ * only publish on its own `<pluginId>:` topics. `subscribeRemote` is outbound
+ * and therefore unrestricted — the *remote* peer's hub authorizes it — but the
+ * peer must be currently reachable with a verified identity, else it fails
+ * closed with `SubscriptionRejectedError`.
+ */
+function buildEventsCapability(
+  manifest: PluginManifest,
+  resolveEventLayer: EventLayerResolver,
+  registry: NetworkRegistry | null,
+): EventsCapability {
+  return {
+    publishRemote: async (topic, payload) => {
+      assertOwnNamespace(manifest.id, topic, "publishRemote");
+      const layer = await resolveEventLayer();
+      if (!layer) {
+        throw new TopicNotExposedError(topic);
+      }
+      await layer.hub.emitLocal(topic, payload);
+    },
+    subscribeRemote: async (peerId, topic, handler) => {
+      const layer = await resolveEventLayer();
+      if (!layer) {
+        throw new SubscriptionRejectedError("", topic, "events-unavailable");
+      }
+      const active = registry?.selectActive();
+      const peer = active
+        ? (active.listPeers?.() ?? []).find((p) => p.peerId === peerId)
+        : undefined;
+      if (!peer) {
+        throw new SubscriptionRejectedError("", topic, "peer-not-resolvable");
+      }
+      const subscriptionId = await layer.adapter.subscribeRemote(
+        peer,
+        topic,
+        handler,
+      );
+      return {
+        subscriptionId,
+        peerId,
+        topic,
+        unsubscribe: async () => {
+          await layer.adapter.unsubscribeRemote(subscriptionId);
+        },
+      };
+    },
+    unsubscribeRemote: async (subscriptionId) => {
+      const layer = await resolveEventLayer();
+      if (!layer) {
+        return false;
+      }
+      return layer.adapter.unsubscribeRemote(subscriptionId);
     },
   };
 }

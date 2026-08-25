@@ -1,0 +1,347 @@
+import type { NetworkPeer } from "@p2p-hub/sdk";
+import {
+  checkPeerAccess,
+  type PeerAccessContext,
+  type PeerAccessOptions,
+} from "../security/peer-access-gate";
+import type { EventNetwork } from "./event-network";
+import {
+  EVENT_TOPIC_RE,
+  isWildcardTopic,
+  topicMatches,
+  type EventEmitBody,
+  type InboundEventMessage,
+  type SubAckBody,
+  type SubReqBody,
+} from "./types";
+
+/**
+ * Stap 5 — SubscriptionHub: remote subscriptions *towards us*.
+ *
+ * This is the fail-closed authorization point for "who may receive our
+ * events". Every inbound `sub_req` passes through `handleSubReq`, which applies
+ * (in order):
+ *
+ *   1. peer-level gate (`checkPeerAccess`, default `["open-lan"]`),
+ *   2. per-topic exposure (`exposedEvents` exact-match for exact topics;
+ *      wildcard topics are registered without leaking which specific topics
+ *      exist — emit-time re-authorization is what gates them, refinement #4a),
+ *   3. hard caps (`MAX_SUBSCRIPTIONS_PER_PEER` / `MAX_SUBSCRIPTIONS_PER_TOPIC`,
+ *      refinement #4b) and
+ *   4. a bounded granted TTL (client request clamped to
+ *      `MAX_SUBSCRIPTION_TTL_MS`, default `DEFAULT_SUBSCRIPTION_TTL_MS`).
+ *
+ * `emitLocal(topic, payload)` is the fan-out path: the exact topic must be in
+ * `exposedEvents` (a non-exposed topic throws `TopicNotExposedError` and
+ * reaches no subscriber — exact AND wildcard subscribers alike), and each
+ * matching subscriber receives an `event_emit` carrying OUR transport-verified
+ * `publisherPeerId`, a per-subscription monotonic `sequenceNumber` and the
+ * granted `subscriptionId`. Expired subscriptions are pruned lazily (on access
+ * and on an interval sweep), so a vanished peer is bounded by TTL — there is no
+ * connection tracking here.
+ *
+ * Security notes (CLAUDE.md): never trust a caller-supplied `publisherPeerId`
+ * — this hub *sets* it from the configured `selfPeerId`; the `:*` wildcard is
+ * the only wildcard and matching is delimiter-anchored (principle #2); a deny
+ * reason never leaks topic existence beyond what is intended (peer gate runs
+ * before the exposure check so an unauthorized peer cannot probe).
+ */
+
+/** Hard cap on subscriptions a single peer may hold against us. */
+export const MAX_SUBSCRIPTIONS_PER_PEER = 64;
+/** Hard cap on subscriptions against a single topic (exact or wildcard). */
+export const MAX_SUBSCRIPTIONS_PER_TOPIC = 128;
+/** Upper bound on any granted subscription lifetime (5 minutes). */
+export const MAX_SUBSCRIPTION_TTL_MS = 5 * 60_000;
+/** Lifetime granted when the client sends no `ttlMs` (1 minute). */
+export const DEFAULT_SUBSCRIPTION_TTL_MS = 60_000;
+
+export type SubAckReason =
+  | "topic-not-exposed"
+  | "not-authorized"
+  | "subscription-cap"
+  | "subscription-not-found"
+  | "peer-not-resolvable";
+
+export interface PeerSubscription {
+  peerId: string;
+  /** Resolved discovered peer used to fan events out. */
+  peer: NetworkPeer;
+  subscriptionId: string;
+  /** Exact or `:ns:*` wildcard topic as subscribed. */
+  topic: string;
+  /** Granted lifetime in ms (bounded by {@link MAX_SUBSCRIPTION_TTL_MS}). */
+  ttlMs: number;
+  expiresAt: number;
+}
+
+export interface SubscriptionHubOptions {
+  /** Topics this node exposes for remote subscription (exact-match gate). */
+  exposedEvents: Iterable<string>;
+  /**
+   * Our own transport-verified peerId, stamped as `publisherPeerId` on every
+   * emitted event. Never derived from a caller-supplied value.
+   */
+  selfPeerId: string;
+  /**
+   * Peer-level gate under the topic-exposure gate. Default `["open-lan"]`:
+   * any transport-verified, non-blocked peer — the topic exposure itself is
+   * the capability gate.
+   */
+  peerAccess?: PeerAccessOptions & { context?: PeerAccessContext };
+  now?: () => number;
+  /** How often expired subscriptions are swept (default 15s). */
+  sweepIntervalMs?: number;
+}
+
+/** Raised by `emitLocal` when the exact topic is not exposed — fail loudly. */
+export class TopicNotExposedError extends Error {
+  readonly topic: string;
+  constructor(topic: string) {
+    super(`topic "${topic}" is not exposed for remote events`);
+    this.name = "TopicNotExposedError";
+    this.topic = topic;
+  }
+}
+
+export class SubscriptionHub {
+  private readonly selfPeerId: string;
+  private readonly now: () => number;
+  private readonly peerAccess: PeerAccessOptions;
+  private readonly peerAccessContext: PeerAccessContext | undefined;
+  private readonly sweeper: NodeJS.Timeout | null;
+  private exposed = new Set<string>();
+  private subscriptions = new Map<string, PeerSubscription>();
+  private sequences = new Map<string, number>();
+  private readonly network: EventNetwork;
+
+  constructor(network: EventNetwork, options: SubscriptionHubOptions) {
+    this.network = network;
+    this.selfPeerId = options.selfPeerId;
+    this.now = options.now ?? Date.now;
+    // Default peer-level gate: `["open-lan"]` — any transport-verified,
+    // non-blocked peer; the topic exposure itself is the capability gate.
+    this.peerAccess = options.peerAccess ?? { modes: ["open-lan"] };
+    this.peerAccessContext = options.peerAccess?.context;
+    this.setExposedEvents(options.exposedEvents);
+    const sweepMs = options.sweepIntervalMs ?? 15_000;
+    if (sweepMs > 0) {
+      this.sweeper = setInterval(() => this.sweep(), sweepMs);
+      this.sweeper.unref();
+    } else {
+      this.sweeper = null;
+    }
+  }
+
+  /** Replace the exposed-event set (called on plugin load changes). */
+  setExposedEvents(events: Iterable<string>): void {
+    const next = new Set<string>();
+    for (const event of events) {
+      if (typeof event === "string" && EVENT_TOPIC_RE.test(event)) {
+        next.add(event);
+      }
+    }
+    this.exposed = next;
+  }
+
+  /** The current exposed-event set (exact topics only). */
+  exposedEvents(): string[] {
+    return [...this.exposed];
+  }
+
+  /**
+   * Authorize + register an inbound subscription request and answer with the
+   * `sub_ack`. Fail-closed: every reject is an explicit reason, never a throw
+   * across the connection.
+   */
+  async handleSubReq(msg: InboundEventMessage): Promise<SubAckBody> {
+    const { peerId } = msg;
+    const body = msg.body as SubReqBody;
+    this.sweep();
+
+    if (body.action === "unsubscribe") {
+      return this.handleUnsubscribe(peerId, body);
+    }
+    return this.handleSubscribe(peerId, body);
+  }
+
+  /**
+   * Fan an event out to every matching subscriber. The exact topic must be in
+   * `exposedEvents` — otherwise {@link TopicNotExposedError} and no subscriber
+   * (exact or wildcard) ever receives it. Returns the number of subscribers
+   * the frame was successfully flushed to (a transport failure on one
+   * subscriber does not fail the rest).
+   */
+  async emitLocal(topic: string, payload: unknown): Promise<number> {
+    if (!this.isExposed(topic)) {
+      throw new TopicNotExposedError(topic);
+    }
+    this.sweep();
+    const now = this.now();
+    const emitted: EventEmitBody = {
+      subscriptionId: "",
+      topic,
+      publisherPeerId: this.selfPeerId,
+      timestamp: now,
+      sequenceNumber: 0,
+      payload,
+    };
+    let delivered = 0;
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.expiresAt <= now) {
+        continue;
+      }
+      if (!topicMatches(subscription.topic, topic)) {
+        continue;
+      }
+      const key = `${subscription.peerId}\u0000${subscription.subscriptionId}`;
+      emitted.subscriptionId = subscription.subscriptionId;
+      emitted.sequenceNumber = (this.sequences.get(key) ?? 0) + 1;
+      this.sequences.set(key, emitted.sequenceNumber);
+      if (await this.network.sendEvent(subscription.peer, { ...emitted })) {
+        delivered += 1;
+      }
+    }
+    return delivered;
+  }
+
+  /** All currently registered (non-expired) subscriptions. */
+  listSubscriptions(): PeerSubscription[] {
+    this.sweep();
+    return [...this.subscriptions.values()];
+  }
+
+  /** Stop the sweeper and drop all state. */
+  close(): void {
+    if (this.sweeper) {
+      clearInterval(this.sweeper);
+    }
+    this.subscriptions.clear();
+    this.sequences.clear();
+  }
+
+  private isExposed(topic: string): boolean {
+    return this.exposed.has(topic);
+  }
+
+  private async handleSubscribe(
+    peerId: string,
+    body: SubReqBody,
+  ): Promise<SubAckBody> {
+    const topic = body.topic;
+    if (!EVENT_TOPIC_RE.test(topic)) {
+      return this.reject(body, "topic-not-exposed");
+    }
+    if (this.selfPeerId === peerId) {
+      return this.reject(body, "not-authorized");
+    }
+
+    // Peer-level gate first: an unauthorized peer must not be able to probe
+    // which topics are exposed (a denied peer always gets "not-authorized").
+    const peerDecision = await checkPeerAccess(
+      peerId,
+      this.peerAccess,
+      this.peerAccessContext,
+    );
+    if (!peerDecision.granted) {
+      return this.reject(body, "not-authorized");
+    }
+
+    // Exact topics must be exposed; wildcards are registered (emit re-auth).
+    if (!isWildcardTopic(topic) && !this.isExposed(topic)) {
+      return this.reject(body, "topic-not-exposed");
+    }
+
+    if (this.countForPeer(peerId) >= MAX_SUBSCRIPTIONS_PER_PEER) {
+      return this.reject(body, "subscription-cap");
+    }
+    if (this.countForTopic(topic) >= MAX_SUBSCRIPTIONS_PER_TOPIC) {
+      return this.reject(body, "subscription-cap");
+    }
+
+    const peer = this.network.getPeer(peerId);
+    if (!peer) {
+      // We cannot address the subscriber for fan-out — fail closed.
+      return this.reject(body, "peer-not-resolvable");
+    }
+
+    const ttlMs = Math.min(
+      Math.max(body.ttlMs ?? DEFAULT_SUBSCRIPTION_TTL_MS, 1),
+      MAX_SUBSCRIPTION_TTL_MS,
+    );
+    this.subscriptions.set(keyFor(peerId, body.subscriptionId), {
+      peerId,
+      peer,
+      subscriptionId: body.subscriptionId,
+      topic,
+      ttlMs,
+      expiresAt: this.now() + ttlMs,
+    });
+    return {
+      subscriptionId: body.subscriptionId,
+      topic,
+      accepted: true,
+      ttlMs,
+    };
+  }
+
+  private handleUnsubscribe(
+    peerId: string,
+    body: SubReqBody,
+  ): SubAckBody {
+    const key = keyFor(peerId, body.subscriptionId);
+    if (this.subscriptions.delete(key)) {
+      this.sequences.delete(key);
+      return {
+        subscriptionId: body.subscriptionId,
+        topic: body.topic,
+        accepted: true,
+      };
+    }
+    return this.reject(body, "subscription-not-found");
+  }
+
+  private reject(body: SubReqBody, reason: SubAckReason): SubAckBody {
+    return {
+      subscriptionId: body.subscriptionId,
+      topic: body.topic,
+      accepted: false,
+      reason,
+    };
+  }
+
+  private countForPeer(peerId: string): number {
+    let count = 0;
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.peerId === peerId) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  private countForTopic(topic: string): number {
+    let count = 0;
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.topic === topic) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  /** Prune expired subscriptions (lazy access + interval sweep). */
+  private sweep(): void {
+    const now = this.now();
+    for (const [key, subscription] of this.subscriptions) {
+      if (subscription.expiresAt <= now) {
+        this.subscriptions.delete(key);
+        this.sequences.delete(key);
+      }
+    }
+  }
+}
+
+function keyFor(peerId: string, subscriptionId: string): string {
+  return `${peerId}\u0000${subscriptionId}`;
+}

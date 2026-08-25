@@ -1,3 +1,5 @@
+import type { EventEmitBody, SubAckBody, SubReqBody } from "./wire-contract";
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as crypto from "node:crypto";
@@ -10,9 +12,12 @@ import {
   SIGNATURE_RE,
   buildIdentityBindingMessage,
   encodeAuth,
+  encodeEventEmit,
   encodeHello,
   encodeHelloAck,
   encodeResult,
+  encodeSubAck,
+  encodeSubReq,
   encodeTask,
   normalizeFingerprint,
   parseEnvelope,
@@ -379,4 +384,161 @@ test("identity binding message bytes are pinned and domain-separated", () => {
   assert.equal(SIGNATURE_RE.test("a".repeat(128)), true);
   assert.equal(parseIdentityBinding(null), null);
   assert.equal(parseIdentityBinding("nope"), null);
+});
+
+test("sub_req serialization is canonical and round-trips", () => {
+  const body: SubReqBody = { subscriptionId: "sub-1", topic: "calendar:eventAdded", action: "subscribe", ttlMs: 300_000 };
+  assert.equal(
+    encodeSubReq(body),
+    '{"protocol":"p2p-hub:network","version":1,"type":"sub_req",' +
+      `"body":{"subscriptionId":"${body.subscriptionId}","topic":"${body.topic}",` +
+      `"action":"subscribe","ttlMs":${body.ttlMs}}}`,
+  );
+
+  const envelope = parseEnvelope(JSON.parse(encodeSubReq(body)));
+  assert.ok(envelope, "sub_req must parse");
+  assert.equal(envelope.type, "sub_req");
+  assert.deepEqual(envelope.body, body);
+
+  // round-trips each action
+  for (const action of ["subscribe", "unsubscribe"] as const) {
+    const e = parseEnvelope(JSON.parse(encodeSubReq({ ...body, action })));
+    assert.ok(e, `sub_req ${action} must parse`);
+  }
+});
+
+test("sub_req default-denies malformed bodies", () => {
+  const base = { protocol: NETWORK_PROTOCOL_ID, version: 1, type: "sub_req" };
+  const valid: SubReqBody = { subscriptionId: "sub-1", topic: "calendar:eventAdded", action: "subscribe", ttlMs: 300_000 };
+
+  // Bad subscriptionId: empty, spaces, over-long, wildcard chars.
+  for (const bad of ["", "sub id", "s".repeat(129), "sub-*", "sub/+", "é"]) {
+    assert.equal(
+      parseEnvelope({ ...base, body: { ...valid, subscriptionId: bad } }),
+      null,
+      `subscriptionId ${JSON.stringify(bad)} must be denied`,
+    );
+  }
+  // Bad topic: empty, over-long, bad chars, empty namespace, bare/mid-string
+  // wildcards. The only valid wildcard is a terminal `:*`.
+  for (const bad of ["", "e".repeat(513), "bad topic", "calendar:event Added", "calendar:", ":event", "calendar::event", "*", "calendar*", "calendar:e*v", "calendar/e", "calendar/e:v"]) {
+    assert.equal(
+      parseEnvelope({ ...base, body: { ...valid, topic: bad } }),
+      null,
+      `topic ${JSON.stringify(bad)} must be denied`,
+    );
+  }
+  // A terminal `:*` wildcard and dotted segments ARE valid.
+  assert.ok(parseEnvelope({ ...base, body: { ...valid, topic: "calendar:*" } }), "calendar:* must parse");
+  assert.ok(parseEnvelope({ ...base, body: { ...valid, topic: "a.b:c.d" } }), "dotted segments must parse");
+  // Bad action.
+  for (const bad of ["sub", "", "renewal", "SUBSCRIBE", 5]) {
+    assert.equal(
+      parseEnvelope({ ...base, body: { ...valid, action: bad as never } }),
+      null,
+      `action ${JSON.stringify(bad)} must be denied`,
+    );
+  }
+  // Bad ttlMs: zero, negative, fractional, non-number. (There is no upper
+  // bound: the value is only a *request*; the publisher grants its own ttl.)
+  for (const bad of [0, -1, 1.5, "300000"]) {
+    assert.equal(
+      parseEnvelope({ ...base, body: { ...valid, ttlMs: bad as never } }),
+      null,
+      `ttlMs ${JSON.stringify(bad)} must be denied`,
+    );
+  }
+  // Missing required fields are denied.
+  assert.equal(parseEnvelope({ ...base, body: { subscriptionId: "sub-1" } }), null);
+});
+
+test("sub_ack serialization is canonical and round-trips", () => {
+  const accept: SubAckBody = { subscriptionId: "sub-1", topic: "calendar:eventAdded", accepted: true, ttlMs: 300_000 };
+  assert.equal(
+    encodeSubAck(accept),
+    '{"protocol":"p2p-hub:network","version":1,"type":"sub_ack",' +
+      `"body":{"subscriptionId":"${accept.subscriptionId}","topic":"${accept.topic}",` +
+      `"accepted":true,"ttlMs":${accept.ttlMs}}}`,
+  );
+
+  const parsed = parseEnvelope(JSON.parse(encodeSubAck(accept)));
+  assert.ok(parsed, "sub_ack must parse");
+  assert.equal(parsed.type, "sub_ack");
+  assert.deepEqual(parsed.body, accept);
+
+  // accepted: false + a bounded reason round-trips.
+  const reject: SubAckBody = { subscriptionId: "sub-1", topic: "calendar:eventAdded", accepted: false, reason: "denied by policy" };
+  const rejected = parseEnvelope(JSON.parse(encodeSubAck(reject)));
+  assert.ok(rejected);
+  assert.deepEqual(rejected.body, reject);
+});
+
+test("sub_ack default-denies malformed bodies", () => {
+  const base = { protocol: NETWORK_PROTOCOL_ID, version: 1, type: "sub_ack" };
+  const valid: SubAckBody = { subscriptionId: "sub-1", topic: "calendar:eventAdded", accepted: true };
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, accepted: "yes" as never } }), null);
+  // reason must be non-empty and bounded when present.
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, accepted: false, reason: "" } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, accepted: false, reason: "r".repeat(513) } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, topic: "calendar:*x" } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, ttlMs: 1.5 } }), null);
+});
+
+test("event_emit serialization is canonical and round-trips", () => {
+  const body: EventEmitBody = {
+    subscriptionId: "sub-1",
+    topic: "calendar:eventAdded",
+    publisherPeerId: "b".repeat(64),
+    timestamp: 1_700_000_000_000,
+    sequenceNumber: 7,
+    payload: { hello: "world" },
+  };
+  assert.equal(
+    encodeEventEmit(body),
+    '{"protocol":"p2p-hub:network","version":1,"type":"event_emit",' +
+      `"body":{"subscriptionId":"${body.subscriptionId}","topic":"${body.topic}",` +
+      `"publisherPeerId":"${body.publisherPeerId}",` +
+      `"timestamp":${body.timestamp},"sequenceNumber":${body.sequenceNumber},` +
+      `"payload":{"hello":"world"}}}`,
+  );
+
+  const parsed = parseEnvelope(JSON.parse(encodeEventEmit(body)));
+  assert.ok(parsed, "event_emit must parse");
+  assert.equal(parsed.type, "event_emit");
+  assert.deepEqual(parsed.body, body);
+});
+
+test("event_emit default-denies malformed bodies", () => {
+  const base = { protocol: NETWORK_PROTOCOL_ID, version: 1, type: "event_emit" };
+  const valid: EventEmitBody = {
+    subscriptionId: "sub-1",
+    topic: "calendar:eventAdded",
+    publisherPeerId: "b".repeat(64),
+    timestamp: 1_700_000_000_000,
+    sequenceNumber: 7,
+    payload: 1,
+  };
+  // publisherPeerId must be a well-formed peer id — a caller-supplied spoofed
+  // identity or malformed value is denied at the contract level.
+  for (const bad of ["x".repeat(63), "0x", "b".repeat(65), ""]) {
+    assert.equal(
+      parseEnvelope({ ...base, body: { ...valid, publisherPeerId: bad } }),
+      null,
+      `publisherPeerId ${JSON.stringify(bad)} must be denied`,
+    );
+  }
+  // timestamp must be a positive integer; sequenceNumber a non-negative integer.
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, timestamp: 0 } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, timestamp: -5 } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, timestamp: 1.5 } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, sequenceNumber: -1 } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, sequenceNumber: 1.5 } }), null);
+  // Missing payload (event_emit is not a valid "no payload" notification).
+  assert.equal(
+    parseEnvelope({ ...base, body: { ...valid, payload: undefined } }),
+    null,
+  );
+  // topic / subscriptionId still validated.
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, topic: "calendar:*x" } }), null);
+  assert.equal(parseEnvelope({ ...base, body: { ...valid, subscriptionId: "sub-*" } }), null);
 });

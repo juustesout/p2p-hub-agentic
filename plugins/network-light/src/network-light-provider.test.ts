@@ -122,6 +122,88 @@ async function waitForPeerWithId(
   throw new Error(`peer with id ${peerId} not discovered within ${timeoutMs}ms`);
 }
 
+/**
+ * Open a raw TLS connection to a provider and complete a full identity-bound
+ * handshake (hello -> hello_ack -> auth). Resolves once the connection is
+ * authenticated; the wire peerId of this connection is `clientKey`'s peerId.
+ */
+async function openAuthenticatedConnection(
+  provider: NetworkLightProvider,
+  clientKey: ReturnType<typeof makeIdentity>,
+): Promise<tls.TLSSocket> {
+  const { key, cert } = generateSelfSignedCert();
+  const certFingerprint = normalizeFingerprint(
+    new crypto.X509Certificate(cert).fingerprint256,
+  );
+  const clientNonce = randomNonce();
+
+  const socket = await new Promise<tls.TLSSocket>((resolve, reject) => {
+    const raw = tls.connect(
+      { host: "127.0.0.1", port: provider.port, key, cert, rejectUnauthorized: false },
+      () => resolve(raw),
+    );
+    raw.once("error", reject);
+  });
+  const serverNoncePromise = new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("no hello_ack received")), 3_000);
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      if (text.includes("hello_ack")) {
+        const parsed = JSON.parse(text.slice(text.indexOf("{"))) as {
+          body: { nonce?: string };
+        };
+        clearTimeout(timer);
+        socket.off("data", onData);
+        resolve(parsed.body.nonce ?? "");
+      }
+    };
+    socket.on("data", onData);
+  });
+  socket.write(
+    framePayload(
+      JSON.stringify({
+        protocol: "p2p-hub:network",
+        version: 1,
+        type: "hello",
+        body: { versions: [1], capabilities: [], nonce: clientNonce },
+      }),
+    ),
+  );
+  const serverNonce = await serverNoncePromise;
+
+  const signature = await clientKey.signer(
+    buildIdentityBindingMessage(clientNonce, serverNonce, certFingerprint),
+  );
+  socket.write(
+    framePayload(
+      JSON.stringify({
+        protocol: "p2p-hub:network",
+        version: 1,
+        type: "auth",
+        body: {
+          peerId: clientKey.identity.peerId,
+          certFingerprint,
+          signature: signature.toString("hex"),
+        },
+      }),
+    ),
+  );
+  return socket;
+}
+
+/** Read the next JSON envelope(s) already on the wire, if any are present. */
+function readEnvelopes(chunks: Buffer[]): Array<Record<string, unknown>> {
+  const all = Buffer.concat(chunks).toString("utf8");
+  const envelopes: Array<Record<string, unknown>> = [];
+  for (const part of all.split("\n")) {
+    const match = part.match(/\{.*\}/);
+    if (match) {
+      envelopes.push(JSON.parse(match[0]) as Record<string, unknown>);
+    }
+  }
+  return envelopes;
+}
+
 test("two local instances discover each other and exchange a task", { skip: MDNS_SKIP }, async () => {
   const alice = makeProvider({ port: 0, skills: ["echo"] });
   const bob = makeProvider({ port: 0, skills: ["echo"] });
@@ -814,6 +896,397 @@ test("identity binding: a task without prior identity auth is denied (default-de
       }),
     ]);
     assert.equal(handled, false, "an unauthenticated task must never be dispatched");
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("a sub_req without prior identity auth is denied (default-deny)", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  let subHandled = false;
+  bob.onEventMessage(async () => {
+    subHandled = true;
+    return { subscriptionId: "sub-1", topic: "calendar:eventAdded", accepted: true };
+  });
+
+  await bob.start();
+
+  let raw: tls.TLSSocket | null = null;
+  try {
+    const clientNonce = randomNonce();
+    raw = tls.connect(
+      { host: "127.0.0.1", port: bob.port, rejectUnauthorized: false },
+      () => {
+        raw!.write(
+          framePayload(
+            JSON.stringify({
+              protocol: "p2p-hub:network",
+              version: 1,
+              type: "hello",
+              body: { versions: [1], capabilities: [], nonce: clientNonce },
+            }),
+          ),
+        );
+      },
+    );
+    const ackReceived = new Promise<void>((resolve) => {
+      raw!.on("data", (chunk) => {
+        if (chunk.toString("utf8").includes("hello_ack")) resolve();
+      });
+    });
+    await Promise.race([
+      ackReceived,
+      delay(3_000).then(() => {
+        throw new Error("did not receive hello_ack");
+      }),
+    ]);
+
+    // No auth has been sent — a subscription request is anonymous traffic and
+    // must be refused with the connection torn down.
+    raw!.write(
+      framePayload(
+        JSON.stringify({
+          protocol: "p2p-hub:network",
+          version: 1,
+          type: "sub_req",
+          body: {
+            subscriptionId: "sub-1",
+            topic: "calendar:eventAdded",
+            action: "subscribe",
+            ttlMs: 300_000,
+          },
+        }),
+      ),
+    );
+    const closed = new Promise<void>((resolve) => {
+      raw!.once("close", () => resolve());
+    });
+    await Promise.race([
+      closed,
+      delay(3_000).then(() => {
+        throw new Error("server did not close a sub_req-without-auth connection");
+      }),
+    ]);
+    assert.equal(subHandled, false, "an unauthenticated sub_req must never reach the handler");
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("an event_emit without prior identity auth is denied (default-deny)", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  let eventHandled = false;
+  bob.onEventMessage(async () => {
+    eventHandled = true;
+    return { subscriptionId: "sub-1", topic: "calendar:eventAdded", accepted: true };
+  });
+
+  await bob.start();
+
+  let raw: tls.TLSSocket | null = null;
+  try {
+    const clientNonce = randomNonce();
+    raw = tls.connect(
+      { host: "127.0.0.1", port: bob.port, rejectUnauthorized: false },
+      () => {
+        raw!.write(
+          framePayload(
+            JSON.stringify({
+              protocol: "p2p-hub:network",
+              version: 1,
+              type: "hello",
+              body: { versions: [1], capabilities: [], nonce: clientNonce },
+            }),
+          ),
+        );
+      },
+    );
+    const ackReceived = new Promise<void>((resolve) => {
+      raw!.on("data", (chunk) => {
+        if (chunk.toString("utf8").includes("hello_ack")) resolve();
+      });
+    });
+    await Promise.race([
+      ackReceived,
+      delay(3_000).then(() => {
+        throw new Error("did not receive hello_ack");
+      }),
+    ]);
+
+    raw!.write(
+      framePayload(
+        JSON.stringify({
+          protocol: "p2p-hub:network",
+          version: 1,
+          type: "event_emit",
+          body: {
+            subscriptionId: "sub-1",
+            topic: "calendar:eventAdded",
+            publisherPeerId: "b".repeat(64),
+            timestamp: Date.now(),
+            sequenceNumber: 1,
+            payload: { x: 1 },
+          },
+        }),
+      ),
+    );
+    const closed = new Promise<void>((resolve) => {
+      raw!.once("close", () => resolve());
+    });
+    await Promise.race([
+      closed,
+      delay(3_000).then(() => {
+        throw new Error("server did not close an event_emit-without-auth connection");
+      }),
+    ]);
+    assert.equal(eventHandled, false, "an unauthenticated event_emit must never reach the handler");
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("an event_emit claiming a publisherPeerId the connection does not hold is denied", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  let eventHandled = false;
+  bob.onEventMessage(async () => {
+    eventHandled = true;
+    return { subscriptionId: "sub-1", topic: "calendar:eventAdded", accepted: true };
+  });
+
+  await bob.start();
+
+  const clientKey = makeIdentity();
+  const victimPeerId = makeIdentity().identity.peerId;
+  let raw: tls.TLSSocket | null = null;
+  try {
+    raw = await openAuthenticatedConnection(bob, clientKey);
+
+    // The frame claims a peerId this connection does not hold — a spoof that
+    // must close the connection before the handler ever runs.
+    raw.write(
+      framePayload(
+        JSON.stringify({
+          protocol: "p2p-hub:network",
+          version: 1,
+          type: "event_emit",
+          body: {
+            subscriptionId: "sub-1",
+            topic: "calendar:eventAdded",
+            publisherPeerId: victimPeerId,
+            timestamp: Date.now(),
+            sequenceNumber: 1,
+            payload: { x: 1 },
+          },
+        }),
+      ),
+    );
+    const closed = new Promise<void>((resolve) => {
+      raw!.once("close", () => resolve());
+    });
+    await Promise.race([
+      closed,
+      delay(3_000).then(() => {
+        throw new Error("server did not close a spoofed-publisher connection");
+      }),
+    ]);
+    assert.equal(eventHandled, false, "a spoofed publisher identity must never reach the handler");
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("a verified peer's sub_req is answered with a sub_ack and reaches the handler with its verified identity", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  let inbound: { peerId?: string; type?: string; body?: unknown } | undefined;
+  bob.onEventMessage(async (message) => {
+    inbound = message;
+    return {
+      subscriptionId: (message.body as { subscriptionId: string }).subscriptionId,
+      topic: (message.body as { topic: string }).topic,
+      accepted: true,
+      ttlMs: 60_000,
+    };
+  });
+
+  await bob.start();
+
+  const clientKey = makeIdentity();
+  let raw: tls.TLSSocket | null = null;
+  try {
+    raw = await openAuthenticatedConnection(bob, clientKey);
+    const received: Buffer[] = [];
+    raw.on("data", (chunk) => received.push(chunk as Buffer));
+
+    raw.write(
+      framePayload(
+        JSON.stringify({
+          protocol: "p2p-hub:network",
+          version: 1,
+          type: "sub_req",
+          body: {
+            subscriptionId: "sub-1",
+            topic: "calendar:eventAdded",
+            action: "subscribe",
+            ttlMs: 300_000,
+          },
+        }),
+      ),
+    );
+
+    const ack = await waitFor(async () => {
+      for (const envelope of readEnvelopes(received)) {
+        if (envelope.type === "sub_ack") return envelope;
+      }
+      return null;
+    });
+    const ackBody = ack.body as {
+      subscriptionId: string;
+      topic: string;
+      accepted: boolean;
+      ttlMs: number;
+    };
+    assert.equal(ackBody.subscriptionId, "sub-1");
+    assert.equal(ackBody.topic, "calendar:eventAdded");
+    assert.equal(ackBody.accepted, true);
+    assert.equal(ackBody.ttlMs, 60_000);
+    assert.equal(inbound?.peerId, clientKey.identity.peerId, "handler sees the verified peerId");
+    assert.equal(inbound?.type, "sub_req");
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("an event_emit from a verified peer reaches the handler with its verified identity", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  let inbound: { peerId?: string; type?: string; body?: unknown } | undefined;
+  bob.onEventMessage(async (message) => {
+    inbound = message;
+    return { subscriptionId: "sub-1", topic: "calendar:eventAdded", accepted: true };
+  });
+
+  await bob.start();
+
+  const clientKey = makeIdentity();
+  let raw: tls.TLSSocket | null = null;
+  try {
+    raw = await openAuthenticatedConnection(bob, clientKey);
+
+    raw.write(
+      framePayload(
+        JSON.stringify({
+          protocol: "p2p-hub:network",
+          version: 1,
+          type: "event_emit",
+          body: {
+            subscriptionId: "sub-1",
+            topic: "calendar:eventAdded",
+            publisherPeerId: clientKey.identity.peerId,
+            timestamp: 1_700_000_000_000,
+            sequenceNumber: 7,
+            payload: { hello: "world" },
+          },
+        }),
+      ),
+    );
+
+    await waitFor(async () => (inbound ? true : null));
+    assert.ok(inbound, "handler must have been invoked");
+    assert.equal(inbound.peerId, clientKey.identity.peerId, "handler sees the verified publisher peerId");
+    assert.equal(inbound.type, "event_emit");
+    const body = inbound.body as {
+      subscriptionId: string;
+      topic: string;
+      sequenceNumber: number;
+      payload: { hello: string };
+    };
+    assert.equal(body.subscriptionId, "sub-1");
+    assert.equal(body.topic, "calendar:eventAdded");
+    assert.equal(body.sequenceNumber, 7);
+    assert.deepEqual(body.payload, { hello: "world" });
+  } finally {
+    raw?.destroy();
+    await bob.stop();
+  }
+});
+
+test("a sub_req on a server with no event handler is fail-closed rejected", async () => {
+  const bobKey = makeIdentity();
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
+  await bob.start();
+
+  const clientKey = makeIdentity();
+  let raw: tls.TLSSocket | null = null;
+  try {
+    raw = await openAuthenticatedConnection(bob, clientKey);
+    const received: Buffer[] = [];
+    raw.on("data", (chunk) => received.push(chunk as Buffer));
+
+    raw.write(
+      framePayload(
+        JSON.stringify({
+          protocol: "p2p-hub:network",
+          version: 1,
+          type: "sub_req",
+          body: {
+            subscriptionId: "sub-1",
+            topic: "calendar:eventAdded",
+            action: "subscribe",
+            ttlMs: 300_000,
+          },
+        }),
+      ),
+    );
+
+    const ack = await waitFor(async () => {
+      for (const envelope of readEnvelopes(received)) {
+        if (envelope.type === "sub_ack") return envelope;
+      }
+      return null;
+    });
+    const ackBody = ack.body as { subscriptionId: string; accepted: boolean; reason: string };
+    assert.equal(ackBody.subscriptionId, "sub-1");
+    assert.equal(ackBody.accepted, false);
+    assert.equal(ackBody.reason, "no event handler");
   } finally {
     raw?.destroy();
     await bob.stop();

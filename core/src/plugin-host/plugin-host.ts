@@ -28,6 +28,13 @@ import {
   CertificationError,
   CertificationService,
 } from "../certification/certification-service";
+import { SubscriptionHub } from "../events/subscription-hub";
+import { RemoteEventAdapter } from "../events/remote-event-adapter";
+import {
+  resolveEventNetwork,
+  type EventNetwork,
+} from "../events/event-network";
+import type { EventMessageHandler } from "../events/types";
 
 /** Strict ceiling for a single plugin's `activate()` during boot. */
 export const DEFAULT_ACTIVATION_TIMEOUT_MS = 5000;
@@ -166,6 +173,24 @@ export class PluginHost {
   >();
   private readonly certification: CertificationService;
   private readonly activationTimeoutMs: number;
+  /**
+   * Union of every active plugin's `manifest.exposedEvents` — the topics this
+   * host publishes remotely. Grows as plugins load; applied to the
+   * {@link SubscriptionHub} after each load so plugins activated earlier see
+   * later plugins' exposure the moment it is published.
+   */
+  private readonly exposedEvents = new Set<string>();
+  /**
+   * Stap 5 event layer (SubscriptionHub + RemoteEventAdapter), memoized. Built
+   * lazily on first `ctx.events` use or first inbound event-transport frame, so
+   * a host that never touches events creates nothing. Both resolve the active
+   * provider via the registry at *call* time (see {@link lazyEventNetwork}),
+   * so a provider started after the layer was built is still picked up.
+   */
+  private eventLayerPromise: Promise<{
+    hub: SubscriptionHub;
+    adapter: RemoteEventAdapter;
+  }> | null = null;
 
   constructor(private readonly options: PluginHostOptions) {
     const hooks = new HookRegistry();
@@ -295,6 +320,7 @@ export class PluginHost {
             disposers,
             () => asContactLookup(this.getActivated("contacts")),
             this.access,
+            () => this.ensureEventLayer(),
           ),
           this.activationTimeoutMs,
           () =>
@@ -309,6 +335,12 @@ export class PluginHost {
         this.pluginDirs.set(manifest.id, path.resolve(pluginDir));
         this.states.set(manifest.id, "ACTIVE");
         this.signatures.set(manifest.id, signed ? "signed" : "unsigned");
+        // Stap 5: fold this plugin's exposed events into the union and refresh
+        // the hub so an already-created layer serves the latest exposure.
+        for (const event of manifest.exposedEvents ?? []) {
+          this.exposedEvents.add(event);
+        }
+        this.syncExposedEvents();
       } catch (err) {
         // Release anything the plugin registered before it failed, so a broken
         // activation never leaves dangling listeners or timers behind.
@@ -382,11 +414,110 @@ export class PluginHost {
       this.networks.register(provider);
       this.networks.selectActive();
       this.provider = provider;
+      // Stap 5: route inbound event-transport frames (sub_req → hub,
+      // event_emit → adapter) for the now-running provider.
+      this.wireEventsToProvider(provider);
     } catch (err) {
       console.error(
         `[plugin-host] networking failed to start: ${(err as Error).message}`,
       );
     }
+  }
+
+  /**
+   * Stap 5: attach the inbound event-transport routing to a running provider.
+   * Also called by the core-server for the provider it owns (registered into
+   * this host's registry). The handler is lazy: it builds the event layer on
+   * the first inbound frame, so wiring before any `ctx.events` use is safe.
+   */
+  wireEventsToProvider(provider: NetworkProvider): void {
+    const candidate = provider as unknown as {
+      onEventMessage?: (handler: EventMessageHandler) => void;
+    };
+    if (typeof candidate.onEventMessage !== "function") {
+      return;
+    }
+    candidate.onEventMessage(async (msg) => {
+      const layer = await this.ensureEventLayer();
+      if (!layer) {
+        return null;
+      }
+      if (msg.type === "sub_req") {
+        return layer.hub.handleSubReq(msg);
+      }
+      layer.adapter.handleInboundEvent(msg);
+      return null;
+    });
+  }
+
+  /**
+   * The Stap 5 event layer, created once on first use. Building it needs the
+   * host identity (`selfPeerId`), which is why it is async; callers that need
+   * it only after identity exists share this memoized promise.
+   */
+  private ensureEventLayer(): Promise<{
+    hub: SubscriptionHub;
+    adapter: RemoteEventAdapter;
+  }> {
+    if (!this.eventLayerPromise) {
+      this.eventLayerPromise = (async () => {
+        const identity = await this.identity.getOrCreateIdentity();
+        const network = this.lazyEventNetwork();
+        const hub = new SubscriptionHub(network, {
+          exposedEvents: this.exposedEvents,
+          selfPeerId: identity.peerId,
+        });
+        const adapter = new RemoteEventAdapter(network, {
+          onSubscriptionLost: (subscriptionId, reason) => {
+            void this.hooks.emit("event:subscription-lost", {
+              subscriptionId,
+              reason,
+            });
+          },
+        });
+        return { hub, adapter };
+      })();
+    }
+    return this.eventLayerPromise;
+  }
+
+  /**
+   * Refresh an already-created hub with the latest exposed-event union (after a
+   * later plugin activated). No-op when the layer was never built — the next
+   * builder reads the live set at construction.
+   */
+  private syncExposedEvents(): void {
+    if (!this.eventLayerPromise) {
+      return;
+    }
+    void this.eventLayerPromise.then(
+      (layer) => layer.hub.setExposedEvents(this.exposedEvents),
+      () => {},
+    );
+  }
+
+  /**
+   * An {@link EventNetwork} that resolves the active provider from the registry
+   * on every call, so a provider started (or swapped) after the layer was
+   * built is picked up live. A missing or event-incapable provider fails
+   * closed: sends return `null`/`false`, peer lookups return nothing.
+   */
+  private lazyEventNetwork(): EventNetwork {
+    const resolve = (): EventNetwork | null => {
+      const active = this.networks.selectActive();
+      return active ? resolveEventNetwork(active) : null;
+    };
+    return {
+      id: "host-events",
+      isReady: () => resolve() !== null,
+      listPeers: () => resolve()?.listPeers() ?? [],
+      getPeer: (peerId) => resolve()?.getPeer(peerId),
+      onEventMessage: (handler) => resolve()?.onEventMessage(handler),
+      sendSubReq: async (peer, body) =>
+        (await resolve())?.sendSubReq(peer, body) ?? null,
+      sendEvent: async (peer, body) =>
+        (await resolve())?.sendEvent(peer, body) ?? false,
+    };
   }
 
   /** Stop the network transport if it was started, releasing its sockets. */
@@ -395,6 +526,14 @@ export class PluginHost {
       this.networks.unregister(this.provider.id);
       await this.provider.stop();
       this.provider = null;
+    }
+    const layer = this.eventLayerPromise
+      ? await this.eventLayerPromise.catch(() => null)
+      : null;
+    this.eventLayerPromise = null;
+    if (layer) {
+      layer.hub.close();
+      layer.adapter.close();
     }
   }
 

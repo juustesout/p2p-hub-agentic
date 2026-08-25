@@ -3,6 +3,7 @@ export * from "./disposable";
 export * from "./network";
 export * from "./security";
 export * from "./certification";
+export * from "./events";
 export * from "./storage/scoped-storage";
 export * from "./storage/storage-manager";
 export * from "./storage/vault-manager";

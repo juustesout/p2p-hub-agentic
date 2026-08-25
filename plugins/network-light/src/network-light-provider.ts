@@ -20,9 +20,12 @@ import {
   NETWORK_PROTOCOL_VERSION,
   buildIdentityBindingMessage,
   encodeAuth,
+  encodeEventEmit,
   encodeHello,
   encodeHelloAck,
   encodeResult,
+  encodeSubAck,
+  encodeSubReq,
   encodeTask,
   mDNS_PROTOCOL_VERSION,
   supportedVersion,
@@ -30,10 +33,13 @@ import {
   parseEnvelope,
   randomNonce,
   verifyIdentityBinding,
+  type EventEmitBody,
   type HelloAckBody,
   type HelloBody,
   type HelloHints,
   type IdentityBinding,
+  type SubAckBody,
+  type SubReqBody,
   type TaskBody,
 } from "./wire-contract";
 import {
@@ -147,6 +153,23 @@ interface PeerCapabilities {
   fetchedAt: number;
 }
 
+/**
+ * A Stap 5 inbound event-transport message. `peerId` is always the Fase 1B
+ * authenticated connection identity — the provider sets it, never the peer.
+ */
+export type InboundEventMessage =
+  | { peerId: string; type: "sub_req"; body: SubReqBody }
+  | { peerId: string; type: "event_emit"; body: EventEmitBody };
+
+/**
+ * Inbound event-message handler (the core SubscriptionHub/RemoteEventAdapter
+ * side). Returning a `SubAckBody` answers a `sub_req` on the same connection;
+ * returning `null` (the normal answer to an `event_emit`) writes nothing.
+ */
+export type EventMessageHandler = (
+  msg: InboundEventMessage,
+) => Promise<SubAckBody | null> | SubAckBody | null;
+
 function encodeFrame(payload: string | Buffer): Buffer {
   const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8");
   const header = Buffer.alloc(4);
@@ -217,6 +240,7 @@ export class NetworkLightProvider implements NetworkProvider {
   private tlsCert = "";
   private certFingerprint = "";
   private taskHandler: TaskHandler | null = null;
+  private eventMessageHandler: EventMessageHandler | null = null;
   private readonly discovered = new Map<string, DiscoveredPeer>();
   private readonly peerCapabilities = new Map<string, PeerCapabilities>();
   private readonly capabilityProbes = new Map<string, Promise<PeerCapabilities | null>>();
@@ -446,6 +470,7 @@ export class NetworkLightProvider implements NetworkProvider {
     this.pingedAt.clear();
     this.limiter.clear();
     this.taskHandler = null;
+    this.eventMessageHandler = null;
   }
 
   /**
@@ -503,6 +528,16 @@ export class NetworkLightProvider implements NetworkProvider {
 
   onTask(handler: TaskHandler): void {
     this.taskHandler = handler;
+  }
+
+  /**
+   * Register the Stap 5 inbound event-message handler (subscription requests
+   * and published events). The provider performs only transport-level routing
+   * and identity binding; every authorization decision lives in the handler
+   * (the core hub), never here.
+   */
+  onEventMessage(handler: EventMessageHandler): void {
+    this.eventMessageHandler = handler;
   }
 
   /**
@@ -719,12 +754,254 @@ export class NetworkLightProvider implements NetworkProvider {
   }
 
   /**
+   * Stap 5: send a `sub_req` (subscribe/unsubscribe) to a peer over a fresh
+   * handshake connection and await its `sub_ack`. Returns the ack, or `null`
+   * (never throws) on any transport/handshake failure or when the peer rejects
+   * the request. A peer-advertised `maxPayloadBytes` limit is honored locally
+   * before the frame is put on the wire.
+   */
+  async sendSubReq(peer: NetworkPeer, body: SubReqBody): Promise<SubAckBody | null> {
+    const session = await this.connectForEvent(peer);
+    if (!session) {
+      return null;
+    }
+    const { socket } = session;
+    const frame = encodeSubReq(body);
+    if (!this.withinPeerLimit(peer, frame)) {
+      socket.destroy();
+      return null;
+    }
+
+    return new Promise<SubAckBody | null>((resolve) => {
+      let settled = false;
+      const finish = (ack: SubAckBody | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(ack);
+      };
+
+      let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+      const timer = setTimeout(() => finish(null), RESPONSE_TIMEOUT_MS);
+
+      socket.on("data", (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        try {
+          const message = tryDecodeFrame(buffer);
+          if (message === null) {
+            return;
+          }
+          const ack = parseEnvelope(message.value);
+          if (!ack || ack.type !== "sub_ack") {
+            finish(null);
+            return;
+          }
+          finish(ack.body as SubAckBody);
+        } catch {
+          finish(null);
+        }
+      });
+
+      socket.once("error", () => finish(null));
+      socket.once("close", () => finish(null));
+
+      try {
+        socket.write(encodeFrame(frame));
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  /**
+   * Stap 5: publish an `event_emit` to a subscribed peer over a fresh
+   * handshake connection. Fire-and-forget — there is no event ack; the
+   * receiver's telemetry gate is what bounds abuse. Resolves to `true` when
+   * the frame was flushed to the socket, `false` (never throws) on any
+   * transport/handshake failure or an oversized frame.
+   */
+  async sendEvent(peer: NetworkPeer, body: EventEmitBody): Promise<boolean> {
+    const session = await this.connectForEvent(peer);
+    if (!session) {
+      return false;
+    }
+    const { socket } = session;
+    const frame = encodeEventEmit(body);
+    if (!this.withinPeerLimit(peer, frame)) {
+      socket.destroy();
+      return false;
+    }
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), RESPONSE_TIMEOUT_MS);
+      socket.once("error", () => finish(false));
+      try {
+        socket.write(encodeFrame(frame), (err) => {
+          if (err) {
+            finish(false);
+            return;
+          }
+          socket.end();
+          finish(true);
+        });
+      } catch {
+        finish(false);
+      }
+    });
+  }
+
+  /** Honor the peer's advertised `maxPayloadBytes` before sending a frame. */
+  private withinPeerLimit(peer: NetworkPeer, frame: string): boolean {
+    const limits = this.peerCapabilities.get(peer.id)?.limits;
+    const max = limits?.maxPayloadBytes;
+    return max === undefined || frame.length <= max;
+  }
+
+  /**
+   * Open a fresh connection to `peer`, run the full Fase 1B handshake
+   * (fingerprint check → hello → verified hello_ack → our auth) and resolve
+   * with the ready socket. The event frame is written by the caller; `auth`
+   * has already been flushed so the peer can verify us. Returns `null` (never
+   * throws) on any failure.
+   */
+  private connectForEvent(peer: NetworkPeer): Promise<{
+    socket: tls.TLSSocket;
+    clientNonce: string;
+    serverNonce: string;
+  } | null> {
+    const { host, port } = parseAddress(peer.address);
+    const expectedFingerprint = this.discovered.get(peer.id)?.certFingerprint;
+    const clientNonce = randomNonce();
+
+    return new Promise<{
+      socket: tls.TLSSocket;
+      clientNonce: string;
+      serverNonce: string;
+    } | null>((resolve) => {
+      let settled = false;
+      const finish = (
+        value: { socket: tls.TLSSocket; clientNonce: string; serverNonce: string } | null,
+      ) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        socket.off("data", dataHandler);
+        resolve(value);
+      };
+
+      const socket = tls.connect(
+        {
+          host,
+          port,
+          rejectUnauthorized: false,
+          ...(this.tlsKey && this.tlsCert ? { key: this.tlsKey, cert: this.tlsCert } : {}),
+        },
+        () => {
+          if (!expectedFingerprint) {
+            socket.destroy();
+            finish(null);
+            return;
+          }
+          const presented = socket.getPeerCertificate().fingerprint256 ?? "";
+          if (!fingerprintsMatch(expectedFingerprint, presented)) {
+            socket.destroy();
+            finish(null);
+            return;
+          }
+          socket.write(
+            encodeFrame(
+              encodeHello(
+                [NETWORK_PROTOCOL_VERSION],
+                this.skills,
+                clientNonce,
+                this.helloHints(),
+              ),
+            ),
+          );
+        },
+      );
+
+      let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+      const timer = setTimeout(() => {
+        socket.destroy();
+        finish(null);
+      }, HANDSHAKE_TIMEOUT_MS);
+
+      const dataHandler = (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        try {
+          const message = tryDecodeFrame(buffer);
+          if (message === null) {
+            return;
+          }
+          const ack = parseEnvelope(message.value);
+          if (!ack || ack.type !== "hello_ack") {
+            socket.destroy();
+            finish(null);
+            return;
+          }
+          const body = ack.body as HelloAckBody;
+          if (body.version !== NETWORK_PROTOCOL_VERSION) {
+            socket.destroy();
+            finish(null);
+            return;
+          }
+          const presentedCertFp = normalizeFingerprint(
+            socket.getPeerCertificate().fingerprint256 ?? "",
+          );
+          if (
+            !this.verifyIdentity(
+              body.identity,
+              clientNonce,
+              body.nonce,
+              presentedCertFp,
+            )
+          ) {
+            socket.destroy();
+            finish(null);
+            return;
+          }
+          void this.buildAuthFrame(clientNonce, body.nonce)
+            .then((authFrame) => {
+              socket.write(encodeFrame(authFrame));
+              finish({ socket, clientNonce, serverNonce: body.nonce });
+            })
+            .catch(() => {
+              socket.destroy();
+              finish(null);
+            });
+        } catch {
+          socket.destroy();
+          finish(null);
+        }
+      };
+      socket.on("data", dataHandler);
+      socket.once("error", () => finish(null));
+      socket.once("close", () => finish(null));
+    });
+  }
+
+  /**
    * Verify an identity binding: the signature must be valid under the claimed
    * `peerId` AND the bound certificate fingerprint must equal the certificate
    * this socket actually presented. Verification needs no local signer — the
    * claimed `peerId` is itself the public key.
-   */
-  private verifyIdentity(
+   */  private verifyIdentity(
     binding: IdentityBinding,
     clientNonce: string,
     serverNonce: string,
@@ -881,6 +1158,56 @@ export class NetworkLightProvider implements NetworkProvider {
             });
             continue;
           }
+          if (envelope.type === "sub_req") {
+            // Default-deny: a subscription request from an unauthenticated
+            // connection is refused (same phase discipline as `task`).
+            if (authenticatedPeerId === null) {
+              socket.destroy();
+              return;
+            }
+            if (!this.limiter.allowRequest(ip)) {
+              socket.destroy();
+              return;
+            }
+            if (!this.limiter.tryAcquireTask(ip)) {
+              const body = envelope.body as SubReqBody;
+              socket.write(
+                encodeFrame(
+                  encodeSubAck({
+                    subscriptionId: body.subscriptionId,
+                    topic: body.topic,
+                    accepted: false,
+                    reason: "too many concurrent requests",
+                  }),
+                ),
+              );
+              continue;
+            }
+            void this.handleSubReqMessage(
+              socket,
+              envelope.body as SubReqBody,
+              authenticatedPeerId,
+              ip,
+            );
+            continue;
+          }
+          if (envelope.type === "event_emit") {
+            // Default-deny: no anonymous event traffic.
+            if (authenticatedPeerId === null) {
+              socket.destroy();
+              return;
+            }
+            // Publisher identity is never caller-supplied: the wire
+            // `publisherPeerId` must equal the Fase 1B authenticated identity
+            // of this connection or the frame is a spoof — close.
+            const body = envelope.body as EventEmitBody;
+            if (body.publisherPeerId !== authenticatedPeerId) {
+              socket.destroy();
+              return;
+            }
+            void this.handleEventEmitMessage(socket, body, authenticatedPeerId);
+            continue;
+          }
           if (envelope.type !== "task") {
             socket.destroy();
             return;
@@ -1008,6 +1335,51 @@ export class NetworkLightProvider implements NetworkProvider {
     } finally {
       this.limiter.releaseTask(ip);
     }
+  }
+
+  /**
+   * Answer an inbound `sub_req`: forward it (with the transport-verified
+   * peerId) to the registered event handler and write its `sub_ack` back on
+   * the same connection. No handler ⇒ fail-closed rejected ack.
+   */
+  private async handleSubReqMessage(
+    socket: tls.TLSSocket,
+    body: SubReqBody,
+    authenticatedPeerId: string,
+    ip: string,
+  ): Promise<void> {
+    try {
+      const handler = this.eventMessageHandler;
+      const ack: SubAckBody = handler
+        ? (await handler({ peerId: authenticatedPeerId, type: "sub_req", body })) ?? {
+            subscriptionId: body.subscriptionId,
+            topic: body.topic,
+            accepted: false,
+            reason: "no event handler",
+          }
+        : {
+            subscriptionId: body.subscriptionId,
+            topic: body.topic,
+            accepted: false,
+            reason: "no event handler",
+          };
+      socket.write(encodeFrame(encodeSubAck(ack)));
+    } finally {
+      this.limiter.releaseTask(ip);
+    }
+  }
+
+  /**
+   * Forward an inbound `event_emit` to the registered event handler (with the
+   * transport-verified peerId). Fire-and-forget: events have no ack, and the
+   * receiver-side telemetry gate is what bounds an abusive publisher.
+   */
+  private handleEventEmitMessage(
+    socket: tls.TLSSocket,
+    body: EventEmitBody,
+    authenticatedPeerId: string,
+  ): void {
+    void this.eventMessageHandler?.({ peerId: authenticatedPeerId, type: "event_emit", body });
   }
 
   private async dispatchTask(task: TaskRequest): Promise<TaskResult> {

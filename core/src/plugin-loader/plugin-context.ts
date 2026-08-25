@@ -11,6 +11,7 @@ import type {
   SkillHandler,
   SkillRegistrationOptions,
 } from "../task-broker/task-broker";
+import type { RemoteEvent } from "../events/remote-event-adapter";
 
 /**
  * Namespace-aware view over the shared {@link HookRegistry}. `emit` and
@@ -113,6 +114,53 @@ export interface NetworkCapability {
 }
 
 /**
+ * Handle to a live remote subscription (Stap 5). `unsubscribe()` tears the
+ * subscription down: it cancels the heartbeat refresh, removes the local state
+ * and sends a best-effort `unsubscribe` over the wire.
+ */
+export interface RemoteSubscriptionHandle {
+  readonly subscriptionId: string;
+  readonly peerId: string;
+  readonly topic: string;
+  unsubscribe(): Promise<void>;
+}
+
+/**
+ * Capability-scoped event surface for plugins (Stap 5). `publishRemote` is the
+ * only local-event emitter and is namespace-bound (same rule as `hooks.emit`):
+ * a plugin can only publish on its own `<pluginId>:` topics. `subscribeRemote`
+ * is outbound — the *remote* peer's hub is what authorizes it — so it carries
+ * no namespace restriction. Both fail closed (typed errors) rather than
+ * throwing transport internals; when the host has no event-capable network the
+ * whole surface is a fail-closed stub.
+ */
+export interface EventsCapability {
+  /**
+   * Emit `payload` on `topic` locally and fan it out to every remote
+   * subscriber. The topic must be in the plugin's own `<pluginId>:` namespace
+   * and must be exposed (`manifest.exposedEvents`); anything else throws
+   * `TopicNotExposedError` and reaches no subscriber.
+   */
+  publishRemote(topic: string, payload: unknown): Promise<void>;
+  /**
+   * Subscribe to `topic` on the peer with persistent `peerId`. Resolves with a
+   * {@link RemoteSubscriptionHandle} once the remote hub acks; rejects with
+   * `SubscriptionRejectedError` when the peer is unreachable, has no verified
+   * identity, or its hub denies the subscription.
+   */
+  subscribeRemote(
+    peerId: string,
+    topic: string,
+    handler: (event: RemoteEvent) => void,
+  ): Promise<RemoteSubscriptionHandle>;
+  /**
+   * Tear down a remote subscription by id (also cancels its heartbeat
+   * refresh). Resolves `false` when no such subscription existed.
+   */
+  unsubscribeRemote(subscriptionId: string): Promise<boolean>;
+}
+
+/**
  * Capability-scoped access-pass surface for plugins (Fase 2A). Backed by the
  * core {@link AccessPassManager}, the same store the broker's `access-pass`
  * remote gate consults. Passes are ephemeral (never persisted), never bearer
@@ -184,6 +232,13 @@ export interface PluginContext {
    * it is not a thrown error.
    */
   network: NetworkCapability | null;
+  /**
+   * Stap 5 event capability: publish local events to remote subscribers and
+   * subscribe to remote topics. Never null — when the host has no event-capable
+   * network the surface is a fail-closed stub (publish throws
+   * `TopicNotExposedError`, subscribe throws `SubscriptionRejectedError`).
+   */
+  events: EventsCapability;
   /**
    * Fase 2A access-pass capability. Never null: it is backed by the core
    * {@link AccessPassManager} even when networking is off (issuing a pass is

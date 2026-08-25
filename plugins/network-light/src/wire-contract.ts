@@ -93,6 +93,42 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  *   body: { "taskId": string, "status": "ok" | "error", "result"?: unknown, "error"?: string }
  *   `result` and `error` are optional; when both are present `result` precedes
  *   `error`.
+ *
+ * sub_req    subscriber → publisher (client → server)
+ *   body: { "subscriptionId": string, "topic": string,
+ *           "action": "subscribe" | "unsubscribe", "ttlMs"?: number }
+ *   Stap 5 (distributed subscriptions): a peer requests a subscription to (or
+ *   an unsubscribe from) a remote topic. `subscriptionId` is chosen by the
+ *   subscriber and is idempotent — re-sending a `subscribe` with the same id
+ *   refreshes the subscription (heartbeat), `unsubscribe` with the same id
+ *   tears it down. `topic` follows the hook-event naming convention
+ *   (`<ns>:<name>`, e.g. `calendar:eventAdded`); a trailing `:*` wildcard
+ *   (`calendar:*`) is allowed and matches every topic under that namespace —
+ *   wildcard subscriptions are re-authorized per topic at emit time by the
+ *   hub, never at subscribe time alone. `ttlMs` is a *requested* lifetime; the
+ *   publisher may grant less. `sub_req` MUST follow a verified `auth`, like
+ *   `task`.
+ *
+ * sub_ack    publisher → subscriber (server → client)
+ *   body: { "subscriptionId": string, "topic": string, "accepted": boolean,
+ *           "reason"?: string, "ttlMs"?: number }
+ *   The reply to a `sub_req`. `accepted: true` means the subscription is now
+ *   registered (or, for `unsubscribe`, was removed); `ttlMs` is the effective
+ *   lifetime the publisher granted. `accepted: false` carries a bounded
+ *   `reason` (e.g. `topic-not-exposed`, `peer-not-authorized`,
+ *   `subscription-cap`) — the peer learns whether its request was granted,
+ *   never *why* a security decision was made beyond the fail-closed reason.
+ *
+ * event_emit publisher → subscriber (client → server)
+ *   body: { "subscriptionId": string, "topic": string,
+ *           "publisherPeerId": string, "timestamp": number,
+ *           "sequenceNumber": number, "payload": unknown }
+ *   A published event delivered to a subscribed peer. `publisherPeerId` is
+ *   NEVER a trusted caller-supplied identity: the receiver MUST compare it to
+ *   the Fase 1B authenticated peerId of the connection and drop (or close) on
+ *   mismatch — a relayed frame can carry a false publisher. `timestamp` is the
+ *   publisher's event time in epoch ms; `sequenceNumber` is a per-subscription
+ *   monotonic counter so the subscriber can detect loss/reordering.
  * ```
  *
  * ## Identity binding (Fase 1B)
@@ -112,17 +148,21 @@ import { MAX_PAYLOAD_BYTES } from "@p2p-hub/sdk";
  * - `hello` without a `nonce`, or `hello_ack` without `nonce` + `identity` →
  *   close (no anonymous peers).
  * - `task` before `hello`, or `task` before a verified `auth` → close.
+ * - `sub_req`/`event_emit` before a verified `auth` → close (same phase
+ *   discipline as `task` — there is no anonymous event traffic).
  * - Message type that does not fit the current phase (e.g. `result` sent to a
  *   server, `hello_ack` after the handshake) → close.
  * - `auth` or `hello_ack.identity` that fails verification → close.
  * - Any message whose body fails structural validation → close.
+ * - `event_emit` whose `publisherPeerId` does not equal the authenticated
+ *   peerId of the connection → close (publisher identity is never caller-
+ *   supplied).
  */
 
 export const NETWORK_PROTOCOL_ID = "p2p-hub:network";
 export const NETWORK_PROTOCOL_VERSION = 1;
 /** mDNS TXT form of the protocol version ("1"). */
 export const mDNS_PROTOCOL_VERSION = String(NETWORK_PROTOCOL_VERSION);
-
 /**
  * The protocol versions this transport accepts. Default-deny and *non-
  * negotiable*: a connection is only accepted when the client offers an exact
@@ -138,6 +178,26 @@ export const HANDSHAKE_TIMEOUT_MS = 5_000;
 export const MAX_VERSIONS = 16;
 /** Upper bound on the number of capabilities in `hello`/`hello_ack`. */
 export const MAX_CAPABILITIES = 256;
+/** Upper bound on a `sub_req`/`sub_ack` subscription id length. */
+export const MAX_SUBSCRIPTION_ID_LENGTH = 128;
+/** Upper bound on a wire `topic` string length. */
+export const MAX_TOPIC_LENGTH = 256;
+/** Upper bound on a `sub_ack` deny `reason` length. */
+export const MAX_ACK_REASON_LENGTH = 128;
+
+/**
+ * A wire `topic`: `[A-Za-z0-9_][A-Za-z0-9_.-]*` with an optional
+ * namespace segment (`:name`) and an optional trailing `:*` wildcard. Follows
+ * the hook-event naming convention (`calendar:eventAdded`), so a peer cannot
+ * smuggle path-like or control characters into a topic; the `:`-delimiter is
+ * what namespace checks anchor on (CLAUDE.md principle #2). Wildcards are only
+ * the terminal `:*` form — never a bare `*` or a mid-string star.
+ */
+const TOPIC_RE =
+  /^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*)?(?::\*)?$/;
+
+/** A subscription id is bounded and dot/underscore/dash safe (map keys). */
+const SUBSCRIPTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
  * Domain-separation context for the Fase 1B identity binding. Signatures over
@@ -158,7 +218,15 @@ export const CERT_FINGERPRINT_RE = /^[0-9a-f]{64}$/;
 /** An Ed25519 signature is 64 bytes, hex-encoded (128 hex chars). */
 export const SIGNATURE_RE = /^[0-9a-f]{128}$/;
 
-export type WireMessageType = "hello" | "hello_ack" | "task" | "result" | "auth";
+export type WireMessageType =
+  | "hello"
+  | "hello_ack"
+  | "task"
+  | "result"
+  | "auth"
+  | "sub_req"
+  | "sub_ack"
+  | "event_emit";
 
 /**
  * Proof that the holder of the Ed25519 private key behind `peerId` also owns
@@ -213,11 +281,58 @@ export interface ResultBody {
   error?: string;
 }
 
+/** `subscribe` | `unsubscribe` — the only two subscription actions. */
+export type SubscriptionAction = "subscribe" | "unsubscribe";
+
+/** `sub_req` body (subscriber → publisher). */
+export interface SubReqBody {
+  subscriptionId: string;
+  topic: string;
+  action: SubscriptionAction;
+  /** Requested subscription lifetime in ms; the publisher may grant less. */
+  ttlMs?: number;
+}
+
+/** `sub_ack` body (publisher → subscriber). */
+export interface SubAckBody {
+  subscriptionId: string;
+  topic: string;
+  accepted: boolean;
+  /** Fail-closed deny reason (bounded) when `accepted` is false. */
+  reason?: string;
+  /** Effective granted lifetime in ms (present on `subscribe` accepts). */
+  ttlMs?: number;
+}
+
+/** `event_emit` body (publisher → subscriber). */
+export interface EventEmitBody {
+  subscriptionId: string;
+  topic: string;
+  /**
+   * The publisher's persistent peerId. NEVER caller-trusted: the receiver
+   * verifies it equals the Fase 1B authenticated connection peerId.
+   */
+  publisherPeerId: string;
+  /** Publisher's event time in epoch ms. */
+  timestamp: number;
+  /** Per-subscription monotonic counter (loss/reorder detection). */
+  sequenceNumber: number;
+  payload: unknown;
+}
+
 export interface WireEnvelope {
   protocol: string;
   version: number;
   type: WireMessageType;
-  body: HelloBody | HelloAckBody | TaskBody | ResultBody | IdentityBinding;
+  body:
+    | HelloBody
+    | HelloAckBody
+    | TaskBody
+    | ResultBody
+    | IdentityBinding
+    | SubReqBody
+    | SubAckBody
+    | EventEmitBody;
 }
 
 function isPositiveInt(value: unknown): value is number {
@@ -246,6 +361,28 @@ const NONCE_RE = /^[0-9a-f]{2,64}$/;
 
 function isNonce(value: unknown): value is string {
   return typeof value === "string" && NONCE_RE.test(value);
+}
+
+function isSubscriptionId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_SUBSCRIPTION_ID_LENGTH &&
+    SUBSCRIPTION_ID_RE.test(value)
+  );
+}
+
+function isTopic(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_TOPIC_LENGTH &&
+    TOPIC_RE.test(value)
+  );
+}
+
+function isSubscriptionAction(value: unknown): value is SubscriptionAction {
+  return value === "subscribe" || value === "unsubscribe";
 }
 
 /**
@@ -323,7 +460,10 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
     type !== "hello_ack" &&
     type !== "task" &&
     type !== "result" &&
-    type !== "auth"
+    type !== "auth" &&
+    type !== "sub_req" &&
+    type !== "sub_ack" &&
+    type !== "event_emit"
   ) {
     return null;
   }
@@ -470,6 +610,100 @@ export function parseEnvelope(value: unknown): WireEnvelope | null {
         },
       };
     }
+    case "sub_req": {
+      if (!isSubscriptionId(b.subscriptionId) || !isTopic(b.topic)) {
+        return null;
+      }
+      if (!isSubscriptionAction(b.action)) {
+        return null;
+      }
+      if (b.ttlMs !== undefined && !isPositiveInt(b.ttlMs)) {
+        return null;
+      }
+      const body: SubReqBody = {
+        subscriptionId: b.subscriptionId,
+        topic: b.topic,
+        action: b.action,
+      };
+      if (b.ttlMs !== undefined) {
+        body.ttlMs = b.ttlMs as number;
+      }
+      return {
+        protocol: NETWORK_PROTOCOL_ID,
+        version: NETWORK_PROTOCOL_VERSION,
+        type,
+        body,
+      };
+    }
+    case "sub_ack": {
+      if (!isSubscriptionId(b.subscriptionId) || !isTopic(b.topic)) {
+        return null;
+      }
+      if (typeof b.accepted !== "boolean") {
+        return null;
+      }
+      if (
+        b.reason !== undefined &&
+        (typeof b.reason !== "string" ||
+          b.reason.length === 0 ||
+          b.reason.length > MAX_ACK_REASON_LENGTH)
+      ) {
+        return null;
+      }
+      if (b.ttlMs !== undefined && !isPositiveInt(b.ttlMs)) {
+        return null;
+      }
+      const body: SubAckBody = {
+        subscriptionId: b.subscriptionId,
+        topic: b.topic,
+        accepted: b.accepted,
+      };
+      if (b.reason !== undefined) {
+        body.reason = b.reason as string;
+      }
+      if (b.ttlMs !== undefined) {
+        body.ttlMs = b.ttlMs as number;
+      }
+      return {
+        protocol: NETWORK_PROTOCOL_ID,
+        version: NETWORK_PROTOCOL_VERSION,
+        type,
+        body,
+      };
+    }
+    case "event_emit": {
+      if (!isSubscriptionId(b.subscriptionId) || !isTopic(b.topic)) {
+        return null;
+      }
+      if (!isHexString(b.publisherPeerId, PEER_ID_RE)) {
+        return null;
+      }
+      if (!Number.isInteger(b.timestamp) || (b.timestamp as number) <= 0) {
+        return null;
+      }
+      if (
+        !Number.isInteger(b.sequenceNumber) ||
+        (b.sequenceNumber as number) < 0
+      ) {
+        return null;
+      }
+      if (!("payload" in b) || b.payload === undefined) {
+        return null;
+      }
+      return {
+        protocol: NETWORK_PROTOCOL_ID,
+        version: NETWORK_PROTOCOL_VERSION,
+        type,
+        body: {
+          subscriptionId: b.subscriptionId,
+          topic: b.topic,
+          publisherPeerId: b.publisherPeerId,
+          timestamp: b.timestamp as number,
+          sequenceNumber: b.sequenceNumber as number,
+          payload: b.payload,
+        },
+      };
+    }
   }
 }
 
@@ -558,6 +792,59 @@ export function encodeResult(result: TaskResult): string {
     version: NETWORK_PROTOCOL_VERSION,
     type: "result",
     body,
+  });
+}
+
+export function encodeSubReq(body: SubReqBody): string {
+  const b: Record<string, unknown> = {
+    subscriptionId: body.subscriptionId,
+    topic: body.topic,
+    action: body.action,
+  };
+  if (body.ttlMs !== undefined) {
+    b.ttlMs = body.ttlMs;
+  }
+  return JSON.stringify({
+    protocol: NETWORK_PROTOCOL_ID,
+    version: NETWORK_PROTOCOL_VERSION,
+    type: "sub_req",
+    body: b,
+  });
+}
+
+export function encodeSubAck(body: SubAckBody): string {
+  const b: Record<string, unknown> = {
+    subscriptionId: body.subscriptionId,
+    topic: body.topic,
+    accepted: body.accepted,
+  };
+  if (body.reason !== undefined) {
+    b.reason = body.reason;
+  }
+  if (body.ttlMs !== undefined) {
+    b.ttlMs = body.ttlMs;
+  }
+  return JSON.stringify({
+    protocol: NETWORK_PROTOCOL_ID,
+    version: NETWORK_PROTOCOL_VERSION,
+    type: "sub_ack",
+    body: b,
+  });
+}
+
+export function encodeEventEmit(body: EventEmitBody): string {
+  return JSON.stringify({
+    protocol: NETWORK_PROTOCOL_ID,
+    version: NETWORK_PROTOCOL_VERSION,
+    type: "event_emit",
+    body: {
+      subscriptionId: body.subscriptionId,
+      topic: body.topic,
+      publisherPeerId: body.publisherPeerId,
+      timestamp: body.timestamp,
+      sequenceNumber: body.sequenceNumber,
+      payload: body.payload,
+    },
   });
 }
 
