@@ -26,6 +26,18 @@ export const CORE_ORIGIN =
     ?.VITE_CORE_ORIGIN ?? "http://127.0.0.1:8787";
 
 /**
+ * The iframe URL for a plugin's bundled UI. Deliberately carries NO query
+ * string and NO per-boot token: the plugin's own UI JavaScript can read
+ * `location.search`, so a token in this URL would be handed to code that is
+ * not trusted with it (CLAUDE.md #10). `/ui/*` is served unauthenticated by
+ * the core-server; every capability call the UI makes goes over the bridge and
+ * out through the shell's `Authorization: Bearer` header instead.
+ */
+export function pluginUiUrl(pluginId: string): string {
+  return `${CORE_ORIGIN}/ui/${encodeURIComponent(pluginId)}/`;
+}
+
+/**
  * Secure postMessage bridge for plugin UI panels rendered in iframes. A plugin
  * iframe never talks to the core HTTP endpoints directly — it posts a call to
  * the shell, which checks the call against the plugin's manifest-declared

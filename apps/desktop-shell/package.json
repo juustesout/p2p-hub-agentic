@@ -10,7 +10,9 @@
     "server": "node ../core-server/dist/index.js",
     "ui": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit",
+    "build:tests": "node test/build-tests.cjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "node test/build-tests.cjs && node --test --test-timeout=30000 dist-tests/*.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

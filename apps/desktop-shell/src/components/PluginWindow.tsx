@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { CORE_ORIGIN, pluginBridge } from "../services/plugin-bridge";
+import { pluginBridge, pluginUiUrl } from "../services/plugin-bridge";
 import type { CapabilityPlugin } from "../types";
 
 /**
@@ -36,7 +36,7 @@ export function PluginWindow({ plugin }: { plugin: CapabilityPlugin }) {
   return (
     <iframe
       ref={ref}
-      src={`${CORE_ORIGIN}/ui/${plugin.id}/`}
+      src={pluginUiUrl(plugin.id)}
       title={plugin.name}
       sandbox="allow-scripts allow-same-origin"
       className="h-full w-full border-0 bg-white"

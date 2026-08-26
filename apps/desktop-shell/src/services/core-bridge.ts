@@ -22,6 +22,14 @@ const MAX_BACKOFF_MS = 10_000;
 let cachedBootToken: string | null | undefined;
 
 /**
+ * Test-only hook: drop the cached boot token so the next {@link resolveBootToken}
+ * re-reads its sources (Tauri command, then env fallback).
+ */
+export function __resetBootTokenCache(): void {
+  cachedBootToken = undefined;
+}
+
+/**
  * Resolve the per-boot token shared with the core-server. Under Tauri the token
  * is read from the local `boot-token` file (never over HTTP); in a plain
  * browser (dev/preview) it falls back to `VITE_P2P_HUB_TOKEN`.
