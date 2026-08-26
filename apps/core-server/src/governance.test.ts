@@ -18,6 +18,7 @@ import {
 } from "./governance/matrix";
 import { GovernanceService } from "./governance/service";
 import { GovernanceStream } from "./governance/stream";
+import { isNetworkExposedSkill } from "./governance/predicates";
 
 const BOOT_TOKEN = "governance-glue-token";
 const PEER_ID = "a".repeat(64);
@@ -40,13 +41,7 @@ function catalogValidators(broker: TaskBroker) {
     validateSkill: (skill: string) =>
       broker
         .listSkills()
-        .some(
-          (s) =>
-            s.skill === skill &&
-            !s.localOnly &&
-            !s.httpBridgeOnly &&
-            s.remote !== undefined,
-        ),
+        .some((s) => s.skill === skill && isNetworkExposedSkill(s)),
     validateTopic: (topic: string) => topic === "chat:messageReceived",
   };
 }
@@ -58,6 +53,28 @@ function brokerWithCalendar(): TaskBroker {
     remote: { gate: "any" },
   });
   broker.registerSkill("calendar.addEvent", async () => ({ ok: true }));
+  return broker;
+}
+
+/**
+ * A broker with one skill in each reachability class, for the predicate-sync
+ * tests: network-exposed, local-only, httpBridgeOnly, and network-facing but
+ * without a remote policy (Fase 2A: `localOnly: false` alone authorizes
+ * nothing).
+ */
+function mixedBroker(): TaskBroker {
+  const broker = new TaskBroker();
+  broker.registerSkill("cal.list", async () => [], {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+  broker.registerSkill("cal.local", async () => ({ ok: true }));
+  broker.registerSkill("gov.admin", async () => ({ ok: true }), {
+    httpBridgeOnly: true,
+  });
+  broker.registerSkill("cal.remote-less", async () => ({ ok: true }), {
+    localOnly: false,
+  });
   return broker;
 }
 
@@ -158,6 +175,171 @@ test("a corrupt matrix file throws StorageCorruptionError, not silent empty", as
       ...catalogValidators(brokerWithCalendar()),
     });
     await assert.rejects(() => matrix.load(), StorageCorruptionError);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Part A2 — load-time shape validation (Slice 1)
+// ---------------------------------------------------------------------------
+
+async function writeMatrix(dir: string, entries: unknown): Promise<string> {
+  const filePath = path.join(dir, "matrix.json");
+  await fs.writeFile(
+    filePath,
+    JSON.stringify({ version: 1, entries }),
+    "utf8",
+  );
+  return filePath;
+}
+
+const VALID_ENTRY = {
+  peerId: PEER_ID,
+  skills: ["calendar.listEvents"],
+  topics: [],
+  updatedAt: 1_700_000_000_000,
+};
+
+test("load rejects an out-of-range persisted customRateLimit (999999)", async () => {
+  const dir = await tmpMatrixDir();
+  try {
+    const filePath = await writeMatrix(dir, [
+      { ...VALID_ENTRY, customRateLimit: 999_999 },
+    ]);
+    const matrix = new PeerMatrixStore({
+      filePath,
+      ...catalogValidators(brokerWithCalendar()),
+    });
+    await assert.rejects(
+      () => matrix.load(),
+      /invalid customRateLimit/,
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("load rejects a non-integer persisted customRateLimit", async () => {
+  const dir = await tmpMatrixDir();
+  try {
+    const filePath = await writeMatrix(dir, [
+      { ...VALID_ENTRY, customRateLimit: "50" },
+    ]);
+    const matrix = new PeerMatrixStore({
+      filePath,
+      ...catalogValidators(brokerWithCalendar()),
+    });
+    await assert.rejects(() => matrix.load(), /invalid customRateLimit/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("load rejects a missing/invalid persisted updatedAt", async () => {
+  const dir = await tmpMatrixDir();
+  try {
+    const filePath = await writeMatrix(dir, [
+      { ...VALID_ENTRY, updatedAt: "yesterday" },
+    ]);
+    const matrix = new PeerMatrixStore({
+      filePath,
+      ...catalogValidators(brokerWithCalendar()),
+    });
+    await assert.rejects(() => matrix.load(), /invalid updatedAt/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("load accepts a valid persisted entry with a bounded customRateLimit", async () => {
+  const dir = await tmpMatrixDir();
+  try {
+    const filePath = await writeMatrix(dir, [
+      { ...VALID_ENTRY, customRateLimit: ABSOLUTE_MAX_RATE_LIMIT },
+    ]);
+    const matrix = new PeerMatrixStore({
+      filePath,
+      ...catalogValidators(brokerWithCalendar()),
+    });
+    await matrix.load();
+    assert.equal(matrix.entry(PEER_ID)?.customRateLimit, ABSOLUTE_MAX_RATE_LIMIT);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Part A3 — single source of truth for the network-exposed predicate (Slice 1)
+// ---------------------------------------------------------------------------
+
+test("isNetworkExposedSkill matches the reachability flag combinations", async () => {
+  assert.equal(
+    isNetworkExposedSkill({ localOnly: false, httpBridgeOnly: false, remote: { gate: "any" } }),
+    true,
+    "manifest-exposed + remote policy = network-reachable",
+  );
+  assert.equal(
+    isNetworkExposedSkill({ localOnly: true, httpBridgeOnly: false, remote: { gate: "any" } }),
+    false,
+    "localOnly is never network-reachable",
+  );
+  assert.equal(
+    isNetworkExposedSkill({ localOnly: false, httpBridgeOnly: true, remote: undefined }),
+    false,
+    "httpBridgeOnly is a local operator privilege, never peer-facing",
+  );
+  assert.equal(
+    isNetworkExposedSkill({ localOnly: false, httpBridgeOnly: false, remote: undefined }),
+    false,
+    "localOnly: false without a remote policy authorizes nothing (Fase 2A)",
+  );
+  assert.equal(
+    isNetworkExposedSkill({ localOnly: true, httpBridgeOnly: true, remote: undefined }),
+    false,
+    "double deny stays deny",
+  );
+});
+
+test("catalog and matrix write-validation stay in sync (single predicate)", async () => {
+  const dir = await tmpMatrixDir();
+  try {
+    const broker = mixedBroker();
+    const matrix = new PeerMatrixStore({
+      filePath: path.join(dir, "matrix.json"),
+      ...catalogValidators(broker),
+    });
+    await matrix.load();
+    const service = new GovernanceService({
+      host: fakeHost({ broker }),
+      matrix,
+      authorizeTier2: async () => {},
+    });
+
+    const catalog = await service.catalog();
+    const catalogSkillNames = new Set(catalog.skills.map((s) => s.skill));
+    assert.deepEqual(
+      catalogSkillNames,
+      new Set(["cal.list"]),
+      "only the genuinely network-exposed skill is grantable",
+    );
+
+    // Every registered skill must be agreed upon by BOTH surfaces: a skill is
+    // in the catalog exactly when the matrix write path accepts it. If one
+    // caller ever drifts from the shared predicate, this breaks.
+    for (const s of broker.listSkills()) {
+      let matrixAccepts = true;
+      try {
+        await matrix.set(OTHER_ID, { skills: [s.skill], topics: [] });
+      } catch {
+        matrixAccepts = false;
+      }
+      assert.equal(
+        matrixAccepts,
+        catalogSkillNames.has(s.skill),
+        `skill "${s.skill}": matrix-validatable ⟺ catalog-listed`,
+      );
+    }
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

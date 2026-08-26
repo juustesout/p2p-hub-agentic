@@ -2,6 +2,7 @@ import type { PeerSkillGate } from "@p2p-hub/core";
 import type { PluginHost } from "@p2p-hub/core";
 import type { NetworkPeer } from "@p2p-hub/sdk";
 import type { PeerMatrixEntry, PeerMatrixStore } from "./matrix";
+import { isNetworkExposedSkill } from "./predicates";
 
 /**
  * Structural view of a discovered peer for topology. The base `NetworkPeer`
@@ -109,7 +110,7 @@ export class GovernanceService implements PeerSkillGate {
     const skills = this.opts.host
       .taskBroker()
       .listSkills()
-      .filter((s) => !s.localOnly && !s.httpBridgeOnly && s.remote !== undefined)
+      .filter(isNetworkExposedSkill)
       .map((s) => ({ skill: s.skill, capabilityType: s.capabilityType }));
     return { skills, topics: this.opts.host.exposedEventTopics() };
   }

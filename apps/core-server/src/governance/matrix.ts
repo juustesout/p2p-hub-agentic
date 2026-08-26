@@ -129,6 +129,28 @@ export class PeerMatrixStore {
           `governance matrix file contains an invalid entry: ${this.options.filePath}`,
         );
       }
+      // Field-level validation (Slice 1): a persisted entry that violates the
+      // store's own write invariants means the file was hand-edited or
+      // corrupted. Fail loudly — never silently drop the offending field (that
+      // would quietly re-bless a value the write path forbids, e.g. an
+      // unlimited rate limit) and never start over empty (CLAUDE.md #9).
+      if (typeof entry.updatedAt !== "number" || !Number.isFinite(entry.updatedAt)) {
+        throw new Error(
+          `governance matrix entry for ${entry.peerId} has an invalid updatedAt timestamp: ${this.options.filePath}`,
+        );
+      }
+      if (
+        entry.customRateLimit !== undefined &&
+        (typeof entry.customRateLimit !== "number" ||
+          !Number.isInteger(entry.customRateLimit) ||
+          entry.customRateLimit < 1 ||
+          entry.customRateLimit > ABSOLUTE_MAX_RATE_LIMIT)
+      ) {
+        throw new Error(
+          `governance matrix entry for ${entry.peerId} has an invalid customRateLimit ` +
+            `(must be an integer 1..${ABSOLUTE_MAX_RATE_LIMIT}): ${this.options.filePath}`,
+        );
+      }
       this.entries.set(entry.peerId, {
         peerId: entry.peerId,
         skills: [...new Set(entry.skills)].sort(),

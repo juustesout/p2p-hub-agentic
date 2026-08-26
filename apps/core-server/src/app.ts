@@ -14,6 +14,7 @@ import {
 } from "./governance/matrix";
 import { GovernanceService } from "./governance/service";
 import { GovernanceStream } from "./governance/stream";
+import { isNetworkExposedSkill } from "./governance/predicates";
 import {
   generateBootToken,
   generateSiteToken,
@@ -436,15 +437,9 @@ export class CoreServer {
    */
   private async initGovernance(): Promise<void> {
     const validateSkill = (skill: string) =>
-      this.broker
-        .listSkills()
-        .some(
-          (s) =>
-            s.skill === skill &&
-            !s.localOnly &&
-            !s.httpBridgeOnly &&
-            s.remote !== undefined,
-        );
+      this.broker.listSkills().some(
+        (s) => s.skill === skill && isNetworkExposedSkill(s),
+      );
     const validateTopic = (topic: string) =>
       this.host.exposedEventTopics().includes(topic);
 
