@@ -131,6 +131,45 @@ export interface RemoteGate {
   hasValidAccessPass(peerId: string, scope: string): Promise<boolean>;
 }
 
+/**
+ * Stap 6 — per-peer permission matrix (a *narrowing* filter, never a
+ * grant). The governance subsystem owns a per-peer matrix of explicitly
+ * allowed skills; the broker consults this gate on the network path so the
+ * effective remote access is the intersection:
+ *
+ *   EffectiveAccess = ManifestExposed ∩ PeerMatrixAllowed ∩ RemoteGate
+ *
+ * The matrix can only ever narrow what the manifest + remote policy already
+ * allow — a peer with a matrix entry may invoke exactly the listed skills
+ * (everything else a manifest exposes is withheld from that peer), and a peer
+ * WITHOUT an entry keeps the manifest/policy default. Because the broker's own
+ * `localOnly`/`httpBridgeOnly`/`remote`-policy checks run independently of
+ * this gate, a matrix entry can never widen a skill the manifest does not
+ * expose (the Stap 6 intersection invariant).
+ *
+ * Deliberately injected (never constructed by the broker), exactly like
+ * {@link RemoteGate}: the broker must not know *how* the matrix is stored —
+ * core-server wires a concrete implementation backed by its persisted
+ * governance matrix. An absent gate is no narrowing at all (peers keep the
+ * manifest default), so a broker without governance is unchanged.
+ */
+export interface PeerSkillGate {
+  /**
+   * Whether a transport-verified `peerId` may invoke `skill` over the network.
+   * Never throws: a failing lookup denies (fail-closed), and the broker treats
+   * it as a denial rather than crashing.
+   */
+  isAllowed(peerId: string, skill: string): Promise<boolean>;
+}
+
+/**
+ * Typed `code` on the {@link TaskResult} a peer receives when the Stap 6
+ * permission matrix (or the manifest/remote-policy checks that back it) denies
+ * a network invocation. Lets a transport/client distinguish "denied by
+ * governance" from generic task errors.
+ */
+export const ACCESS_DENIED_ERROR_CODE = "access-denied";
+
 /** Normalize a {@link RemoteGateSpec} to a canonical array (OR semantics). */
 export function normalizeRemoteGates(spec: RemoteGateSpec | undefined): RemoteGateKind[] {
   if (spec === undefined) {

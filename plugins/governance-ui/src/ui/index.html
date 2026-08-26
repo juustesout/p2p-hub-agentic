@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <title>Trust &amp; Governance</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Trust &amp; Governance</h1>
+      <p class="subtitle">
+        Per-peer permission matrix. A matrix entry can only ever <em>narrow</em>
+        what a manifest already exposes.
+      </p>
+    </header>
+
+    <div id="status" class="status status--offline">Loading…</div>
+
+    <main id="app" hidden>
+      <section class="panel">
+        <h2>Peers</h2>
+        <table id="peers" class="table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Identity</th>
+              <th>Trust state</th>
+              <th>Subscriptions</th>
+              <th>Permissions</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p id="noPeers" class="empty" hidden>
+          No peers discovered yet. Peers appear here once the LAN transport sees
+          them.
+        </p>
+      </section>
+
+      <section id="editorSection" class="panel" hidden>
+        <h2>Permissions</h2>
+        <div class="editor-head">
+          <span id="editorPeerLabel"></span>
+          <span class="tag" id="editorTrustTag"></span>
+        </div>
+        <h3>Skills (network-exposed)</h3>
+        <div id="skillChecks" class="checks"></div>
+        <h3>Topics (exposed events)</h3>
+        <div id="topicChecks" class="checks"></div>
+        <h3>Event-stream rate cap</h3>
+        <label class="field">
+          <span>Messages / second / peer channel</span>
+          <input
+            id="rateLimit"
+            type="number"
+            min="1"
+            max="500"
+            step="1"
+            placeholder="default"
+          />
+          <span class="hint">
+            Optional. Above 500 is rejected — a matrix entry can never disable
+            the rate gate.
+          </span>
+        </label>
+        <div class="actions">
+          <button id="saveBtn" class="btn btn--primary">Save permissions</button>
+          <button id="removeBtn" class="btn btn--danger">Clear entry</button>
+          <button id="verifyBtn" class="btn">Verify identity</button>
+          <button id="cancelBtn" class="btn btn--ghost">Close</button>
+        </div>
+      </section>
+
+      <p id="lastResult" class="result"></p>
+    </main>
+
+    <div id="standalone" hidden>
+      <p>
+        This is the governance console. It is designed to run inside the
+        desktop shell; in standalone preview it shows no live data.
+      </p>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -608,6 +608,44 @@ export class PluginHost {
   }
 
   /**
+   * Stap 6 — the event layer's active subscriptions *towards this node* (which
+   * remote peers currently receive which of our topics), for the governance
+   * topology view. Returns `[]` when the layer was never built (no plugin ever
+   * used `ctx.events`) — the empty set is accurate, not an error.
+   */
+  async listEventSubscriptions(): Promise<
+    Array<{ peerId: string; subscriptionId: string; topic: string; ttlMs: number }>
+  > {
+    if (!this.eventLayerPromise) {
+      return [];
+    }
+    const layer = await this.eventLayerPromise.catch(() => null);
+    if (!layer) {
+      return [];
+    }
+    return layer.hub
+      .listSubscriptions()
+      .map((s) => ({
+        peerId: s.peerId,
+        subscriptionId: s.subscriptionId,
+        topic: s.topic,
+        ttlMs: s.ttlMs,
+      }));
+  }
+
+  /**
+   * Stap 6 — the union of every active plugin's `manifest.exposedEvents`
+   * (topics this node publishes remotely). This is the event-side catalog the
+   * governance permission matrix validates topics against, so a matrix entry
+   * can never name a topic no plugin exposes. Always accurate even when the
+   * event layer was never built, because the set is filled at plugin
+   * activation time.
+   */
+  exposedEventTopics(): string[] {
+    return [...this.exposedEvents];
+  }
+
+  /**
    * The shared Fase 2A access-pass store backing `ctx.access` and the broker's
    * `access-pass` remote gate.
    */

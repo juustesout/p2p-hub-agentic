@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TaskBroker } from "./task-broker";
-import type { RemoteGate } from "./remote-access";
+import { ACCESS_DENIED_ERROR_CODE, type RemoteGate } from "./remote-access";
 import type { TaskRequest } from "@p2p-hub/sdk";
 
 function task(overrides: Partial<TaskRequest> = {}): TaskRequest {
@@ -1029,4 +1029,100 @@ test("Deel 1: the window slides and frees the budget again", async () => {
 test("Deel 1: hasRateLimiting is true by default (network tasks always budgeted)", () => {
   const broker = new TaskBroker();
   assert.equal(broker.hasRateLimiting(), true);
+});
+
+test("Stap 6: the permission matrix narrows a peer to its listed skills (and never widens)", async () => {
+  const broker = new TaskBroker();
+  // An allowlist matrix: ALICE may only call calendar.listEvents.
+  broker.setPeerSkillGate({
+    isAllowed: async (peerId, skill) =>
+      peerId === ALICE ? skill === "calendar.listEvents" : true,
+  });
+  broker.registerSkill("calendar.listEvents", async () => [], {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+  broker.registerSkill("calendar.addEvent", async () => ({ ok: true }), {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  // ALICE's listed skill is allowed.
+  const allowed = await broker.handleRemote(
+    task({ skill: "calendar.listEvents", peerId: ALICE }),
+  );
+  assert.equal(allowed.status, "ok");
+
+  // A skill the matrix does not list is denied with the typed code — even
+  // though the manifest/remote policy would allow it (this is the narrowing).
+  const denied = await broker.handleRemote(
+    task({ skill: "calendar.addEvent", peerId: ALICE }),
+  );
+  assert.equal(denied.status, "error");
+  assert.equal(denied.code, ACCESS_DENIED_ERROR_CODE);
+  assert.match(denied.error ?? "", /permission matrix/);
+
+  // A peer WITHOUT a matrix entry keeps the manifest default.
+  const bobAllowed = await broker.handleRemote(
+    task({ skill: "calendar.addEvent", peerId: BOB }),
+  );
+  assert.equal(bobAllowed.status, "ok");
+});
+
+test("Stap 6: the matrix cannot widen a skill the manifest does not expose", async () => {
+  const broker = new TaskBroker();
+  // Even if a matrix entry (mis)listed a local-only skill, the broker's own
+  // exposure check still denies — the intersection invariant.
+  broker.setPeerSkillGate({
+    isAllowed: async (peerId) => peerId === ALICE,
+  });
+  broker.registerSkill("vault.setSecret", async () => ({ ok: true }));
+
+  const result = await broker.handleRemote(
+    task({ skill: "vault.setSecret", peerId: ALICE }),
+  );
+
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /local-only/);
+});
+
+test("Stap 6: a throwing matrix gate denies (fail-closed), never opens the door", async () => {
+  const broker = new TaskBroker();
+  broker.setPeerSkillGate({
+    isAllowed: async () => {
+      throw new Error("matrix unreadable");
+    },
+  });
+  broker.registerSkill("calendar.listEvents", async () => [], {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  const result = await broker.handleRemote(
+    task({ skill: "calendar.listEvents", peerId: ALICE }),
+  );
+
+  assert.equal(result.status, "error");
+  assert.equal(result.code, ACCESS_DENIED_ERROR_CODE);
+});
+
+test("Stap 6: an anonymous caller is never narrowed by the matrix (no peerId)", async () => {
+  const broker = new TaskBroker();
+  broker.setPeerSkillGate({
+    isAllowed: async () => {
+      throw new Error("should not be consulted");
+    },
+  });
+  broker.registerSkill("contacts.signChallenge", async () => ({ ok: true }), {
+    localOnly: false,
+    remote: { gate: "any" },
+  });
+
+  // No transport-verified peerId → the matrix is not consulted; the public
+  // path stays reachable (a peer must be able to prove possession before it
+  // can be granted contact/pass status).
+  const result = await broker.handleRemote(
+    task({ skill: "contacts.signChallenge" }),
+  );
+  assert.equal(result.status, "ok");
 });

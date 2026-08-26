@@ -12,6 +12,7 @@
     { "path": "./plugins/notepad" },
     { "path": "./plugins/calc" },
     { "path": "./plugins/paint" },
+    { "path": "./plugins/governance-ui" },
     { "path": "./plugins/contacts" },
     { "path": "./plugins/peersite" },
     { "path": "./plugins/media" },

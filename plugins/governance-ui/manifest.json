@@ -1,0 +1,29 @@
+{
+  "id": "governance-ui",
+  "name": "Trust & Governance",
+  "version": "1.0.0",
+  "kind": "generic",
+  "entry": "./dist/index.js",
+  "permissions": [
+    "network:http:governance-ui.getCatalog",
+    "network:http:governance-ui.getTopology",
+    "network:http:governance-ui.listPermissions",
+    "network:http:governance-ui.verifyPeer",
+    "network:http:governance-ui.registerSkills",
+    "network:http:governance-ui.removePermissions"
+  ],
+  "exposedEvents": [],
+  "ui": {
+    "entry": "dist/index.html",
+    "skills": [
+      "governance-ui.getCatalog",
+      "governance-ui.getTopology",
+      "governance-ui.listPermissions",
+      "governance-ui.verifyPeer",
+      "governance-ui.registerSkills",
+      "governance-ui.removePermissions"
+    ],
+    "defaultWidth": 920,
+    "defaultHeight": 680
+  }
+}

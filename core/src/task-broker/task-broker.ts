@@ -8,12 +8,14 @@ import {
 } from "@p2p-hub/sdk";
 import type {
   AgentGate,
+  PeerSkillGate,
   RemoteAccessPolicy,
   RemoteGate,
   RemoteGateKind,
   TaskApprovalGate,
 } from "./remote-access";
 import {
+  ACCESS_DENIED_ERROR_CODE,
   DEFAULT_AGENT_ACCESS_LEVEL,
   isAgentAccessLevel,
   normalizeRemoteGates,
@@ -155,6 +157,14 @@ export interface TaskBrokerOptions {
    */
   agentGate?: AgentGate;
   /**
+   * Stap 6: the per-peer permission matrix (a narrowing filter, never a
+   * grant). When present, a peer with an explicit matrix entry may invoke
+   * exactly the listed skills over the network; a peer without an entry keeps
+   * the manifest/policy default. An absent gate is no narrowing at all — the
+   * broker is unchanged without governance wired.
+   */
+  peerSkillGate?: PeerSkillGate;
+  /**
    * A1/Slice 2: per-invocation human approval for agent-initiated tasks that
    * need Tier-2 step-up. When absent, an agent task that requires approval is
    * denied (fail-closed).
@@ -197,6 +207,7 @@ export class TaskBroker {
   private readonly maxConcurrentTasks: number;
   private readonly remoteGate: RemoteGate | undefined;
   private readonly agentGate: AgentGate | undefined;
+  private peerSkillGate: PeerSkillGate | undefined;
   private readonly taskApprovalGate: TaskApprovalGate | undefined;
   private readonly telemetryRateLimiter: TelemetryRateLimiter;
   private readonly peerRateLimiter: PeerRateLimiter;
@@ -207,6 +218,7 @@ export class TaskBroker {
     this.maxConcurrentTasks = Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_CONCURRENT_TASKS;
     this.remoteGate = options.remoteGate;
     this.agentGate = options.agentGate;
+    this.peerSkillGate = options.peerSkillGate;
     this.taskApprovalGate = options.taskApprovalGate;
     this.telemetryRateLimiter = new TelemetryRateLimiter(
       options.telemetryRateLimit ?? DEFAULT_TELEMETRY_RATE_LIMIT,
@@ -325,6 +337,16 @@ export class TaskBroker {
     return this.peerRateLimiter.isActive();
   }
 
+  /**
+   * Stap 6: install (or replace) the per-peer permission matrix gate. Wired by
+   * core-server after the governance subsystem is constructed — the broker is
+   * created before the matrix store exists, so the gate is set later. A missing
+   * gate is no narrowing at all.
+   */
+  setPeerSkillGate(gate: PeerSkillGate | undefined): void {
+    this.peerSkillGate = gate;
+  }
+
   private async execute(
     task: TaskRequest,
     gate: "local" | "network" | "http",
@@ -363,6 +385,31 @@ export class TaskBroker {
       }
     }
     if (gate === "network") {
+      // Stap 6: the per-peer permission matrix narrows what the manifest +
+      // remote policy already allow. A peer with an explicit matrix entry may
+      // invoke exactly the listed skills; a peer without an entry (including an
+      // anonymous caller, which cannot be addressed by a matrix entry) keeps
+      // the default. Checked BEFORE the remote policy so a denied peer never
+      // consumes policy evaluation or rate budget. The broker's own
+      // localOnly/httpBridgeOnly/remote checks still run independently below,
+      // so a matrix entry can never widen a skill the manifest does not expose
+      // (the intersection invariant). Fail-closed: a throwing lookup denies.
+      if (callerPeerId && this.peerSkillGate) {
+        let matrixAllowed = true;
+        try {
+          matrixAllowed = await this.peerSkillGate.isAllowed(callerPeerId, task.skill);
+        } catch {
+          matrixAllowed = false;
+        }
+        if (!matrixAllowed) {
+          return {
+            taskId: task.id,
+            status: "error",
+            code: ACCESS_DENIED_ERROR_CODE,
+            error: `skill "${task.skill}" is not allowed for this peer by the permission matrix`,
+          };
+        }
+      }
       // Fase 2A + A1/Slice 2 + A1/Slice 4: the network gate (and the agent
       // escalation matrix, and the telemetry frequency cap) is evaluated here,
       // before dispatch. A skill without an explicit remote policy is denied —

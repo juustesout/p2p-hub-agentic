@@ -7,6 +7,14 @@ import { isLoopbackHost } from "./host";
 import { DEFAULT_HTTP_PORT } from "./config";
 import { createMediaSkillHandler } from "./media";
 import {
+  AccessDeniedError,
+  InvalidRateLimitError,
+  PEER_ID_RE as GOVERNANCE_PEER_ID_RE,
+  PeerMatrixStore,
+} from "./governance/matrix";
+import { GovernanceService } from "./governance/service";
+import { GovernanceStream } from "./governance/stream";
+import {
   generateBootToken,
   generateSiteToken,
   safeTokenEqual,
@@ -214,6 +222,8 @@ export class CoreServer {
   private peerTimer: NodeJS.Timeout | null = null;
   private bootToken = "";
   private readonly trustGate: TrustTierGate;
+  private governance: GovernanceService | null = null;
+  private governanceStream: GovernanceStream | null = null;
   private lanSiteAllowed = true;
   private siteToken = "";
   private peerId = "";
@@ -245,6 +255,7 @@ export class CoreServer {
     this.bridgeHookEvents();
     this.registerPeerAccessHandler();
     this.registerMediaAccessHandler();
+    await this.initGovernance();
 
     if (this.options.networking !== false) {
       await this.startNetworking();
@@ -297,6 +308,8 @@ export class CoreServer {
       client.close();
     }
     this.clients.clear();
+    this.governanceStream?.stop();
+    this.governanceStream = null;
     if (this.provider) {
       // Drop the provider from both registries so a stopped server leaves no
       // stale reference for plugin `ctx.network` lookups or API listings.
@@ -401,6 +414,126 @@ export class CoreServer {
         capabilityType: "action",
       },
     );
+  }
+
+  /**
+   * Stap 6 — build the governance subsystem (permission matrix + service +
+   * SSE stream), then inject the matrix gate into the TaskBroker. Run after
+   * `host.boot()` so the manifest-exposed catalog is complete: the matrix
+   * validates every write against that live catalog, which is what makes an
+   * entry structurally unable to open a skill the manifest does not expose.
+   *
+   * The tier-2 step-up reuses the same `TrustTierGate` core-server already owns
+   * for settings/media/peersite — a boot token alone never authorizes a
+   * governance write.
+   */
+  private async initGovernance(): Promise<void> {
+    const validateSkill = (skill: string) =>
+      this.broker
+        .listSkills()
+        .some(
+          (s) =>
+            s.skill === skill &&
+            !s.localOnly &&
+            !s.httpBridgeOnly &&
+            s.remote !== undefined,
+        );
+    const validateTopic = (topic: string) =>
+      this.host.exposedEventTopics().includes(topic);
+
+    const matrix = new PeerMatrixStore({
+      filePath: path.join(this.options.dataDir, "governance-matrix.json"),
+      validateSkill,
+      validateTopic,
+    });
+    await matrix.load();
+
+    this.governance = new GovernanceService({
+      host: this.host,
+      matrix,
+      // Governance writes are operator-driven only: `authenticated: true`
+      // reflects the boot token already presented, and the tier-2 native
+      // confirmation is the second, independent factor.
+            authorizeTier2: async (summary) => {
+        await this.trustGate.authorize("critical", summary, { authenticated: true });
+      },    });
+
+    // The broker was created before the matrix store existed, so the gate is
+    // installed after the fact. From here on every network task is checked
+    // against the intersection: manifest exposure (broker), then this matrix.
+    this.broker.setPeerSkillGate(this.governance);
+
+    this.governanceStream = new GovernanceStream();
+    this.governanceStream.start(() => this.governance!.matrixList());
+
+    this.registerGovernanceSkills();
+  }
+
+  /**
+   * The admin HTTP bridge for the governance-ui plugin. These are
+   * `httpBridgeOnly` operator skills (local operator privilege, structurally
+   * never peer-facing) that the sandboxed UI reaches through the established
+   * plugin bridge (`POST /api/execute`, boot token). The plugin's manifest
+   * declares them as `ui.skills`; the handlers themselves are core-server-owned
+   * so the UI never needs access to the governance service.
+   */
+  private registerGovernanceSkills(): void {
+    const governance = () => {
+      if (!this.governance) {
+        throw new Error("governance is not initialized");
+      }
+      return this.governance;
+    };
+
+    const register = (
+      method: string,
+      handler: (payload: unknown) => Promise<unknown>,
+    ) => {
+      this.broker.registerSkill(
+        `governance-ui.${method}`,
+        async (payload) => handler(payload),
+        {
+          httpExposed: true,
+          httpBridgeOnly: true,
+          capabilityType: "action",
+        },
+      );
+    };
+
+    register("getCatalog", async () => governance().catalog());
+    register("getTopology", async () => ({ peers: await governance().topology() }));
+    register("listPermissions", async () => ({ entries: governance().matrixList() }));
+
+    register("verifyPeer", async (payload) => {
+      const peerId = asGovernancePeerId(payload);
+      if (!peerId) {
+        throw new Error("verifyPeer expects { peerId: <64-hex> }");
+      }
+      return governance().verifyPeer(peerId);
+    });
+
+    register("registerSkills", async (payload) => {
+      const peerId = asGovernancePeerId(payload);
+      if (!peerId) {
+        throw new Error(
+          "registerSkills expects { peerId: <64-hex>, skills?, topics?, customRateLimit? }",
+        );
+      }
+      const spec = parseGovernancePermissionsSpec(payload, peerId);
+      const entry = await governance().setPermissions(peerId, spec);
+      this.broadcast("governance:matrix:updated", { peerId });
+      return { ok: true, entry };
+    });
+
+    register("removePermissions", async (payload) => {
+      const peerId = asGovernancePeerId(payload);
+      if (!peerId) {
+        throw new Error("removePermissions expects { peerId: <64-hex> }");
+      }
+      const removed = await governance().removePermissions(peerId);
+      this.broadcast("governance:matrix:updated", { peerId });
+      return { ok: true, removed };
+    });
   }
 
   /**
@@ -644,6 +777,9 @@ export class CoreServer {
         return;
       }
       if (await this.tryServeRemoteSite(req, res, path)) {
+        return;
+      }
+      if (await this.tryServeGovernance(req, res, path)) {
         return;
       }
       if (req.method === "GET" && path === "/api/health") {
@@ -1364,6 +1500,171 @@ export class CoreServer {
     };
   }
 
+  /**
+   * Stap 6 — governance API. Mounted under `/api/` so the existing boot-token
+   * check (`isAuthorized`) applies to every route here, including the SSE
+   * stream, before any handler runs. All writes are tier-2 confirmed inside the
+   * governance service (the boot token alone authorizes nothing on this
+   * surface). The catalog/topology/matrix reads are operator-visible.
+   */
+  private async tryServeGovernance(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ): Promise<boolean> {
+    if (!pathname.startsWith("/api/governance/v1")) {
+      return false;
+    }
+    const governance = this.governance;
+    if (!governance) {
+      this.sendJson(res, 503, { error: "governance not initialized" });
+      return true;
+    }
+
+    if (req.method === "GET" && pathname === "/api/governance/v1/catalog") {
+      this.sendJson(res, 200, await governance.catalog());
+      return true;
+    }
+
+    if (req.method === "GET" && pathname === "/api/governance/v1/topology") {
+      this.sendJson(res, 200, { peers: await governance.topology() });
+      return true;
+    }
+
+    if (req.method === "GET" && pathname === "/api/governance/v1/matrix") {
+      this.sendJson(res, 200, { entries: governance.matrixList() });
+      return true;
+    }
+
+    if (req.method === "GET" && pathname === "/api/governance/v1/stream") {
+      this.attachGovernanceStream(req, res);
+      return true;
+    }
+
+    const verifyMatch = pathname.match(
+      /^\/api\/governance\/v1\/peers\/([^/]+)\/verify$/,
+    );
+    if (req.method === "POST" && verifyMatch) {
+      const peerId = decodeURIComponent(verifyMatch[1]);
+      if (!GOVERNANCE_PEER_ID_RE.test(peerId)) {
+        this.sendJson(res, 400, { error: "invalid peerId" });
+        return true;
+      }
+      try {
+        const result = await governance.verifyPeer(peerId);
+        this.sendJson(res, 200, result);
+      } catch (err) {
+        this.sendGovernanceWriteError(res, err);
+      }
+      return true;
+    }
+
+    const permissionsMatch = pathname.match(
+      /^\/api\/governance\/v1\/peers\/([^/]+)\/permissions$/,
+    );
+    if (permissionsMatch) {
+      const peerId = decodeURIComponent(permissionsMatch[1]);
+      if (!GOVERNANCE_PEER_ID_RE.test(peerId)) {
+        this.sendJson(res, 400, { error: "invalid peerId" });
+        return true;
+      }
+      if (req.method === "PUT") {
+        const body = await readJson(req);
+        let spec: {
+          peerId: string;
+          skills: string[];
+          topics: string[];
+          customRateLimit?: number;
+        };
+        try {
+          spec = parseGovernancePermissionsSpec(body, peerId);
+        } catch (err) {
+          this.sendJson(res, 400, {
+            ok: false,
+            error: err instanceof Error ? err.message : "invalid body",
+          });
+          return true;
+        }
+        try {
+          const entry = await governance.setPermissions(peerId, spec);
+          this.broadcast("governance:matrix:updated", { peerId });
+          this.sendJson(res, 200, { ok: true, entry });
+        } catch (err) {
+          this.sendGovernanceWriteError(res, err);
+        }
+        return true;
+      }
+      if (req.method === "DELETE") {
+        try {
+          const removed = await governance.removePermissions(peerId);
+          this.broadcast("governance:matrix:updated", { peerId });
+          this.sendJson(res, 200, { ok: true, removed });
+        } catch (err) {
+          this.sendGovernanceWriteError(res, err);
+        }
+        return true;
+      }
+    }
+
+    this.sendJson(res, 404, { error: "not found" });
+    return true;
+  }
+
+  /** Attach an authenticated SSE client. Headers are set here; the body stays
+   * open and is written to by the GovernanceStream until the socket closes. */
+  private attachGovernanceStream(
+    _req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const stream = this.governanceStream;
+    if (!stream) {
+      this.sendJson(res, 503, { error: "governance not initialized" });
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    // Flush the headers immediately so the client's EventSource fires
+    // `open` without waiting for the first frame.
+    res.flushHeaders();
+    res.write("retry: 15000\n\n");
+    stream.subscribe(res);
+  }
+
+  /** Map governance write failures to typed HTTP responses. Everything else
+   * rethrows (the outer handler turns it into a 500). */
+  private sendGovernanceWriteError(res: http.ServerResponse, err: unknown): void {
+    if (err instanceof AccessDeniedError) {
+      this.sendJson(res, 403, {
+        ok: false,
+        error: err.message,
+        kind: err.kind,
+        name: err.name,
+      });
+      return;
+    }
+    if (err instanceof InvalidRateLimitError) {
+      this.sendJson(res, 422, {
+        ok: false,
+        error: err.message,
+        max: err.max,
+      });
+      return;
+    }
+    if (err instanceof TrustConfirmationDeniedError) {
+      this.sendJson(res, 403, {
+        ok: false,
+        error: err.message,
+        requiredTier: err.requiredTier,
+      });
+      return;
+    }
+    throw err;
+  }
+
   private async execute(body: ExecuteBody): Promise<TaskResult> {
     const id =
       typeof body.requestId === "string" && body.requestId.length > 0
@@ -1634,8 +1935,7 @@ export class CoreServer {
 }
 
 /** Human-readable summary shown to the native tier-2 confirmation prompt. */
-function settingsApplySummary(risk: RiskAssessment): string {
-  if (risk.findings.length === 0) {
+function settingsApplySummary(risk: RiskAssessment): string {  if (risk.findings.length === 0) {
     return "Apply security settings (no known risks)";
   }
   return `Apply security settings (${risk.aggregate}): ${risk.findings
@@ -1686,4 +1986,62 @@ async function readJson(req: http.IncomingMessage): Promise<unknown> {
   const parsed: unknown = JSON.parse(raw);
   validateObjectDepth(parsed);
   return parsed;
+}
+
+/** Safe charset for a skill name (e.g. `core.ai.generateText`). */
+const GOVERNANCE_SKILL_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+/** Safe charset for an exposed event topic (e.g. `paint:canvasCreated`). */
+const GOVERNANCE_TOPIC_RE = /^[a-zA-Z0-9][a-zA-Z0-9:._-]*$/;
+
+/** Extract a valid 64-hex peerId from a governance bridge payload, or null. */
+function asGovernancePeerId(payload: unknown): string | null {
+  const raw = (payload ?? {}) as { peerId?: unknown };
+  return typeof raw.peerId === "string" && GOVERNANCE_PEER_ID_RE.test(raw.peerId)
+    ? raw.peerId
+    : null;
+}
+
+/**
+ * Parse and shape the `/permissions` (and `governance-ui.registerSkills`)
+ * payload. `skills`/`topics` default to `[]` (omitting them clears the peer's
+ * lists — explicit, not accidental); `customRateLimit` is passed through and
+ * validated against {@link ABSOLUTE_MAX_RATE_LIMIT} by the matrix store, which
+ * throws {@link InvalidRateLimitError} above the cap. Every listed skill/topic
+ * is additionally validated against the manifest-exposed catalog by the store
+ * (the intersection invariant), surfacing as {@link AccessDeniedError}.
+ */
+function parseGovernancePermissionsSpec(
+  body: unknown,
+  peerId: string,
+): {
+  peerId: string;
+  skills: string[];
+  topics: string[];
+  customRateLimit?: number;
+} {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  const skills = raw.skills === undefined ? [] : raw.skills;
+  const topics = raw.topics === undefined ? [] : raw.topics;
+  if (
+    !Array.isArray(skills) ||
+    !Array.isArray(topics) ||
+    !skills.every(
+      (s) => typeof s === "string" && GOVERNANCE_SKILL_RE.test(s),
+    ) ||
+    !topics.every(
+      (t) => typeof t === "string" && GOVERNANCE_TOPIC_RE.test(t),
+    )
+  ) {
+    throw new Error(
+      "permissions expects { skills: string[], topics: string[], customRateLimit?: number }",
+    );
+  }
+  let customRateLimit: number | undefined;
+  if (raw.customRateLimit !== undefined) {
+    if (typeof raw.customRateLimit !== "number") {
+      throw new Error("customRateLimit must be a number");
+    }
+    customRateLimit = raw.customRateLimit;
+  }
+  return { peerId, skills, topics, customRateLimit };
 }
