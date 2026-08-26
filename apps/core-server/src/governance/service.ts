@@ -218,6 +218,16 @@ export class GovernanceService implements PeerSkillGate {
     return this.opts.matrix.list();
   }
 
+  /**
+   * The peer's custom emit-gate rate override (bounded at the store to
+   * `1..ABSOLUTE_MAX_RATE_LIMIT`), or `undefined` when the peer has no entry
+   * or no override — the default budget applies then. Consumed by the
+   * `SubscriptionHub` emit gate via the host's `eventsOptions.peerRateLimit`.
+   */
+  peerRateLimit(peerId: string): number | undefined {
+    return this.opts.matrix.entry(peerId)?.customRateLimit;
+  }
+
   private async requireTier2(summary: string): Promise<void> {
     if (!this.opts.authorizeTier2) {
       throw new Error(

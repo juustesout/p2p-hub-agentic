@@ -22,6 +22,7 @@ function makeHub(options: {
   peerAccessDeny?: (peerId: string) => boolean;
   now?: () => number;
   emitTelemetry?: Partial<StreamRateConfig>;
+  peerRateLimit?: (peerId: string) => number | undefined;
 } = {}): {
   hub: SubscriptionHub;
   network: FakeEventNetwork;
@@ -39,6 +40,7 @@ function makeHub(options: {
     now,
     sweepIntervalMs: 0,
     ...(options.emitTelemetry ? { emitTelemetry: options.emitTelemetry } : {}),
+    ...(options.peerRateLimit ? { peerRateLimit: options.peerRateLimit } : {}),
     ...(options.peerAccessDeny
       ? {
           peerAccess: {
@@ -299,4 +301,61 @@ test("emitLocal fan-out is throttled per (subscriber, topic) channel", async () 
     [1, 1],
     "dropped frames do not advance the per-subscription sequence",
   );
+});
+
+test("emitLocal applies a per-peer rate override (narrows, never disables)", async () => {
+  // ALICE gets a custom budget of 1 msg/window via the peerRateLimit resolver;
+  // BOB has no override and keeps the default (60 msg/window). The default
+  // window is 1000ms, so a single `now` keeps both within one window.
+  const { hub, network } = makeHub({
+    exposed: ["sensor:update"],
+    peerRateLimit: (peerId) => (peerId === ALICE ? 1 : undefined),
+  });
+
+  const aliceAck = await hub.handleSubReq(
+    inbound(ALICE, subReq({ subscriptionId: "sub-a", topic: "sensor:update" })),
+  );
+  const bobAck = await hub.handleSubReq(
+    inbound(BOB, subReq({ subscriptionId: "sub-b", topic: "sensor:update" })),
+  );
+  assert.equal(aliceAck.accepted, true);
+  assert.equal(bobAck.accepted, true);
+
+  // First emit: both within budget.
+  assert.equal(await hub.emitLocal("sensor:update", { v: 1 }), 2);
+  assert.equal(network.sentEvents.length, 2);
+
+  // Second emit (same window): ALICE is over her custom cap of 1 and her frame
+  // is dropped; BOB (default budget of 60) still receives his.
+  assert.equal(await hub.emitLocal("sensor:update", { v: 2 }), 1);
+  assert.equal(
+    network.sentEvents.filter((e) => e.body.sequenceNumber === 2).length,
+    1,
+    "only BOB's second frame reaches the wire",
+  );
+  assert.deepEqual(
+    network.sentEvents
+      .filter((e) => e.body.sequenceNumber === 2)
+      .map((e) => e.body.subscriptionId),
+    ["sub-b"],
+  );
+});
+
+test("emitLocal ignores a malformed rate override (default applies, never unlimited)", async () => {
+  // A resolver returning 0 / negative / non-integer is ignored: those values
+  // can never disable or exceed the gate — the default budget applies.
+  const { hub } = makeHub({
+    exposed: ["sensor:update"],
+    peerRateLimit: (peerId) => (peerId === ALICE ? 0 : -5),
+  });
+
+  const ack = await hub.handleSubReq(
+    inbound(ALICE, subReq({ subscriptionId: "sub-a", topic: "sensor:update" })),
+  );
+  assert.equal(ack.accepted, true);
+
+  // Default budget is 60 msg/window: both frames pass despite the bogus
+  // override, and the gate stays the fail-closed default.
+  assert.equal(await hub.emitLocal("sensor:update", { v: 1 }), 1);
+  assert.equal(await hub.emitLocal("sensor:update", { v: 2 }), 1);
 });

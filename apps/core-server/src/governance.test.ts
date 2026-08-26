@@ -257,6 +257,31 @@ test("service setPermissions validates the catalog after tier-2", async () => {
   }
 });
 
+test("service peerRateLimit yields the bounded custom cap (or undefined)", async () => {
+  const { matrix, dir } = await makeMatrix();
+  try {
+    const service = new GovernanceService({
+      host: fakeHost({ contacts: fakeContactsApi() }),
+      matrix,
+      authorizeTier2: async () => {},
+    });
+    // No entry → no override → the fail-closed default budget applies.
+    assert.equal(service.peerRateLimit(PEER_ID), undefined);
+
+    await service.setPermissions(PEER_ID, {
+      skills: ["calendar.listEvents"],
+      topics: [],
+      customRateLimit: 42,
+    });
+    assert.equal(service.peerRateLimit(PEER_ID), 42);
+
+    // Another peer keeps the default.
+    assert.equal(service.peerRateLimit(OTHER_ID), undefined);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("topology exposes only functional fields (no address/RTT/bandwidth)", async () => {
   const { matrix, dir } = await makeMatrix();
   try {

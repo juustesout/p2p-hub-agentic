@@ -236,6 +236,13 @@ export class CoreServer {
       dataDir: options.dataDir,
       masterKey: options.masterKey,
       taskApprovalGate: options.taskApprovalGate,
+      // Stap 6: the event layer's outbound emit gate consults the governance
+      // matrix for a per-peer rate override at emit time. `this.governance` is
+      // null until initGovernance() runs — the resolver then yields undefined
+      // and every peer keeps the default budget (fail-closed, never unlimited).
+      eventsOptions: {
+        peerRateLimit: (peerId) => this.governance?.peerRateLimit(peerId),
+      },
     });
     this.broker = this.host.taskBroker();
     this.trustGate = new TrustTierGate(options.trustConfirmation);

@@ -108,6 +108,15 @@ export interface SubscriptionHubOptions {
    * a peer on the wire either.
    */
   emitTelemetry?: Partial<StreamRateConfig>;
+  /**
+   * Stap 6 — optional per-peer override of the outbound channel's
+   * `maxMessagesPerSecond`, resolved lazily at emit time (so governance can
+   * change a peer's matrix entry live). Resolved to `undefined` → the default
+   * (`emitTelemetry`/`DEFAULT_STREAM_RATE_CONFIG`) applies. A non-positive
+   * integer is *ignored* (the default applies) — a malformed override can
+   * never disable or exceed the gate, it only ever narrows it.
+   */
+  peerRateLimit?: (peerId: string) => number | undefined;
 }
 
 /** Raised by `emitLocal` when the exact topic is not exposed — fail loudly. */
@@ -131,11 +140,15 @@ export class SubscriptionHub {
   private sequences = new Map<string, number>();
   private readonly network: EventNetwork;
   private readonly emitGate: TelemetryGate;
+  private readonly peerRateLimit: ((peerId: string) => number | undefined) | undefined;
+  /** Last per-peer override applied to the emit gate (channel budgets reset on change). */
+  private readonly appliedCustomRate = new Map<string, number>();
 
   constructor(network: EventNetwork, options: SubscriptionHubOptions) {
     this.network = network;
     this.selfPeerId = options.selfPeerId;
     this.emitGate = new TelemetryGate(options.emitTelemetry ?? {});
+    this.peerRateLimit = options.peerRateLimit;
     this.now = options.now ?? Date.now;
     // Default peer-level gate: `["open-lan"]` — any transport-verified,
     // non-blocked peer; the topic exposure itself is the capability gate.
@@ -224,6 +237,7 @@ export class SubscriptionHub {
       }
       let allowed = true;
       try {
+        this.applyPeerRateLimit(subscription.peerId, topic);
         allowed = this.emitGate.checkAndConsume(
           subscription.peerId,
           topic,
@@ -267,6 +281,37 @@ export class SubscriptionHub {
 
   private isExposed(topic: string): boolean {
     return this.exposed.has(topic);
+  }
+
+  /**
+   * Apply the peer's current per-peer rate override to the emit-gate channel
+   * for `(peerId, topic)`, but only when it changed since the last application
+   * (re-registering resets the channel window, which we must not do per emit).
+   * A resolver that is absent, throws, or yields a non-positive integer is
+   * ignored — the default budget applies, never a disabled gate.
+   */
+  private applyPeerRateLimit(peerId: string, topic: string): void {
+    if (!this.peerRateLimit) {
+      return;
+    }
+    let custom: number | undefined;
+    try {
+      custom = this.peerRateLimit(peerId);
+    } catch {
+      return;
+    }
+    if (
+      custom === undefined ||
+      !Number.isInteger(custom) ||
+      custom <= 0 ||
+      custom === this.appliedCustomRate.get(peerId)
+    ) {
+      return;
+    }
+    this.appliedCustomRate.set(peerId, custom);
+    this.emitGate.registerStream(peerId, topic, {
+      maxMessagesPerSecond: custom,
+    });
   }
 
   private async handleSubscribe(

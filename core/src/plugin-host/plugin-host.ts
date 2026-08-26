@@ -121,6 +121,16 @@ export interface PluginHostOptions {
    * approval are denied (fail-closed).
    */
   taskApprovalGate?: TaskApprovalGate;
+  /**
+   * Stap 6 — options for the lazily-built event layer (`SubscriptionHub`).
+   * `peerRateLimit` resolves a per-peer override of the outbound emit-gate
+   * budget at emit time; the governance subsystem (core-server) provides it
+   * from the persisted permission matrix. Absent ⇒ every peer keeps the
+   * default budget.
+   */
+  eventsOptions?: {
+    peerRateLimit?: (peerId: string) => number | undefined;
+  };
 }
 
 /** Input handed to a {@link NetworkProviderFactory}. */
@@ -466,6 +476,9 @@ export class PluginHost {
         const hub = new SubscriptionHub(network, {
           exposedEvents: this.exposedEvents,
           selfPeerId: identity.peerId,
+          ...(this.options.eventsOptions?.peerRateLimit
+            ? { peerRateLimit: this.options.eventsOptions.peerRateLimit }
+            : {}),
         });
         const adapter = new RemoteEventAdapter(network, {
           onSubscriptionLost: (subscriptionId, reason) => {
