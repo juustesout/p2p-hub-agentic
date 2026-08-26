@@ -6,8 +6,13 @@ import {
 } from "../security/peer-access-gate";
 import type { EventNetwork } from "./event-network";
 import {
+  TelemetryGate,
+  type StreamRateConfig,
+} from "../security/telemetry-gate";
+import {
   EVENT_TOPIC_RE,
   isWildcardTopic,
+  safeByteSize,
   topicMatches,
   type EventEmitBody,
   type InboundEventMessage,
@@ -36,9 +41,11 @@ import {
  * reaches no subscriber — exact AND wildcard subscribers alike), and each
  * matching subscriber receives an `event_emit` carrying OUR transport-verified
  * `publisherPeerId`, a per-subscription monotonic `sequenceNumber` and the
- * granted `subscriptionId`. Expired subscriptions are pruned lazily (on access
- * and on an interval sweep), so a vanished peer is bounded by TTL — there is no
- * connection tracking here.
+ * granted `subscriptionId`. The fan-out is throttled per (subscriber, topic)
+ * by the outbound telemetry gate — overflow drops that subscriber's frame, so
+ * a publisher cannot flood a peer on the wire. Expired subscriptions are
+ * pruned lazily (on access and on an interval sweep), so a vanished peer is
+ * bounded by TTL — there is no connection tracking here.
  *
  * Security notes (CLAUDE.md): never trust a caller-supplied `publisherPeerId`
  * — this hub *sets* it from the configured `selfPeerId`; the `:*` wildcard is
@@ -92,6 +99,15 @@ export interface SubscriptionHubOptions {
   now?: () => number;
   /** How often expired subscriptions are swept (default 15s). */
   sweepIntervalMs?: number;
+  /**
+   * Telemetry budget for the OUTBOUND fan-out, keyed per
+   * (subscriber, topic)-channel (default {@link DEFAULT_STREAM_RATE_CONFIG}).
+   * A publisher that emits faster than a subscriber's channel budget is
+   * pinched exactly like the receiver-side dispatch gate would — overflow
+   * drops that subscriber's frame (never queued), so a hot topic cannot flood
+   * a peer on the wire either.
+   */
+  emitTelemetry?: Partial<StreamRateConfig>;
 }
 
 /** Raised by `emitLocal` when the exact topic is not exposed — fail loudly. */
@@ -114,10 +130,12 @@ export class SubscriptionHub {
   private subscriptions = new Map<string, PeerSubscription>();
   private sequences = new Map<string, number>();
   private readonly network: EventNetwork;
+  private readonly emitGate: TelemetryGate;
 
   constructor(network: EventNetwork, options: SubscriptionHubOptions) {
     this.network = network;
     this.selfPeerId = options.selfPeerId;
+    this.emitGate = new TelemetryGate(options.emitTelemetry ?? {});
     this.now = options.now ?? Date.now;
     // Default peer-level gate: `["open-lan"]` — any transport-verified,
     // non-blocked peer; the topic exposure itself is the capability gate.
@@ -168,15 +186,25 @@ export class SubscriptionHub {
   /**
    * Fan an event out to every matching subscriber. The exact topic must be in
    * `exposedEvents` — otherwise {@link TopicNotExposedError} and no subscriber
-   * (exact or wildcard) ever receives it. Returns the number of subscribers
-   * the frame was successfully flushed to (a transport failure on one
-   * subscriber does not fail the rest).
+   * (exact or wildcard) ever receives it. Each subscriber is individually
+   * throttled by the outbound telemetry gate (per (subscriber, topic)-channel):
+   * an over-budget frame is dropped for that subscriber only, so one hot topic
+   * cannot flood a peer on the wire and a slow subscriber cannot starve the
+   * others. Returns the number of subscribers the frame was successfully
+   * flushed to (a transport failure or a gate drop on one subscriber does not
+   * fail the rest).
    */
   async emitLocal(topic: string, payload: unknown): Promise<number> {
     if (!this.isExposed(topic)) {
       throw new TopicNotExposedError(topic);
     }
     this.sweep();
+    const byteSize = safeByteSize(payload);
+    if (byteSize === null) {
+      // Fail-closed: a payload we cannot size cannot be accounted by the gate,
+      // and (the providers are JSON transports) cannot be serialized either.
+      return 0;
+    }
     const now = this.now();
     const emitted: EventEmitBody = {
       subscriptionId: "",
@@ -192,6 +220,23 @@ export class SubscriptionHub {
         continue;
       }
       if (!topicMatches(subscription.topic, topic)) {
+        continue;
+      }
+      let allowed = true;
+      try {
+        allowed = this.emitGate.checkAndConsume(
+          subscription.peerId,
+          topic,
+          byteSize,
+        ).allowed;
+      } catch {
+        // Sustained >2x cap escalates by throwing (stream violation): drop.
+        allowed = false;
+      }
+      if (!allowed) {
+        // Over-budget for this subscriber's channel — drop the frame without
+        // advancing the per-subscription sequence (the receiver never sees a
+        // gap it did not actually miss).
         continue;
       }
       const key = `${subscription.peerId}\u0000${subscription.subscriptionId}`;

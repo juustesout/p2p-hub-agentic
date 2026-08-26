@@ -94,3 +94,17 @@ export function topicMatches(subscribed: string, actual: string): boolean {
   }
   return false;
 }
+
+/**
+ * Serialized UTF-8 byte size of a payload for telemetry-gate accounting, or
+ * `null` when the payload cannot be JSON-serialized. Used by both the
+ * receiver-side dispatch gate (`RemoteEventAdapter`) and the sender-side
+ * fan-out gate (`SubscriptionHub`) so sizing is consistent across the layer.
+ */
+export function safeByteSize(payload: unknown): number | null {
+  try {
+    return Buffer.byteLength(JSON.stringify(payload), "utf8");
+  } catch {
+    return null;
+  }
+}

@@ -3,6 +3,7 @@ import { TelemetryGate, type StreamRateConfig } from "../security/telemetry-gate
 import type { EventNetwork } from "./event-network";
 import {
   EVENT_TOPIC_RE,
+  safeByteSize,
   topicMatches,
   type EventEmitBody,
   type InboundEventMessage,
@@ -296,12 +297,4 @@ function randomSubscriptionId(): string {
 
 function randomHex(bytes: number): string {
   return require("node:crypto").randomBytes(bytes).toString("hex");
-}
-
-function safeByteSize(payload: unknown): number | null {
-  try {
-    return Buffer.byteLength(JSON.stringify(payload), "utf8");
-  } catch {
-    return null;
-  }
 }

@@ -9,6 +9,7 @@ import {
   TopicNotExposedError,
 } from "./subscription-hub";
 import { FakeEventNetwork, fakePeer } from "./test-fakes";
+import type { StreamRateConfig } from "../security/telemetry-gate";
 import type { InboundEventMessage, SubReqBody } from "./types";
 
 const SELF_PEER_ID = "0".repeat(64);
@@ -20,6 +21,7 @@ function makeHub(options: {
   exposed?: string[];
   peerAccessDeny?: (peerId: string) => boolean;
   now?: () => number;
+  emitTelemetry?: Partial<StreamRateConfig>;
 } = {}): {
   hub: SubscriptionHub;
   network: FakeEventNetwork;
@@ -36,6 +38,7 @@ function makeHub(options: {
     selfPeerId: SELF_PEER_ID,
     now,
     sweepIntervalMs: 0,
+    ...(options.emitTelemetry ? { emitTelemetry: options.emitTelemetry } : {}),
     ...(options.peerAccessDeny
       ? {
           peerAccess: {
@@ -260,4 +263,40 @@ test("setExposedEvents replaces the exposure set", async () => {
   const ack = await hub.handleSubReq(inbound(ALICE, subReq({ topic: "calendar:eventAdded" })));
   assert.equal(ack.accepted, false);
   assert.equal(ack.reason, "topic-not-exposed");
+});
+
+test("emitLocal fan-out is throttled per (subscriber, topic) channel", async () => {
+  const { hub, network } = makeHub({
+    exposed: ["sensor:update", "sensor:alert"],
+    emitTelemetry: {
+      windowMs: 60_000,
+      maxMessagesPerSecond: 1,
+      maxBytesPerSecond: 10_000,
+    },
+  });
+  const aliceAck = await hub.handleSubReq(
+    inbound(ALICE, subReq({ subscriptionId: "sub-u", topic: "sensor:update" })),
+  );
+  const bobAck = await hub.handleSubReq(
+    inbound(BOB, subReq({ subscriptionId: "sub-a", topic: "sensor:alert" })),
+  );
+  assert.equal(aliceAck.accepted, true);
+  assert.equal(bobAck.accepted, true);
+
+  // First emit on each topic: both subscribers are within their own channel
+  // budget, and ALICE's exhausted update-channel does not spill onto BOB.
+  assert.equal(await hub.emitLocal("sensor:update", { v: 1 }), 1);
+  assert.equal(await hub.emitLocal("sensor:alert", { v: 1 }), 1);
+  assert.equal(network.sentEvents.length, 2);
+
+  // Both channels are now over budget: each subscriber's next frame is
+  // dropped for that subscriber only, without advancing the sequence.
+  assert.equal(await hub.emitLocal("sensor:update", { v: 2 }), 0);
+  assert.equal(await hub.emitLocal("sensor:alert", { v: 2 }), 0);
+  assert.equal(network.sentEvents.length, 2, "over-budget frames never reach the wire");
+  assert.deepEqual(
+    network.sentEvents.map((e) => e.body.sequenceNumber),
+    [1, 1],
+    "dropped frames do not advance the per-subscription sequence",
+  );
 });
