@@ -640,6 +640,34 @@ test("verify endpoint refuses without a tier-2 confirmer (fail-closed 403)", asy
   }
 });
 
+test("verify endpoint reaches the real contacts plugin through the tier-2 gate (happy path)", async () => {
+  const { server, port } = await bootGovernanceServer({ confirmTier2: true });
+  try {
+    // Add the peer as a contact first via the plugin's own httpBridgeOnly
+    // skill over `/api/execute` (boot token) — this is the same in-process
+    // `host.getActivated("contacts")` seam the governance service uses.
+    const added = await api(port, "POST", "/api/execute", {
+      serviceId: "contacts",
+      method: "addContact",
+      arguments: { peerId: PEER_ID, publicKeyHex: PEER_ID, displayName: "Happy Peer" },
+    });
+    assert.equal(added.status, 200);
+    assert.equal((added.body as { result?: { peerId?: string } }).result?.peerId, PEER_ID);
+
+    // Tier-2 confirms (stub), the real contacts plugin executes in-process,
+    // and the request passes the gate with HTTP 200. With networking disabled
+    // there is no transport, so the plugin's challenge-response cannot
+    // complete — but the failure is a *plugin-level* result (its own error
+    // string), never an HTTP or tier-2 rejection, which is exactly what proves
+    // the verify path ran end to end.
+    const { status, body } = await api(port, "POST", `/api/governance/v1/peers/${PEER_ID}/verify`, {});
+    assert.equal(status, 200);
+    assert.deepEqual(body, { verified: false, error: "no active network provider" });
+  } finally {
+    await server.stop();
+  }
+});
+
 test("topology endpoint works with no provider", async () => {
   const { server, port } = await bootGovernanceServer();
   try {
