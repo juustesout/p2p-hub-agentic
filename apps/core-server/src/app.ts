@@ -40,6 +40,10 @@ import { executeRemote, serveOperator } from "./routes/operator";
 import type { OperatorContext } from "./routes/operator";
 import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
 import type { CoreServerOptions } from "./options";
+import {
+  acquireInstanceLock,
+  type InstanceLock,
+} from "./instance-guard";
 
 interface PeerSitePlugin {
   getSiteRoot(): Promise<string | null>;
@@ -74,6 +78,7 @@ export class CoreServer {
   private httpServer: http.Server | null = null;
   private wsBus: WsActivityBus | null = null;
   private peerTimer: NodeJS.Timeout | null = null;
+  private instanceLock: InstanceLock | null = null;
   private bootToken = "";
   private readonly trustGate: TrustTierGate;
   private governance: GovernanceService | null = null;
@@ -163,6 +168,21 @@ export class CoreServer {
   }
 
   async start(): Promise<void> {
+    // Slice 3: refuse to boot a second instance on the same data directory —
+    // two processes would race each other's atomic storage writes. Acquired
+    // before anything touches the data dir; released on clean stop and on any
+    // failed boot (fail-hard, see instance-guard.ts).
+    this.instanceLock = acquireInstanceLock(this.options.dataDir);
+    try {
+      await this.startLocked();
+    } catch (err) {
+      this.instanceLock?.release();
+      this.instanceLock = null;
+      throw err;
+    }
+  }
+
+  private async startLocked(): Promise<void> {
     await this.host.boot();
 
     this.bootToken = this.resolveBootToken();
@@ -230,6 +250,8 @@ export class CoreServer {
   }
 
   async stop(): Promise<void> {
+    this.instanceLock?.release();
+    this.instanceLock = null;
     if (this.peerTimer) {
       clearInterval(this.peerTimer);
       this.peerTimer = null;

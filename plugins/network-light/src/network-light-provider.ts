@@ -1749,7 +1749,7 @@ export class NetworkLightProvider implements NetworkProvider {
   }
 }
 
-interface DecodedFrame {
+export interface DecodedFrame {
   value: unknown;
   rest: Buffer<ArrayBufferLike>;
 }
@@ -1758,8 +1758,13 @@ interface DecodedFrame {
  * Decode a complete frame, or return `null` when more bytes are needed.
  * Throws on any invalid frame (oversized or malformed) so the caller can
  * close the connection — malformed input defaults to deny, never to ignore.
+ *
+ * Exported for the wire-contract fuzz suite (Slice 3): it is the byte-level
+ * parser every inbound socket feeds, so the fuzz tests pin the invariant
+ * "decode either returns a complete frame, needs more bytes, or throws a
+ * bounded, catchable error — it never hangs and never corrupts the buffer".
  */
-function tryDecodeFrame(buffer: Buffer): DecodedFrame | null {
+export function tryDecodeFrame(buffer: Buffer): DecodedFrame | null {
   if (buffer.length < 4) {
     return null;
   }
