@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TaskBroker } from "./task-broker";
-import { ACCESS_DENIED_ERROR_CODE, type RemoteGate } from "./remote-access";
+import { ACCESS_DENIED_ERROR_CODE } from "./remote-access";
+import type { PeerAccessContext } from "../security/peer-access-gate";
 import type { TaskRequest } from "@p2p-hub/sdk";
 
 function task(overrides: Partial<TaskRequest> = {}): TaskRequest {
@@ -62,7 +63,7 @@ test("handleRemote allows skills explicitly opted in to the network", async () =
   });
 
   const result = await broker.handleRemote(
-    task({ skill: "calendar.listEvents" }),
+    task({ skill: "calendar.listEvents", peerId: ALICE }),
   );
 
   assert.equal(result.status, "ok");
@@ -242,10 +243,19 @@ test("a task arriving while the broker is at capacity is rejected, not queued", 
 const ALICE = "a".repeat(64);
 const BOB = "b".repeat(64);
 
-function gate(overrides: Partial<RemoteGate> = {}): RemoteGate {
+/**
+ * A peer-access context for broker tests: the same shape the host injects and
+ * the peersite plugin builds. Defaults to deny (no verified contact, no pass);
+ * overrides carve out the specific grant the test needs.
+ */
+function gate(overrides: Partial<PeerAccessContext> = {}): PeerAccessContext {
   return {
-    isVerifiedContact: async () => false,
-    hasValidAccessPass: async () => false,
+    contacts: {
+      isVerifiedContact: async () => false,
+    },
+    accessPasses: {
+      hasValidPass: async () => false,
+    },
     ...overrides,
   };
 }
@@ -278,8 +288,8 @@ test("2A: localOnly:false + remote policy is required; an empty gate list is rej
 
 test("2A: verified-contact gate allows a verified peer and denies an unknown one", async () => {
   const broker = new TaskBroker({
-    remoteGate: gate({
-      isVerifiedContact: async (peerId) => peerId === ALICE,
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === ALICE },
     }),
   });
   broker.registerSkill("peersite.read", async () => "data", {
@@ -302,7 +312,9 @@ test("2A: verified-contact gate allows a verified peer and denies an unknown one
 
 test("2A: verified-contact gate denies an anonymous (no peerId) caller", async () => {
   const broker = new TaskBroker({
-    remoteGate: gate({ isVerifiedContact: async () => true }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async () => true },
+    }),
   });
   broker.registerSkill("peersite.read", async () => "data", {
     localOnly: false,
@@ -315,7 +327,7 @@ test("2A: verified-contact gate denies an anonymous (no peerId) caller", async (
   assert.match(result.error ?? "", /not authorized/);
 });
 
-test("2A: verified-contact gate denies when no RemoteGate is injected (can't prove)", async () => {
+test("2A: verified-contact gate denies when no peer-access context is injected (can't prove)", async () => {
   const broker = new TaskBroker();
   broker.registerSkill("peersite.read", async () => "data", {
     localOnly: false,
@@ -332,9 +344,11 @@ test("2A: verified-contact gate denies when no RemoteGate is injected (can't pro
 
 test("2A: access-pass gate allows a pass holder in the required scope", async () => {
   const broker = new TaskBroker({
-    remoteGate: gate({
-      hasValidAccessPass: async (peerId, scope) =>
-        peerId === ALICE && scope === "site-read-only",
+    peerAccessContext: gate({
+      accessPasses: {
+        hasValidPass: async (peerId, scope) =>
+          peerId === ALICE && scope === "site-read-only",
+      },
     }),
   });
   broker.registerSkill("peersite.fetchAsset", async () => "asset", {
@@ -369,10 +383,12 @@ test("2A: access-pass gate without a scope is rejected at registration", async (
 
 test("2A: multiple gates are OR-ed (contact or pass holder both allowed)", async () => {
   const broker = new TaskBroker({
-    remoteGate: gate({
-      isVerifiedContact: async (peerId) => peerId === ALICE,
-      hasValidAccessPass: async (peerId, scope) =>
-        peerId === BOB && scope === "site-read-only",
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === ALICE },
+      accessPasses: {
+        hasValidPass: async (peerId, scope) =>
+          peerId === BOB && scope === "site-read-only",
+      },
     }),
   });
   broker.registerSkill("peersite.fetchAsset", async () => "asset", {
@@ -395,21 +411,33 @@ test("2A: multiple gates are OR-ed (contact or pass holder both allowed)", async
   assert.equal(stranger.status, "error");
 });
 
-test("2A: any gate allows any remote caller, even without a RemoteGate", async () => {
+test("2A: any gate allows any identified remote caller, even without a context; an anonymous caller is denied", async () => {
   const broker = new TaskBroker();
   broker.registerSkill("contacts.signChallenge", async () => "sig", {
     localOnly: false,
     remote: { gate: "any" },
   });
 
-  const result = await broker.handleRemote(task({ skill: "contacts.signChallenge" }));
+  // The `any`/public gate needs no proof — but the centralized checkPeerAccess
+  // still requires a transport-verified peerId for every mode, so an anonymous
+  // (no peerId) caller is now denied too. On the real transports a dispatched
+  // task always carries a verified peerId, so this only closes a path that no
+  // transport exercised.
+  const identified = await broker.handleRemote(
+    task({ skill: "contacts.signChallenge", peerId: ALICE }),
+  );
+  const anonymous = await broker.handleRemote(
+    task({ skill: "contacts.signChallenge" }),
+  );
 
-  assert.equal(result.status, "ok");
-  assert.equal(result.result, "sig");
+  assert.equal(identified.status, "ok");
+  assert.equal(identified.result, "sig");
+  assert.equal(anonymous.status, "error");
+  assert.match(anonymous.error ?? "", /not authorized/);
 });
 
 test("2A: the handler receives the transport-verified peerId in its context", async () => {
-  const broker = new TaskBroker({ remoteGate: gate() });
+  const broker = new TaskBroker({ peerAccessContext: gate() });
   broker.registerSkill("demo.whoami", async (_payload, ctx) => {
     return { seen: ctx?.peerId };
   }, { localOnly: false, remote: { gate: "any" } });
@@ -425,11 +453,13 @@ test("2A: the handler receives the transport-verified peerId in its context", as
   assert.deepEqual(local.result, { seen: undefined });
 });
 
-test("2A: a throwing RemoteGate denies rather than opening the door", async () => {
+test("2A: a throwing contacts lookup denies rather than opening the door", async () => {
   const broker = new TaskBroker({
-    remoteGate: gate({
-      isVerifiedContact: async () => {
-        throw new Error("gate exploded");
+    peerAccessContext: gate({
+      contacts: {
+        isVerifiedContact: async () => {
+          throw new Error("gate exploded");
+        },
       },
     }),
   });
@@ -488,7 +518,9 @@ test("A1: an agent caller can never pass the 'any' gate (public path closed)", a
 test("A1: 'any' is skipped for agents but an OR-ed stricter gate still applies", async () => {
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === AGENT },
+    }),
   });
   broker.registerSkill("peersite.read", async () => "data", {
     localOnly: false,
@@ -513,7 +545,9 @@ test("A1: telemetry level (Tier 1) lets an agent through on the normal gate", as
   const seen: unknown[] = [];
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === AGENT },
+    }),
   });
   broker.registerSkill("telemetry.vitals", async (_p, ctx) => {
     seen.push(ctx);
@@ -541,7 +575,9 @@ test("A1: telemetry level (Tier 1) lets an agent through on the normal gate", as
 test("A1: approved level (Tier 2, default) without a confirmer fails closed", async () => {
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === AGENT },
+    }),
   });
   broker.registerSkill("mail.send", async () => "sent", {
     localOnly: false,
@@ -560,7 +596,9 @@ test("A1: approved level approves the task when the operator confirms", async ()
   const requests: unknown[] = [];
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === AGENT },
+    }),
     taskApprovalGate: {
       approveAgentTask: async (request) => {
         requests.push(request);
@@ -590,7 +628,9 @@ test("A1: approved level approves the task when the operator confirms", async ()
 test("A1: approved level refuses when the operator denies the task", async () => {
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === AGENT },
+    }),
     taskApprovalGate: approvalGate(false),
   });
   broker.registerSkill("mail.send", async () => "sent", {
@@ -609,7 +649,9 @@ test("A1: approved level refuses when the operator denies the task", async () =>
 test("A1: a throwing approval gate denies (fail-closed)", async () => {
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === AGENT },
+    }),
     taskApprovalGate: {
       approveAgentTask: async () => {
         throw new Error("prompt exploded");
@@ -632,7 +674,9 @@ test("A1: a throwing approval gate denies (fail-closed)", async () => {
 test("A1: never level (Tier 3) hard-refuses an agent even with a passing gate", async () => {
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === AGENT }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === AGENT },
+    }),
   });
   broker.registerSkill("vault.read", async () => "secret", {
     localOnly: false,
@@ -650,7 +694,9 @@ test("A1: never level (Tier 3) hard-refuses an agent even with a passing gate", 
 test("A1: the agent level never escalates a non-agent remote caller", async () => {
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === OPERATOR }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === OPERATOR },
+    }),
   });
   broker.registerSkill("vault.read", async () => "secret", {
     localOnly: false,
@@ -669,7 +715,9 @@ test("A1: a non-agent remote caller gets initiatedBy 'operator'", async () => {
   const seen: unknown[] = [];
   const broker = new TaskBroker({
     agentGate: agentGate(AGENT_LABEL),
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === OPERATOR }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === OPERATOR },
+    }),
   });
   broker.registerSkill("demo.whoami", async (_p, ctx) => {
     seen.push(ctx);
@@ -706,7 +754,9 @@ test("A1: a throwing AgentGate reads as 'not an agent' (base gate still applies)
         throw new Error("registry exploded");
       },
     },
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === OPERATOR }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === OPERATOR },
+    }),
   });
   broker.registerSkill("peersite.read", async () => "data", {
     localOnly: false,
@@ -813,7 +863,9 @@ test("A1/Slice 4: an invalid capabilityType value is treated as action (fail-clo
 test("A1/Slice 4: a denied telemetry caller never consumes the peer's budget", async () => {
   const broker = new TaskBroker({
     telemetryRateLimit: { windowMs: 1000, maxCalls: 1 },
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === ALICE }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === ALICE },
+    }),
   });
   broker.registerSkill("telemetry.vitals", async () => "vitals", {
     localOnly: false,
@@ -849,7 +901,7 @@ test("A1/Slice 4: telemetry without a remote policy is still denied (gate beats 
   assert.match(result.error ?? "", /not authorized/);
 });
 
-test("A1/Slice 4: anonymous remote callers share one telemetry budget", async () => {
+test("A1/Slice 4: an anonymous caller to a public telemetry skill is denied at the gate", async () => {
   const broker = new TaskBroker({ telemetryRateLimit: { windowMs: 1000, maxCalls: 1 } });
   broker.registerSkill("telemetry.ping", async () => "pong", {
     localOnly: false,
@@ -857,12 +909,17 @@ test("A1/Slice 4: anonymous remote callers share one telemetry budget", async ()
     capabilityType: "telemetry",
   });
 
+  // checkPeerAccess requires a transport-verified peerId for every mode
+  // (including the `public` path), so an anonymous caller never reaches the
+  // telemetry limiter — and so cannot be used to exhaust a shared budget or to
+  // slip past per-peer caps.
   const first = await broker.handleRemote(task({ skill: "telemetry.ping" }));
   const second = await broker.handleRemote(task({ skill: "telemetry.ping" }));
 
-  assert.equal(first.status, "ok");
+  assert.equal(first.status, "error");
+  assert.equal(first.code, undefined);
+  assert.match(first.error ?? "", /not authorized/);
   assert.equal(second.status, "error");
-  assert.equal(second.code, "telemetry-rate-limit");
 });
 
 test("A1/Slice 4: listSkills exposes the capability type", async () => {
@@ -974,7 +1031,9 @@ test("Deel 1: HTTP-bridge calls are never rate-limited", async () => {
 test("Deel 1: a denied caller never consumes the peer's budget", async () => {
   const broker = new TaskBroker({
     peerRateLimit: PEER_RATE_CONFIG,
-    remoteGate: gate({ isVerifiedContact: async (peerId) => peerId === ALICE }),
+    peerAccessContext: gate({
+      contacts: { isVerifiedContact: async (peerId) => peerId === ALICE },
+    }),
   });
   broker.registerSkill("demo.read", async () => "data", {
     localOnly: false,
@@ -996,21 +1055,23 @@ test("Deel 1: a denied caller never consumes the peer's budget", async () => {
   assert.equal(blocked.code, "peer-rate-limit");
 });
 
-test("Deel 1: anonymous remote callers share one budget", async () => {
+test("Deel 1: an anonymous remote caller is denied at the gate, never consuming a peer budget", async () => {
   const broker = new TaskBroker({ peerRateLimit: PEER_RATE_CONFIG });
   broker.registerSkill("demo.ping", async () => "pong", {
     localOnly: false,
     remote: { gate: "any" },
   });
 
+  // The public path still needs a transport-verified peerId (checkPeerAccess
+  // denies every mode for an empty peerId), so an anonymous flood cannot
+  // exhaust the shared anonymous budget or a real peer's budget.
   const first = await broker.handleRemote(task({ skill: "demo.ping" }));
   const second = await broker.handleRemote(task({ skill: "demo.ping" }));
-  const blocked = await broker.handleRemote(task({ skill: "demo.ping" }));
 
-  assert.equal(first.status, "ok");
-  assert.equal(second.status, "ok");
-  assert.equal(blocked.status, "error");
-  assert.equal(blocked.code, "peer-rate-limit");
+  assert.equal(first.status, "error");
+  assert.equal(first.code, undefined);
+  assert.match(first.error ?? "", /not authorized/);
+  assert.equal(second.status, "error");
 });
 
 test("Deel 1: the window slides and frees the budget again", async () => {
@@ -1106,7 +1167,7 @@ test("Stap 6: a throwing matrix gate denies (fail-closed), never opens the door"
   assert.equal(result.code, ACCESS_DENIED_ERROR_CODE);
 });
 
-test("Stap 6: an anonymous caller is never narrowed by the matrix (no peerId)", async () => {
+test("Stap 6: an anonymous caller is never narrowed by the matrix (no peerId) — the gate still denies", async () => {
   const broker = new TaskBroker();
   broker.setPeerSkillGate({
     isAllowed: async () => {
@@ -1118,11 +1179,14 @@ test("Stap 6: an anonymous caller is never narrowed by the matrix (no peerId)", 
     remote: { gate: "any" },
   });
 
-  // No transport-verified peerId → the matrix is not consulted; the public
-  // path stays reachable (a peer must be able to prove possession before it
-  // can be granted contact/pass status).
+  // No transport-verified peerId → the matrix is not consulted (there is no
+  // peer to match against). The public path is nevertheless closed to the
+  // anonymous caller: checkPeerAccess requires a verified peerId for every
+  // mode. The refusal is a gate denial, not a matrix error.
   const result = await broker.handleRemote(
     task({ skill: "contacts.signChallenge" }),
   );
-  assert.equal(result.status, "ok");
+  assert.equal(result.status, "error");
+  assert.notEqual(result.code, ACCESS_DENIED_ERROR_CODE);
+  assert.match(result.error ?? "", /not authorized/);
 });

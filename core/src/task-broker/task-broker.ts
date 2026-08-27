@@ -10,8 +10,6 @@ import type {
   AgentGate,
   PeerSkillGate,
   RemoteAccessPolicy,
-  RemoteGate,
-  RemoteGateKind,
   TaskApprovalGate,
 } from "./remote-access";
 import {
@@ -20,6 +18,11 @@ import {
   isAgentAccessLevel,
   normalizeRemoteGates,
 } from "./remote-access";
+import {
+  checkPeerAccess,
+  type PeerAccessContext,
+  type PeerAccessMode,
+} from "../security/peer-access-gate";
 import type { TelemetryRateLimitConfig } from "./telemetry-rate-limiter";
 import {
   DEFAULT_TELEMETRY_RATE_LIMIT,
@@ -145,11 +148,15 @@ export interface TaskBrokerOptions {
    */
   maxConcurrentTasks?: number;
   /**
-   * Fase 2A: the gate the broker consults to evaluate `remote` policies. When
-   * absent, every `verified-contact`/`access-pass` policy fails closed. The
-   * host injects a gate wired to its contacts lookup and access-pass manager.
+   * The peer-access context the broker feeds into {@link checkPeerAccess} to
+   * evaluate `remote` policies. When absent, every `verified-contact`/
+   * `access-pass` policy fails closed (an absent context proves nothing), and
+   * the `any` policy still grants identified peers (it needs no proof). The
+   * host injects a context wired to its contacts lookup and access-pass
+   * manager — the same context shape the peersite plugin uses for its
+   * `fetchAsset` gate, so both surfaces share one evaluation implementation.
    */
-  remoteGate?: RemoteGate;
+  peerAccessContext?: PeerAccessContext;
   /**
    * A1/Slice 2: the gate that resolves whether a transport-verified caller
    * peerId is a declared agent identity. When absent, no caller is treated as
@@ -205,7 +212,7 @@ const DEFAULT_MAX_CONCURRENT_TASKS = 100;
 export class TaskBroker {
   private readonly skills = new Map<string, SkillRecord>();
   private readonly maxConcurrentTasks: number;
-  private readonly remoteGate: RemoteGate | undefined;
+  private readonly peerAccessContext: PeerAccessContext | undefined;
   private readonly agentGate: AgentGate | undefined;
   private peerSkillGate: PeerSkillGate | undefined;
   private readonly taskApprovalGate: TaskApprovalGate | undefined;
@@ -216,7 +223,7 @@ export class TaskBroker {
   constructor(options: TaskBrokerOptions = {}) {
     const max = options.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_TASKS;
     this.maxConcurrentTasks = Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_CONCURRENT_TASKS;
-    this.remoteGate = options.remoteGate;
+    this.peerAccessContext = options.peerAccessContext;
     this.agentGate = options.agentGate;
     this.peerSkillGate = options.peerSkillGate;
     this.taskApprovalGate = options.taskApprovalGate;
@@ -541,7 +548,7 @@ export class TaskBroker {
     if (gates.length === 0) {
       return false;
     }
-    const gatePassed = await this.evaluateGates(policy, gates, callerPeerId, agentLabel);
+    const gatePassed = await this.evaluateGates(policy, callerPeerId, agentLabel);
     if (!gatePassed) {
       return false;
     }
@@ -591,48 +598,48 @@ export class TaskBroker {
   }
 
   /**
-   * Evaluate the skill's named gates. For an agent caller the `any` gate is
-   * skipped (agents can never use the public path) and every other gate still
-   * has to prove the caller. Never throws.
+   * Evaluate the skill's named gates through the centralized
+   * {@link checkPeerAccess} primitive (core/src/security/peer-access-gate.ts)
+   * — the same evaluation implementation the peersite plugin uses for its
+   * in-process `fetchAsset` gate, so the broker and the plugin surface never
+   * drift (HANDOVER item 7). The policy gate vocabulary (`verified-contact` /
+   * `access-pass` / `any`) is translated to the primitive's `modes`:
+   * `verified-contact` and `access-pass` map 1:1 (with the policy's `scope`),
+   * and `any` maps to the permissive `public` mode. For an agent caller the
+   * `public` mode is skipped — the public path is structurally closed to
+   * agents (A1) — so every remaining mode still has to prove the caller.
+   * `checkPeerAccess` never throws: a throwing lookup is a denial, never an
+   * open door. Note the primitive requires a non-empty transport-verified
+   * `peerId` for every mode (including `public`), so an *anonymous* caller is
+   * denied even on an `any`-gated skill — a deliberate fail-closed tightening
+   * over the legacy `RemoteGate` (which granted `any` to anonymous); on the
+   * real transports a dispatched task always carries a verified peerId.
    */
   private async evaluateGates(
     policy: RemoteAccessPolicy,
-    gates: RemoteGateKind[],
     callerPeerId: string | undefined,
     agentLabel: string | undefined,
   ): Promise<boolean> {
-    for (const kind of gates) {
-      if (agentLabel !== undefined && kind === "any") {
-        continue;
-      }
+    const kinds = normalizeRemoteGates(policy.gate);
+    const modes: PeerAccessMode[] = [];
+    for (const kind of kinds) {
       if (kind === "any") {
-        return true;
-      }
-      if (callerPeerId === undefined || callerPeerId.length === 0) {
-        continue;
-      }
-      if (!this.remoteGate) {
-        continue;
-      }
-      try {
-        if (kind === "verified-contact") {
-          if (await this.remoteGate.isVerifiedContact(callerPeerId)) {
-            return true;
-          }
-        } else if (kind === "access-pass") {
-          if (
-            typeof policy.scope === "string" &&
-            policy.scope.length > 0 &&
-            (await this.remoteGate.hasValidAccessPass(callerPeerId, policy.scope))
-          ) {
-            return true;
-          }
+        if (agentLabel === undefined) {
+          modes.push("public");
         }
-      } catch {
-        // A throwing gate must not open the door — treat as denial.
+        continue;
       }
+      modes.push(kind);
     }
-    return false;
+    if (modes.length === 0) {
+      return false;
+    }
+    const decision = await checkPeerAccess(
+      callerPeerId ?? "",
+      { modes, accessPassScope: policy.scope },
+      this.peerAccessContext,
+    );
+    return decision.granted;
   }
 
   /**

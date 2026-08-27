@@ -21,8 +21,9 @@
  *   - A remote peer with no transport-verified `peerId` (anonymous) can never
  *     satisfy `verified-contact` or `access-pass` — it is denied even when the
  *     policy names those gates.
- *   - `verified-contact` / `access-pass` without an injected {@link RemoteGate}
- *     are denied: an absent gate cannot prove anything.
+ *   - `verified-contact` / `access-pass` without an injected
+ *     {@link PeerAccessContext} are denied: an absent context cannot prove
+ *     anything.
  *   - `any` is the only gate that needs no proof. It is therefore gated twice:
  *     at registration (the plugin must hold an explicit `network:public:*`
  *     manifest permission, enforced by the plugin loader) and at runtime (the
@@ -105,9 +106,10 @@ export interface AgentTaskApprovalRequest {
 
 /**
  * A1/Slice 2 — per-invocation human approval for agent-initiated tasks (Tier 2
- * step-up). Injected by the host exactly like {@link RemoteGate}; the desktop
- * shell renders a native confirmation. An absent gate fails closed: an agent
- * task that needs approval is denied when no confirmer is wired.
+ * step-up). Injected by the host exactly like the broker's peer-access context
+ * (`checkPeerAccess` in `core/src/security`); the desktop shell renders a native
+ * confirmation. An absent gate fails closed: an agent task that needs approval
+ * is denied when no confirmer is wired.
  */
 export interface TaskApprovalGate {
   /**
@@ -119,25 +121,12 @@ export interface TaskApprovalGate {
 }
 
 /**
- * Capability the {@link TaskBroker} consults to evaluate a {@link RemoteAccessPolicy}.
- * Deliberately injected (never constructed by the broker): the broker must not
- * know *how* contacts or access passes are stored — the host wires concrete
- * implementations. An absent gate makes the non-`any` gates fail closed.
- */
-export interface RemoteGate {
-  /** True when `peerId` is a verified contact. Never throws. */
-  isVerifiedContact(peerId: string): Promise<boolean>;
-  /** True when `peerId` holds a valid, unexpired pass for `scope`. Never throws. */
-  hasValidAccessPass(peerId: string, scope: string): Promise<boolean>;
-}
-
-/**
  * Stap 6 — per-peer permission matrix (a *narrowing* filter, never a
  * grant). The governance subsystem owns a per-peer matrix of explicitly
  * allowed skills; the broker consults this gate on the network path so the
  * effective remote access is the intersection:
  *
- *   EffectiveAccess = ManifestExposed ∩ PeerMatrixAllowed ∩ RemoteGate
+ *   EffectiveAccess = ManifestExposed ∩ PeerMatrixAllowed ∩ PeerAccessGate
  *
  * The matrix can only ever narrow what the manifest + remote policy already
  * allow — a peer with a matrix entry may invoke exactly the listed skills
@@ -147,8 +136,8 @@ export interface RemoteGate {
  * this gate, a matrix entry can never widen a skill the manifest does not
  * expose (the Stap 6 intersection invariant).
  *
- * Deliberately injected (never constructed by the broker), exactly like
- * {@link RemoteGate}: the broker must not know *how* the matrix is stored —
+ * Deliberately injected (never constructed by the broker), exactly like the
+ * peer-access context: the broker must not know *how* the matrix is stored —
  * core-server wires a concrete implementation backed by its persisted
  * governance matrix. An absent gate is no narrowing at all (peers keep the
  * manifest default), so a broker without governance is unchanged.

@@ -252,9 +252,10 @@ export async function buildCapabilities(ctx: OperatorContext): Promise<unknown> 
   events.add("task:completed");
   events.add("vault:updated");
 
-  // Same duck-typed contacts read-seam the host's RemoteGate uses (Fase 2A):
-  // distinguish verified contacts from anonymous/self-signed peers so the
-  // shell can render per-peer trust instead of assuming everyone is equal.
+  // Same duck-typed contacts read-seam the host's peer-access context uses
+  // (Fase 2A): distinguish verified contacts from anonymous/self-signed peers
+  // so the shell can render per-peer trust instead of assuming everyone is
+  // equal.
   const contacts = asContactLookup(ctx.host.getActivated("contacts"));
   const provider = ctx.provider();
   const peers = provider

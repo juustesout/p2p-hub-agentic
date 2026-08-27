@@ -13,7 +13,7 @@ import {
   VaultManager,
   loadPlugin,
 } from "@p2p-hub/core";
-import type { RemoteGate } from "@p2p-hub/core";
+import type { PeerAccessContext } from "@p2p-hub/core";
 import type { ContactTrustState, NetworkPeer, NetworkProvider, TaskRequest, TaskResult } from "@p2p-hub/sdk";
 import type { InitiateCallResult, MediaPlugin, RequestSessionResult } from "./index";
 
@@ -84,9 +84,10 @@ async function createNode(opts: NodeOptions = {}): Promise<TestNode> {
     ...(opts.telemetryRateLimit
       ? { telemetryRateLimit: opts.telemetryRateLimit }
       : {}),
-    // The host wires a RemoteGate into the broker (Fase 2A); an absent gate
-    // makes the named gates fail closed, which would deny everything here.
-    remoteGate: makeRemoteGate(node, trustState),
+    // The host wires a peer-access context into the broker (Fase 2A); an
+    // absent context makes the named gates fail closed, which would deny
+    // everything here.
+    peerAccessContext: makePeerAccessContext(node, trustState),
   });
 
   const plugin = (await loadPlugin(
@@ -129,20 +130,27 @@ function makeTrustLookup(node: TestNode, trustState: ContactTrustState | null) {
   };
 }
 
-/** The broker-side gate mirror, backed by the same trust state as the lookup. */
-function makeRemoteGate(
+/**
+ * The broker-side peer-access context mirror, backed by the same trust state
+ * as the lookup and a deny-all access-pass capability.
+ */
+function makePeerAccessContext(
   node: TestNode,
   trustState: ContactTrustState | null,
-): RemoteGate {
+): PeerAccessContext {
   return {
-    isVerifiedContact: async (peerId: string): Promise<boolean> => {
-      if (trustState !== "verified") {
-        return false;
-      }
-      const other = node.other();
-      return other !== null && other.peerId === peerId;
+    contacts: {
+      isVerifiedContact: async (peerId: string): Promise<boolean> => {
+        if (trustState !== "verified") {
+          return false;
+        }
+        const other = node.other();
+        return other !== null && other.peerId === peerId;
+      },
     },
-    hasValidAccessPass: async (): Promise<boolean> => false,
+    accessPasses: {
+      hasValidPass: async (): Promise<boolean> => false,
+    },
   };
 }
 

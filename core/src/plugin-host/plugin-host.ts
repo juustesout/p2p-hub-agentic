@@ -13,9 +13,9 @@ import { HookRegistry } from "../hooks/hook-registry";
 import { TaskBroker } from "../task-broker/task-broker";
 import type {
   AgentGate,
-  RemoteGate,
   TaskApprovalGate,
 } from "../task-broker/remote-access";
+import type { PeerAccessContext } from "../security/peer-access-gate";
 import { AccessPassManager } from "../task-broker/access-pass-manager";
 import { VaultManager } from "../storage/vault-manager";
 import { IdentityManager } from "../identity/identity-manager";
@@ -219,7 +219,7 @@ export class PluginHost {
     // through for Tier-2 step-up.
     this.access = new AccessPassManager();
     this.broker = new TaskBroker({
-      remoteGate: buildRemoteGate(this),
+      peerAccessContext: buildPeerAccessContext(this),
       agentGate: buildAgentGate(this),
       taskApprovalGate: options.taskApprovalGate,
     });
@@ -723,24 +723,33 @@ const defaultNetworkProviderFactory: NetworkProviderFactory = (input) =>
   });
 
 /**
- * Fase 2A: the {@link RemoteGate} the host injects into its {@link TaskBroker}.
- * Contacts are looked up late-bound (mirroring the loader's `trust` seam), so a
- * plugin that activates before the contacts plugin is loaded still resolves the
- * up-to-date trust state at call time; absent contacts fail closed. Access
- * passes come from the host's single {@link AccessPassManager}.
+ * The peer-access context the host injects into its {@link TaskBroker} and
+ * hands to `checkPeerAccess` (core/src/security) — the same context shape the
+ * peersite plugin builds for its in-process `fetchAsset` gate, so the broker
+ * and the plugin surface evaluate with one implementation. Contacts are looked
+ * up late-bound (mirroring the loader's `trust` seam), so a plugin that
+ * activates before the contacts plugin is loaded still resolves the up-to-date
+ * trust state at call time; absent contacts fail closed. Access passes come
+ * from the host's single {@link AccessPassManager} (backing `ctx.access`).
  */
-function buildRemoteGate(host: PluginHost): RemoteGate {
+function buildPeerAccessContext(host: PluginHost): PeerAccessContext {
   return {
-    isVerifiedContact: async (peerId) => {
-      const lookup = asContactLookup(host.getActivated("contacts"));
-      if (!lookup) {
-        return false;
-      }
-      const contact = await lookup.getContact(peerId);
-      return contact?.trustState === "verified";
+    contacts: {
+      isVerifiedContact: async (peerId) => {
+        const lookup = asContactLookup(host.getActivated("contacts"));
+        if (!lookup) {
+          return false;
+        }
+        const contact = await lookup.getContact(peerId);
+        return contact?.trustState === "verified";
+      },
     },
-    hasValidAccessPass: async (peerId, scope) =>
-      host.accessPassManager().hasValidPass(peerId, scope),
+    accessPasses: {
+      hasValidPass: (peerId, scope) =>
+        host.accessPassManager().hasValidPass(peerId, scope),
+      inspectPass: (peerId, scope) =>
+        host.accessPassManager().inspectPass(peerId, scope),
+    },
   };
 }
 
