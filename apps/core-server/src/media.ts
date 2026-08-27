@@ -3,7 +3,12 @@ import {
   encodeMediaGrant,
   parseMediaRequest,
 } from "@p2p-hub/sdk";
-import type { SkillHandler, SkillInvocationContext, TrustTierGate } from "@p2p-hub/core";
+import type {
+  SkillHandler,
+  SkillInvocationContext,
+  TaskBroker,
+  TrustTierGate,
+} from "@p2p-hub/core";
 
 /**
  * Lifetime of a granted media request, in ms. Short-lived: a live camera/mic
@@ -76,3 +81,27 @@ export function createMediaSkillHandler(deps: {
       : encodeMediaError("denied");
   };
 }
+
+/**
+ * Register the `core.media.request` skill on the broker. Access is
+ * `verified-contact` only (media is sensitive, so an established relationship
+ * is required before the native prompt is even shown), it is NOT HTTP-exposed
+ * (the local HTTP bridge is not a media-request surface), and a per-peer
+ * cooldown stops a peer from spamming native prompts.
+ */
+export function registerMediaSkill(
+  broker: TaskBroker,
+  trustGate: TrustTierGate,
+): void {
+  broker.registerSkill(
+    "core.media.request",
+    createMediaSkillHandler({ trustGate }),
+    {
+      localOnly: false,
+      httpExposed: false,
+      remote: { gate: "verified-contact" },
+      capabilityType: "action",
+    },
+  );
+}
+

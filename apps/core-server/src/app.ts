@@ -1,17 +1,7 @@
 import * as http from "node:http";
 import * as path from "node:path";
-import * as fsp from "node:fs/promises";
-import { randomUUID } from "node:crypto";
-import { WebSocketServer, WebSocket } from "ws";
-import { isLoopbackHost } from "./host";
 import { DEFAULT_HTTP_PORT } from "./config";
-import { createMediaSkillHandler } from "./media";
-import {
-  AccessDeniedError,
-  InvalidRateLimitError,
-  PEER_ID_RE as GOVERNANCE_PEER_ID_RE,
-  PeerMatrixStore,
-} from "./governance/matrix";
+import { PeerMatrixStore } from "./governance/matrix";
 import { GovernanceService } from "./governance/service";
 import { GovernanceStream } from "./governance/stream";
 import { isNetworkExposedSkill } from "./governance/predicates";
@@ -23,191 +13,56 @@ import {
   tokenFromQuery,
   writeBootToken,
 } from "./auth";
+import { MAX_PAYLOAD_BYTES, ObjectDepthExceededError, PayloadTooLargeError } from "@p2p-hub/sdk";
 import {
-  MAX_PAYLOAD_BYTES,
-  ObjectDepthExceededError,
-  PayloadTooLargeError,
-  asContactLookup,
-  buildWebsiteRequest,
-  evaluateSettingsRisk,
-  isPlainObject,
-  normalizeSettings,
-  parseWebsiteResponse,
-  sanitizeText,
-  validateJsonNestingDepth,
-  validateObjectDepth,
-  validatePayloadSize,
-  validateTextLength,
-} from "@p2p-hub/sdk";
-import type {
-  ChildCertificate,
-  ChildIdentity,
-  EffectiveSettings,
-  RiskAssessment,
-  TaskResult,
-  WebsiteErrorCode,
-} from "@p2p-hub/sdk";
-import {
-  CoreAIProvider,
   NetworkRegistry,
   PluginHost,
-  TaskBroker,
-  TrustConfirmationDeniedError,
   TrustTierGate,
-  atomicWriteFile,
-  contentTypeForPath,
-  isValidAgentLabel,
-  mirrorDestination,
-  mirrorFetchAndStore,
-  readJsonFile,
-  resolveAndContainFile,
-  wireNetworkToBroker,
 } from "@p2p-hub/core";
-import type { TaskApprovalGate, TrustConfirmation } from "@p2p-hub/core";
-import { NetworkLightProvider } from "@p2p-hub/network-light";
+import type { TaskBroker } from "@p2p-hub/core";
+import type { NetworkLightProvider } from "@p2p-hub/network-light";import { registerCoreSkills } from "./core-skills";
+import { registerMediaSkill } from "./media";
+import {
+  wireMediaAccessConfirmations,
+  wirePeerAccessConfirmations,
+} from "./access-confirm";
+import { createPeerPoller, startNetworking } from "./network";
+import { WsActivityBus, wireEventBridge } from "./ws-bus";
+import { decideSiteExposure } from "./site-exposure";
+import { loadSettings, saveSettings } from "./settings";
+import { registerGovernanceSkills, serveGovernance } from "./routes/governance";
+import type { GovernanceContext } from "./routes/governance";
+import { serveUi } from "./routes/ui";
+import type { UiContext } from "./routes/ui";
+import { servePeersite, serveRemoteSite, serveSite } from "./routes/sites";
+import type { SitesContext } from "./routes/sites";
+import { executeRemote, serveOperator } from "./routes/operator";
+import type { OperatorContext } from "./routes/operator";
+import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
+import type { CoreServerOptions } from "./options";
 
-export interface CoreServerOptions {
-  pluginsDir: string;
-  dataDir: string;
-  host?: string;
-  port?: number;
-  /**
-   * Port for the network-light P2P transport (mDNS advertisement + TLS).
-   * Defaults to 0 (ephemeral). The config loader feeds `P2P_HUB_P2P_PORT` →
-   * `P2P_PORT` → `32837` here.
-   */
-  p2pPort?: number;
-  /**
-   * Bind host for the network-light P2P transport. Defaults to `0.0.0.0`
-   * (the transport authenticates every peer on the wire and never holds the
-   * boot token, so a wildcard bind is safe). The config loader feeds
-   * `P2P_BIND_HOST` here.
-   */
-  p2pBindHost?: string;
-  /** Vault master passphrase (falls back to env / dev key). */
-  masterKey?: string;
-  /** Explicit boot token; overrides env and auto-generation. */
-  bootToken?: string;
-  /** Hook events to bridge to the WebSocket activity bus. */
-  bridgedEvents?: string[];
-  /**
-   * Native tier-2 confirmation capability injected by the host. Absent by
-   * default, which makes every tier-2 settings change fail closed (denied).
-   */
-  trustConfirmation?: TrustConfirmation;
-  /**
-   * A1/Slice 2: per-invocation human approval for agent-initiated remote
-   * skills that need Tier-2 step-up. Delegated to the same native confirmation
-   * channel as `trustConfirmation` (an `agent-task-approval` prompt). Absent by
-   * default, which makes every agent task that needs approval fail closed.
-   */
-  taskApprovalGate?: TaskApprovalGate;
-  /**
-   * Start the P2P network transport (LAN discovery + inbound capability calls).
-   * Default `true` — the core-server is by definition the P2P-capable backend.
-   * Set to `false` for a fully local-only server: no identity is created, no
-   * provider is started, nothing is advertised on the LAN. This mirrors the
-   * `PluginHost`'s lazy identity/networking gate — a local-only server must not
-   * fail hard on a corrupt vault.
-   */
-  networking?: boolean;
-}
-
-const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
-
-/** Safe identifier for a skill's `<serviceId>` / `<method>` segments. */
-const IDENTIFIER_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
-/** Safe identifier for a peer reference (per-boot instance id or persistent peerId). */
-const PEER_ID_RE = /^[a-zA-Z0-9-]{1,128}$/;
-
-/** URL prefix under which the static site is served. */
-const SITE_PREFIX = "/site";
-
-/** URL prefix under which plugin UI assets are served. */
-const UI_PREFIX = "/ui";
-
-/**
- * URL prefix under which a *remote peer's* mirrored P2P website is served:
- * `/remote-site/<peerId>/*`. Assets are fetched over the P2P `p2p-hub:website:v1`
- * capability on request and stored under `<dataDir>/sites/<peerId>`. This is
- * the render side of the Fase-2 end criterion — it proves the site flow works
- * with no public HTTP server on the *origin* peer.
- */
-const REMOTE_SITE_PREFIX = "/remote-site";
-
-/** URL prefix under which the scoped PeerSite API is served. */
-const PEERSITE_PREFIX = "/peersite";
-
-/** Safe identifier for a plugin id (matches the manifest `id` rule). */
-const PLUGIN_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
-
-/** Max characters accepted in a `/peersite/message` body. */
-const PEERSITE_MESSAGE_MAX_LENGTH = 10_000;
-
-/** Per-source-IP message rate limit (fixed window). */
-const MESSAGE_RATE_LIMIT = 30;
-const MESSAGE_RATE_WINDOW_MS = 60_000;
-
-/** Security headers applied to every served static asset. */
-const SITE_SECURITY_HEADERS: Record<string, string> = {
-  "X-Content-Type-Options": "nosniff",
-  "Content-Security-Policy":
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;",
-};
-
-/**
- * Security headers applied to every `/ui/<pluginId>` response. Stricter than
- * the site headers: the plugin UI runs in a sandboxed iframe and must make no
- * network calls of its own — every capability goes through the shell bridge
- * (postMessage, which CSP does not govern) — so `connect-src 'none'` blocks
- * fetch/XHR/WebSocket outright. `'self'` here means the core-server origin,
- * which is what the iframe document is served from.
- */
-const UI_SECURITY_HEADERS: Record<string, string> = {
-  "X-Content-Type-Options": "nosniff",
-  "Content-Security-Policy":
-    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data:; worker-src 'self'; connect-src 'none'; " +
-    "base-uri 'none'; form-action 'none'; object-src 'none'",
-  "Cache-Control": "no-store",
-  "Referrer-Policy": "no-referrer",
-};
-
-interface ExecuteBody {
-  peerId?: string;
-  serviceId: string;
-  method: string;
-  requestId?: string;
-  arguments?: unknown;
-}
-
-/**
- * Structural view of the activated `peersite` plugin. Core-server stays
- * type-ignorant of the plugin package: it only needs the site root the plugin
- * owns, read through `host.getActivated("peersite")` behind a `typeof` guard
- * (the same read-seam pattern as `ctx.trust`/`asContactLookup`).
- */
 interface PeerSitePlugin {
   getSiteRoot(): Promise<string | null>;
   resolveAccessRequest?(requestId: string, approved: boolean): Promise<boolean>;
 }
 
 /**
- * Structural view of the activated `media` plugin. Core-server only resolves
- * the media-access confirmation requests the plugin raises: it listens for
- * `media:accessRequested`, runs the native Tier-2 confirmation (the
- * `TrustConfirmation` it already owns — same route as peersite's
- * `resolveAccessRequest`), and resolves back into the plugin.
+ * Structural view of the activated `media` plugin: core-server only resolves
+ * the `media:accessRequested` confirmations the plugin raises.
  */
 interface MediaPlugin {
   resolveMediaAccess?(requestId: string, granted: boolean): Promise<boolean>;
 }
 
 /**
- * Thin HTTP + WebSocket bridge that exposes a running `@p2p-hub/core` host to
- * the desktop shell. It is the only place where raw vault values are read, and
- * it deliberately never returns secret values over HTTP — the vault API only
+ * Thin HTTP + WebSocket bridge exposing a running `@p2p-hub/core` host to the
+ * desktop shell. It is the only place where raw vault values are read, and it
+ * deliberately never returns secret values over HTTP — the vault API only
  * returns existence + metadata.
+ *
+ * Since Slice 2 the HTTP route handlers live in `src/routes/*` and the wiring
+ * helpers in the `src/*` support modules; this class is the startup/assembly
+ * layer (dispatch order, auth gates, lifecycle).
  */
 export class CoreServer {
   private readonly options: CoreServerOptions;
@@ -217,9 +72,7 @@ export class CoreServer {
   private provider: NetworkLightProvider | null = null;
 
   private httpServer: http.Server | null = null;
-  private wss: WebSocketServer | null = null;
-  private readonly clients = new Set<WebSocket>();
-  private readonly knownPeers = new Set<string>();
+  private wsBus: WsActivityBus | null = null;
   private peerTimer: NodeJS.Timeout | null = null;
   private bootToken = "";
   private readonly trustGate: TrustTierGate;
@@ -229,6 +82,17 @@ export class CoreServer {
   private siteToken = "";
   private peerId = "";
   private readonly messageTimestamps = new Map<string, number[]>();
+
+  /** Periodic peer-discovery poller (owns the known-peer set). */
+  private readonly peerPoller: { poll(): Promise<void> };
+
+  /** HTTP route contexts — narrow, closure-based views of this server. */
+  private readonly routes: {
+    governance: GovernanceContext;
+    ui: UiContext;
+    sites: SitesContext;
+    operator: OperatorContext;
+  };
 
   constructor(options: CoreServerOptions) {
     this.options = options;
@@ -247,26 +111,86 @@ export class CoreServer {
     });
     this.broker = this.host.taskBroker();
     this.trustGate = new TrustTierGate(options.trustConfirmation);
+    this.peerPoller = createPeerPoller({
+      provider: () => this.provider,
+      probeSkill: () => this.broker.listSkills().find((s) => !s.localOnly)?.skill,
+      broadcast: (event, payload) => this.broadcast(event, payload),
+    });
+    this.routes = this.buildRoutes();
+  }
+
+  /** Wire the HTTP route modules to this server's internals. */
+  private buildRoutes(): CoreServer["routes"] {
+    return {
+      governance: {
+        governance: () => this.governance,
+        governanceStream: () => this.governanceStream,
+        broadcast: (event, payload) => this.broadcast(event, payload),
+      },
+      ui: {
+        lanSiteAllowed: () => this.lanSiteAllowed,
+        pluginUiRoot: (pluginId) => this.host.pluginUiRoot(pluginId),
+        listPlugins: () => this.host.listPlugins(),
+      },
+      sites: {
+        lanSiteAllowed: () => this.lanSiteAllowed,
+        dataDir: this.options.dataDir,
+        peerId: () => this.peerId,
+        listPlugins: () => this.host.listPlugins(),
+        effectiveSiteRoot: () => this.effectiveSiteRoot(),
+        siteAuthorized: (req) => this.isSiteAuthorized(req),
+        allowMessage: (remote) => this.allowMessage(remote),
+        broadcast: (event, payload) => this.broadcast(event, payload),
+        executeRemote: (peerId, skill, id, args) =>
+          executeRemote(this.routes.operator, peerId, skill, id, args),
+        invokeSkill: (input) => this.broker.handleHttp(input),
+        authorizeTier2: async (summary) => {
+          await this.trustGate.authorize("critical", summary, {
+            authenticated: true,
+          });
+        },
+      },
+      operator: {
+        host: this.host,
+        broker: this.broker,
+        provider: () => this.provider,
+        trustGate: this.trustGate,
+        broadcast: (event, payload) => this.broadcast(event, payload),
+        loadSettings: () => loadSettings(this.options.dataDir),
+        saveSettings: (settings) => saveSettings(this.options.dataDir, settings),
+      },
+    };
   }
 
   async start(): Promise<void> {
     await this.host.boot();
 
     this.bootToken = this.resolveBootToken();
-
     this.siteToken = generateSiteToken();
+    this.lanSiteAllowed = await decideSiteExposure(
+      this.options.host ?? "127.0.0.1",
+      () => loadSettings(this.options.dataDir),
+    );
 
-    await this.initSite();
-
-    this.registerCoreSkills();
-    this.registerMediaSkill();
-    this.bridgeHookEvents();
-    this.registerPeerAccessHandler();
-    this.registerMediaAccessHandler();
+    registerCoreSkills(this.broker, this.host.vaultManager());
+    registerMediaSkill(this.broker, this.trustGate);
+    wireEventBridge(
+      this.host,
+      (event, payload) => this.broadcast(event, payload),
+      this.options.bridgedEvents,
+    );
+    wirePeerAccessConfirmations(this.host, this.trustGate, () => this.peersite());
+    wireMediaAccessConfirmations(this.host, this.trustGate, () => this.media());
     await this.initGovernance();
 
     if (this.options.networking !== false) {
-      await this.startNetworking();
+      this.provider = await startNetworking({
+        broker: this.broker,
+        host: this.host,
+        registry: this.registry,
+        p2pPort: this.options.p2pPort,
+        p2pBindHost: this.options.p2pBindHost,
+      });
     } else {
       console.warn(
         "[core-server] networking disabled: no LAN discovery, no inbound P2P " +
@@ -278,14 +202,12 @@ export class CoreServer {
       void this.handleHttp(req, res);
     });
 
-    this.wss = new WebSocketServer({
+    this.wsBus = new WsActivityBus({
       server: this.httpServer,
       path: "/ws",
       maxPayload: MAX_PAYLOAD_BYTES,
+      isAuthorized: (req) => this.isAuthorizedWs(req),
     });
-    this.wss.on("connection", (socket, request) =>
-      this.handleSocket(socket, request),
-    );
 
     const port = this.options.port ?? DEFAULT_HTTP_PORT;
     const host = this.options.host ?? "127.0.0.1";
@@ -294,8 +216,8 @@ export class CoreServer {
       this.httpServer!.listen(port, host, () => resolve());
     });
 
-    this.peerTimer = setInterval(() => this.pollPeers(), 2000);
-    this.pollPeers();
+    this.peerTimer = setInterval(() => void this.peerPoller.poll(), 2000);
+    void this.peerPoller.poll();
   }
 
   /** Bound address of the HTTP server, or null before `start()`. */
@@ -312,10 +234,6 @@ export class CoreServer {
       clearInterval(this.peerTimer);
       this.peerTimer = null;
     }
-    for (const client of this.clients) {
-      client.close();
-    }
-    this.clients.clear();
     this.governanceStream?.stop();
     this.governanceStream = null;
     if (this.provider) {
@@ -326,9 +244,9 @@ export class CoreServer {
       await this.provider.stop();
       this.provider = null;
     }
-    if (this.wss) {
-      this.wss.close();
-      this.wss = null;
+    if (this.wsBus) {
+      this.wsBus.close();
+      this.wsBus = null;
     }
     if (this.httpServer) {
       await new Promise<void>((resolve) => {
@@ -339,101 +257,15 @@ export class CoreServer {
   }
 
   // ---------------------------------------------------------------------
-  // Core wiring
+  // Governance wiring
   // ---------------------------------------------------------------------
 
   /**
-   * Start the P2P transport behind the same identity/vault gate as
-   * `PluginHost.startNetworking`. The core-server is *by definition* where
-   * network functionality is expected, so a corrupt vault fails loudly here
-   * (deliberate — see CLAUDE.md "Core-server identity/vault dependency").
-   * Callers that want a local-only server pass `networking: false` and this
-   * block is never reached.
-   */
-  private async startNetworking(): Promise<void> {
-    const remoteSkills = this.broker
-      .listSkills()
-      .filter((s) => !s.localOnly)
-      .map((s) => s.skill);
-
-    const identity = await this.host.identityManager().getOrCreateIdentity();
-    this.peerId = identity.peerId;
-    this.provider = new NetworkLightProvider({
-      port: this.options.p2pPort ?? 0,
-      host: this.options.p2pBindHost ?? "0.0.0.0",
-      skills: remoteSkills,
-      identity,
-      // Fase 1B: prove this identity on the wire. The private key stays in
-      // IdentityManager; the provider only receives signed bytes.
-      identitySigner: (data) => this.host.identityManager().sign(data),
-    });
-    this.registry.register(this.provider);
-    // Plugin code reads `ctx.network`, which is a LIVE reference to the
-    // PluginHost's own network registry (the capability resolves
-    // `host.networkRegistry().selectActive()` on every call — see
-    // buildNetworkCapability). This CoreServer boots its host without
-    // `enableNetworking`, so the host never starts its own transport and its
-    // registry would stay empty — every plugin would see "no active network
-    // provider" no matter how healthy THIS provider is. Register the same
-    // provider into the host's registry so `contacts.verifyPeer` →
-    // `ctx.network.sendTask` routes over the real transport. There is exactly
-    // one provider in the process: the host starts none of its own.
-    this.host.networkRegistry().register(this.provider);
-    wireNetworkToBroker(this.provider, this.broker);
-    // Stap 5: route inbound event-transport frames (sub_req → hub,
-    // event_emit → adapter) for this provider through the host's event layer.
-    this.host.wireEventsToProvider(this.provider);
-    await this.provider.start();
-  }
-
-  private registerCoreSkills(): void {
-    this.broker.registerSkill(
-      "core.echo",
-      async (payload) => payload,
-      {
-        localOnly: false,
-        httpExposed: true,
-        remote: { gate: "any" },
-        capabilityType: "action",
-      },
-    );
-
-    const aiProvider = new CoreAIProvider({ vault: this.host.vaultManager() });
-    this.broker.registerSkill(
-      "core.ai.generateText",
-      async (payload) => {
-        const { prompt, system, model } = (payload ?? {}) as {
-          prompt?: unknown;
-          system?: unknown;
-          model?: unknown;
-        };
-        if (typeof prompt !== "string") {
-          throw new Error("generateText expects { prompt: string }");
-        }
-        return aiProvider.generateText({
-          prompt,
-          system: typeof system === "string" ? system : undefined,
-          model: typeof model === "string" ? model : undefined,
-        });
-      },
-      {
-        localOnly: true,
-        httpExposed: true,
-        capabilityType: "action",
-      },
-    );
-  }
-
-  /**
    * Stap 6 — build the governance subsystem (permission matrix + service +
-   * SSE stream), then inject the matrix gate into the TaskBroker. Run after
-   * `host.boot()` so the manifest-exposed catalog is complete: the matrix
-   * validates every write against that live catalog, which is what makes an
-   * entry structurally unable to open a skill the manifest does not expose.
-   *
-   * The tier-2 step-up reuses the same `TrustTierGate` core-server already owns
-   * for settings/media/peersite — a boot token alone never authorizes a
-   * governance write.
+   * SSE stream) and inject the matrix gate into the TaskBroker, after
+   * `host.boot()` so the manifest-exposed catalog is complete. The tier-2
+   * step-up reuses the `TrustTierGate` core-server already owns — a boot token
+   * alone never authorizes a governance write.
    */
   private async initGovernance(): Promise<void> {
     const validateSkill = (skill: string) =>
@@ -456,9 +288,10 @@ export class CoreServer {
       // Governance writes are operator-driven only: `authenticated: true`
       // reflects the boot token already presented, and the tier-2 native
       // confirmation is the second, independent factor.
-            authorizeTier2: async (summary) => {
+      authorizeTier2: async (summary) => {
         await this.trustGate.authorize("critical", summary, { authenticated: true });
-      },    });
+      },
+    });
 
     // The broker was created before the matrix store existed, so the gate is
     // installed after the fact. From here on every network task is checked
@@ -468,295 +301,28 @@ export class CoreServer {
     this.governanceStream = new GovernanceStream();
     this.governanceStream.start(() => this.governance!.matrixList());
 
-    this.registerGovernanceSkills();
-  }
-
-  /**
-   * The admin HTTP bridge for the governance-ui plugin. These are
-   * `httpBridgeOnly` operator skills (local operator privilege, structurally
-   * never peer-facing) that the sandboxed UI reaches through the established
-   * plugin bridge (`POST /api/execute`, boot token). The plugin's manifest
-   * declares them as `ui.skills`; the handlers themselves are core-server-owned
-   * so the UI never needs access to the governance service.
-   */
-  private registerGovernanceSkills(): void {
-    const governance = () => {
-      if (!this.governance) {
-        throw new Error("governance is not initialized");
-      }
-      return this.governance;
-    };
-
-    const register = (
-      method: string,
-      handler: (payload: unknown) => Promise<unknown>,
-    ) => {
-      this.broker.registerSkill(
-        `governance-ui.${method}`,
-        async (payload) => handler(payload),
-        {
-          httpExposed: true,
-          httpBridgeOnly: true,
-          capabilityType: "action",
-        },
-      );
-    };
-
-    register("getCatalog", async () => governance().catalog());
-    register("getTopology", async () => ({ peers: await governance().topology() }));
-    register("listPermissions", async () => ({ entries: governance().matrixList() }));
-
-    register("verifyPeer", async (payload) => {
-      const peerId = asGovernancePeerId(payload);
-      if (!peerId) {
-        throw new Error("verifyPeer expects { peerId: <64-hex> }");
-      }
-      return governance().verifyPeer(peerId);
-    });
-
-    register("registerSkills", async (payload) => {
-      const peerId = asGovernancePeerId(payload);
-      if (!peerId) {
-        throw new Error(
-          "registerSkills expects { peerId: <64-hex>, skills?, topics?, customRateLimit? }",
-        );
-      }
-      const spec = parseGovernancePermissionsSpec(payload, peerId);
-      const entry = await governance().setPermissions(peerId, spec);
-      this.broadcast("governance:matrix:updated", { peerId });
-      return { ok: true, entry };
-    });
-
-    register("removePermissions", async (payload) => {
-      const peerId = asGovernancePeerId(payload);
-      if (!peerId) {
-        throw new Error("removePermissions expects { peerId: <64-hex> }");
-      }
-      const removed = await governance().removePermissions(peerId);
-      this.broadcast("governance:matrix:updated", { peerId });
-      return { ok: true, removed };
-    });
-  }
-
-  /**
-   * Register the `core.media.request` skill — the `p2p-hub:media:v1` capability
-   * (design doc "Decision 2").
-   *
-   * A remote peer asks for live camera/microphone access. The envelope is
-   * parsed fail-closed through the SDK contract (no identity/token fields on
-   * the wire), then the request must be approved by the shell's native Tier-2
-   * confirmation (`confirmMediaRequest`) — the browser's `getUserMedia` UI is
-   * deliberately not part of this path. A grant is minted only after that
-   * approval; there is no route that skips it.
-   *
-   * Access is `verified-contact` only (media is sensitive, so an established
-   * relationship is required before the native prompt is even shown), it is
-   * NOT HTTP-exposed (the local HTTP bridge is not a media-request surface),
-   * and a per-peer cooldown stops a peer from spamming native prompts.
-   */
-  private registerMediaSkill(): void {
-    this.broker.registerSkill(
-      "core.media.request",
-      createMediaSkillHandler({ trustGate: this.trustGate }),
-      {
-        localOnly: false,
-        httpExposed: false,
-        remote: { gate: "verified-contact" },
-        capabilityType: "action",
-      },
-    );
-  }
-
-  private bridgeHookEvents(): void {
-    const events = new Set<string>(DEFAULT_BRIDGED_EVENTS);
-    for (const event of this.options.bridgedEvents ?? []) {
-      events.add(event);
-    }
-    for (const plugin of this.host.listPlugins()) {
-      for (const event of plugin.exposedEvents ?? []) {
-        events.add(event);
-      }
-    }
-    for (const event of events) {
-      this.host.hookRegistry().on(event, (payload) => {
-        this.broadcast(event, payload);
-      });
-    }
-  }
-
-  /**
-   * Handle a `peersite:accessRequested` event emitted by the peersite plugin
-   * after it has verified a knock. The request is resolved through the host's
-   * native tier-2 confirmation (`confirmPeerAccess`, fail-closed), then passed
-   * back to the plugin via `resolveAccessRequest`.
-   */
-  private registerPeerAccessHandler(): void {
-    this.host
-      .hookRegistry()
-      .on("peersite:accessRequested", (payload) => {
-        void this.handlePeerAccessRequest(payload);
-      });
-  }
-
-  private async handlePeerAccessRequest(payload: unknown): Promise<void> {
-    const req = (payload ?? {}) as {
-      requestId?: unknown;
-      peerId?: unknown;
-      claim?: unknown;
-      expiresInMs?: unknown;
-    };
-    if (
-      typeof req.requestId !== "string" ||
-      typeof req.peerId !== "string" ||
-      typeof req.claim !== "string" ||
-      typeof req.expiresInMs !== "number"
-    ) {
-      return;
-    }
-
-    const approved = await this.trustGate.confirmPeerAccess(
-      req.peerId,
-      req.claim,
-      req.expiresInMs,
-    );
-
-    const plugin = this.peersite();
-    if (plugin?.resolveAccessRequest) {
-      await plugin.resolveAccessRequest(req.requestId, approved);
-    }
-  }
-
-  /**
-   * Handle a `media:accessRequested` event emitted by the media plugin before
-   * any SDP/ICE exchange with a peer. The request is resolved through the
-   * host's native tier-2 confirmation (`confirmMediaRequest`, fail-closed —
-   * the same `TrustConfirmation` core-server already owns for peersite), then
-   * passed back to the plugin via `resolveMediaAccess`. The plugin never
-   * calls `requestMediaAccess` itself; it only raises the hook.
-   */
-  private registerMediaAccessHandler(): void {
-    this.host
-      .hookRegistry()
-      .on("media:accessRequested", (payload) => {
-        void this.handleMediaAccessRequest(payload);
-      });
-  }
-
-  private async handleMediaAccessRequest(payload: unknown): Promise<void> {
-    const req = (payload ?? {}) as {
-      requestId?: unknown;
-      peerId?: unknown;
-      kind?: unknown;
-      direction?: unknown;
-      expiresInMs?: unknown;
-    };
-    if (
-      typeof req.requestId !== "string" ||
-      typeof req.peerId !== "string" ||
-      (req.kind !== "camera" && req.kind !== "microphone") ||
-      typeof req.expiresInMs !== "number"
-    ) {
-      return;
-    }
-
-    const granted = await this.trustGate.confirmMediaRequest(
-      req.peerId,
-      req.kind,
-      undefined,
-      req.expiresInMs,
-    );
-
-    const plugin = this.media();
-    if (plugin?.resolveMediaAccess) {
-      await plugin.resolveMediaAccess(req.requestId, granted);
-    }
-  }
-
-  private async pollPeers(): Promise<void> {
-    if (!this.provider) {
-      return;
-    }
-    // Warm the provider's capability cache for every discovered peer. Without
-    // this, `listPeers()` returns peers with an empty `skills` set until some
-    // other component happens to run a capability probe. `discover(skill)`
-    // probes every peer regardless of the requested skill, so a single call
-    // with any network-exposed skill name warms the whole cache; probing is
-    // cached per peer after the first successful handshake, so this is cheap
-    // once warm.
-    const probeSkill = this.broker
-      .listSkills()
-      .find((s) => !s.localOnly)?.skill;
-    if (probeSkill !== undefined) {
-      this.provider.discover(probeSkill).catch(() => {
-        // Probe failures are retried internally (PROBE_RETRY_MS); never let a
-        // peer that is momentarily unreachable take down the poll loop.
-      });
-    }
-    const peers = this.provider.listPeers();
-    const current = new Set(peers.map((p) => p.id));
-    for (const peer of peers) {
-      if (!this.knownPeers.has(peer.id)) {
-        this.knownPeers.add(peer.id);
-        this.broadcast("peer:connected", {
-          peerId: peer.id,
-          name: peer.name ?? peer.id,
-        });
-      }
-    }
-    for (const id of [...this.knownPeers]) {
-      if (!current.has(id)) {
-        this.knownPeers.delete(id);
-        this.broadcast("peer:disconnected", { peerId: id });
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------------
-  // WebSocket (activity bus)
-  // ---------------------------------------------------------------------
-
-  private handleSocket(socket: WebSocket, request: http.IncomingMessage): void {
-    if (!this.isAuthorizedWs(request)) {
-      socket.close(1008, "unauthorized");
-      return;
-    }
-    this.clients.add(socket);
-    socket.on("message", (data) => {
-      try {
-        const message = JSON.parse(data.toString()) as {
-          type?: string;
-          ts?: number;
-        };
-        validateObjectDepth(message);
-        if (message.type === "ping") {
-          socket.send(JSON.stringify({ type: "pong", ts: message.ts ?? Date.now() }));
+    registerGovernanceSkills({
+      broker: this.broker,
+      getGovernance: () => {
+        if (!this.governance) {
+          throw new Error("governance is not initialized");
         }
-      } catch {
-        // Ignore malformed client frames.
-      }
+        return this.governance;
+      },
+      broadcast: (event, payload) => this.broadcast(event, payload),
     });
-    socket.on("close", () => this.clients.delete(socket));
-    socket.on("error", () => this.clients.delete(socket));
-  }
-
-  private broadcast(event: string, payload: unknown): void {
-    const message = JSON.stringify({
-      type: "event",
-      event,
-      payload,
-      ts: Date.now(),
-    });
-    for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-      }
-    }
   }
 
   // ---------------------------------------------------------------------
-  // HTTP
+  // HTTP dispatcher
   // ---------------------------------------------------------------------
 
+  /**
+   * Dispatch one HTTP request. The global `/api/*` boot-token gate runs first
+   * (header-only — see {@link isAuthorized}); route modules then run in a
+   * fixed order (site → peersite → ui → remote-site → governance → operator).
+   * The exact gating/exception semantics were moved verbatim, not rewritten.
+   */
   private async handleHttp(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -765,1097 +331,53 @@ export class CoreServer {
     const path = url.pathname;
 
     if (path.startsWith("/api/") && !this.isAuthorized(req)) {
-      return this.sendJson(res, 401, { error: "unauthorized" });
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
     }
 
     try {
-      if (await this.tryServeSite(req, res, path)) {
+      if (await serveSite(this.routes.sites, req, res, path)) {
         return;
       }
-      if (await this.tryServePeersite(req, res, path)) {
+      if (await servePeersite(this.routes.sites, req, res, path)) {
         return;
       }
-      if (await this.tryServeUi(req, res, path)) {
+      if (await serveUi(this.routes.ui, req, res, path)) {
         return;
       }
-      if (await this.tryServeRemoteSite(req, res, path)) {
+      if (await serveRemoteSite(this.routes.sites, req, res, path)) {
         return;
       }
-      if (await this.tryServeGovernance(req, res, path)) {
+      if (await serveGovernance(this.routes.governance, req, res, path)) {
         return;
       }
-      if (req.method === "GET" && path === "/api/health") {
-        return this.sendJson(res, 200, { ok: true, uptime: process.uptime() });
+      if (await serveOperator(this.routes.operator, req, res, path)) {
+        return;
       }
-      if (req.method === "GET" && path === "/api/capabilities") {
-        return this.sendJson(res, 200, await this.buildCapabilities());
-      }
-      if (req.method === "POST" && path === "/api/execute") {
-        const body = (await readJson(req)) as ExecuteBody;
-        const result = await this.execute(body);
-        return this.sendJson(res, 200, result);
-      }
-      if (req.method === "GET" && path === "/api/vault/keys") {
-        const vault = this.host.vaultManager();
-        return this.sendJson(res, 200, {
-          keys: await vault.listSecretMetadata(),
-          masterKeyConfigured: !vault.usesFallbackKey,
-        });
-      }
-      if (req.method === "GET" && path === "/api/vault/model") {
-        const vault = this.host.vaultManager();
-        const hasModel = await vault.hasSecret("ai.model");
-        const hasBaseUrl = await vault.hasSecret("ai.baseUrl");
-        const hasApiKey = await vault.hasSecret("ai.apiKey");
-        return this.sendJson(res, 200, { hasModel, hasBaseUrl, hasApiKey });
-      }
-      if (req.method === "POST" && path === "/api/vault/set") {
-        const body = (await readJson(req)) as { key?: unknown; value?: unknown };
-        if (typeof body.key !== "string" || typeof body.value !== "string") {
-          return this.sendJson(res, 400, {
-            ok: false,
-            error: "set expects { key: string, value: string }",
-          });
-        }
-        const reserved = this.reservedPrefixFor(body.key);
-        if (reserved) {
-          return this.sendJson(res, 403, {
-            ok: false,
-            error: `vault key "${body.key}" is in the reserved namespace "${reserved}" and cannot be modified over HTTP`,
-          });
-        }
-        await this.host.vaultManager().setSecret(body.key, body.value);
-        this.broadcast("vault:updated", { key: body.key, action: "set" });
-        return this.sendJson(res, 200, { ok: true, key: body.key });
-      }
-      if (req.method === "DELETE" && path.startsWith("/api/vault/")) {
-        const key = decodeURIComponent(path.slice("/api/vault/".length));
-        const reserved = this.reservedPrefixFor(key);
-        if (reserved) {
-          return this.sendJson(res, 403, {
-            ok: false,
-            error: `vault key "${key}" is in the reserved namespace "${reserved}" and cannot be modified over HTTP`,
-          });
-        }
-        const deleted = await this.host.vaultManager().deleteSecret(key);
-        this.broadcast("vault:updated", { key, action: "delete" });
-        return this.sendJson(res, 200, { ok: true, deleted });
-      }
-      if (req.method === "GET" && path === "/api/settings") {
-        const settings = await this.loadSettings();
-        return this.sendJson(res, 200, {
-          settings,
-          risk: evaluateSettingsRisk(settings),
-        });
-      }
-      if (req.method === "POST" && path === "/api/settings/apply") {
-        const body = await readJson(req);
-        if (!isPlainObject(body)) {
-          return this.sendJson(res, 400, {
-            ok: false,
-            error: "apply expects a settings object",
-          });
-        }
-        const settings = normalizeSettings(body);
-        const risk = evaluateSettingsRisk(settings);
-        try {
-          await this.trustGate.authorize(
-            risk.aggregate,
-            settingsApplySummary(risk),
-            { authenticated: true },
-          );
-        } catch (err) {
-          if (err instanceof TrustConfirmationDeniedError) {
-            return this.sendJson(res, 403, {
-              ok: false,
-              error: "confirmation required",
-              requiredTier: err.requiredTier,
-            });
-          }
-          throw err;
-        }
-        await this.saveSettings(settings);
-        this.broadcast("settings:updated", { settings, risk });
-        return this.sendJson(res, 200, { ok: true, risk });
-      }
-      if (req.method === "GET" && path === "/api/agents") {
-        const agents: unknown[] = [];
-        for (const { label } of await this.host
-          .identityManager()
-          .listChildIdentities()) {
-          const child = await this.host.identityManager().getChildIdentity(label);
-          if (child) {
-            agents.push(agentView(child));
-          }
-        }
-        return this.sendJson(res, 200, { agents });
-      }
-      if (req.method === "POST" && path === "/api/agents") {
-        const body = (await readJson(req)) as { label?: unknown };
-        if (typeof body.label !== "string" || !isValidAgentLabel(body.label)) {
-          return this.sendJson(res, 400, {
-            ok: false,
-            error: "create expects a valid agent label (^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$)",
-          });
-        }
-        const child = await this.host
-          .identityManager()
-          .deriveChildIdentity(body.label);
-        return this.sendJson(res, 200, { ok: true, agent: agentView(child) });
-      }
-      if (req.method === "DELETE" && path.startsWith("/api/agents/")) {
-        const label = decodeURIComponent(path.slice("/api/agents/".length));
-        if (!isValidAgentLabel(label)) {
-          return this.sendJson(res, 400, {
-            ok: false,
-            error: `invalid agent label "${label}"`,
-          });
-        }
-        const deleted = await this.host
-          .identityManager()
-          .deleteChildIdentity(label);
-        return this.sendJson(res, 200, { ok: true, deleted });
-      }
-
-      return this.sendJson(res, 404, { error: "not found" });
+      sendJson(res, 404, { error: "not found" });
     } catch (err) {
       if (err instanceof PayloadTooLargeError) {
-        return this.sendJson(res, 413, { error: "request body too large" });
-      }
-      if (err instanceof ObjectDepthExceededError || err instanceof SyntaxError) {
-        return this.sendJson(res, 400, { error: "invalid request body" });
-      }
-      console.error("[core-server] request failed:", err);
-      return this.sendJson(res, 500, { error: "internal error" });
-    }
-  }
-
-  // ---------------------------------------------------------------------
-  // Static site serving (loopback-only, hardened)
-  // ---------------------------------------------------------------------
-
-  /**
-   * Attempt to serve a request from the configured site root. Returns `true`
-   * (and writes a response) when the request targeted the `/site` prefix;
-   * returns `false` so the caller can continue routing when it did not.
-   *
-   * Hardening: raw `..`/`%2e`/`%00` segments are rejected before decoding, the
-   * decoded sub-path is re-checked segment-by-segment (dot-segments, dotfiles,
-   * backslashes, null bytes), and the final file is resolved with `realpath`
-   * and required to stay under the real site root (blocks symlink escapes).
-   * Every reject is a 404 — never 403 — to avoid leaking directory structure.
-   */
-  private async tryServeSite(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    pathname: string,
-  ): Promise<boolean> {
-    const root = await this.effectiveSiteRoot();
-    if (!root) {
-      return false;
-    }
-    if (pathname !== SITE_PREFIX && !pathname.startsWith(SITE_PREFIX + "/")) {
-      return false;
-    }
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      this.sendSiteEmpty(res, 405, false);
-      return true;
-    }
-
-    const rawSubpath = pathname.slice(SITE_PREFIX.length);
-    if (
-      /%2e/i.test(rawSubpath) ||
-      /%00/i.test(rawSubpath) ||
-      rawSubpath.includes("..") ||
-      rawSubpath.includes("\0")
-    ) {
-      this.sendSiteEmpty(res, 404, false);
-      return true;
-    }
-
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(rawSubpath);
-    } catch {
-      this.sendSiteEmpty(res, 404, false);
-      return true;
-    }
-
-    // Containment (dot-segments, dotfiles, symlinks, data-dir escapes) is
-    // decided once, in the shared helper — identical to the P2P fetchAsset path.
-    const resolved = resolveAndContainFile(root, decoded);
-    if (!resolved) {
-      this.sendSiteEmpty(res, 404, false);
-      return true;
-    }
-
-    let contents: Buffer;
-    try {
-      contents = await fsp.readFile(resolved);
-    } catch {
-      this.sendSiteEmpty(res, 404, false);
-      return true;
-    }
-
-    this.sendSiteFile(res, req.method === "HEAD", contents, resolved);
-    return true;
-  }
-
-  private sendSiteEmpty(
-    res: http.ServerResponse,
-    status: number,
-    withHeaders: boolean,
-  ): void {
-    res.writeHead(status, withHeaders ? SITE_SECURITY_HEADERS : {});
-    res.end();
-  }
-
-  private sendSiteFile(
-    res: http.ServerResponse,
-    headOnly: boolean,
-    contents: Buffer,
-    filePath: string,
-  ): void {
-    const contentType = contentTypeForPath(filePath);
-    res.writeHead(200, {
-      ...SITE_SECURITY_HEADERS,
-      "Content-Type": contentType,
-      "Content-Length": contents.length,
-    });
-    res.end(headOnly ? undefined : contents);
-  }
-
-  // ---------------------------------------------------------------------
-  // Plugin UI serving (/ui/<pluginId>/*)
-  // ---------------------------------------------------------------------
-
-  /**
-   * Attempt to serve a plugin's bundled UI document and assets. Returns `true`
-   * (and writes a response) when the request targeted the `/ui` prefix;
-   * returns `false` so the caller can continue routing when it did not.
-   *
-   * Deliberate deviation from the earlier plan note ("boot-token"): `/ui/*` is
-   * served WITHOUT the boot token, exactly like `/site/*`. The boot token must
-   * never appear in the sandboxed iframe's URL, because the plugin's own UI
-   * code can read `location.search` — giving a sandboxed plugin the full
-   * `/api/*` token would let it invoke *any* skill directly, defeating the
-   * shell bridge's allowlist entirely. `/ui` instead relies on the same
-   * controls as `/site`: loopback-only default bind, strict per-request
-   * containment, and a hardened CSP. It serves only the plugin's own public
-   * UI assets (already on the user's disk), and every capability request must
-   * still present the boot token elsewhere.
-   */
-  private async tryServeUi(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    pathname: string,
-  ): Promise<boolean> {
-    if (!this.lanSiteAllowed) {
-      return false;
-    }
-    if (pathname !== UI_PREFIX && !pathname.startsWith(UI_PREFIX + "/")) {
-      return false;
-    }
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      this.sendUiEmpty(res, 405, false);
-      return true;
-    }
-
-    // `/ui/<pluginId>/<subpath>` — the plugin id is the first segment after
-    // the prefix. It is only ever used as a Map key (never joined into a
-    // path), and it must still match the manifest id rule so an encoded or
-    // traversing segment is refused up front.
-    const rest = pathname.slice(UI_PREFIX.length);
-    if (!rest.startsWith("/")) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-    const rawSegments = rest.slice(1).split("/");
-    const pluginId = rawSegments[0];
-    if (typeof pluginId !== "string" || !PLUGIN_ID_RE.test(pluginId)) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    const uiRoot = await this.host.pluginUiRoot(pluginId);
-    if (!uiRoot) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    let rawSubpath = rawSegments.slice(1).join("/");
-    if (rawSubpath.length === 0) {
-      // Bare `/ui/<pluginId>/` serves the manifest entry document.
-      const manifest = this.host.listPlugins().find((p) => p.id === pluginId);
-      const entry = manifest?.ui?.entry;
-      if (typeof entry !== "string") {
-        this.sendUiEmpty(res, 404, false);
-        return true;
-      }
-      rawSubpath = path.basename(entry);
-    }
-
-    if (
-      /%2e/i.test(rawSubpath) ||
-      /%00/i.test(rawSubpath) ||
-      rawSubpath.includes("..") ||
-      rawSubpath.includes("\0")
-    ) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(rawSubpath);
-    } catch {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    // Containment (dot-segments, dotfiles, symlinks, escapes) is decided once,
-    // in the shared helper — identical to the P2P fetchAsset and /site paths.
-    const resolved = resolveAndContainFile(uiRoot, decoded);
-    if (!resolved) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    let contents: Buffer;
-    try {
-      contents = await fsp.readFile(resolved);
-    } catch {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    const contentType = contentTypeForPath(resolved);
-    res.writeHead(200, {
-      ...UI_SECURITY_HEADERS,
-      "Content-Type": contentType,
-      "Content-Length": contents.length,
-    });
-    res.end(req.method === "HEAD" ? undefined : contents);
-    return true;
-  }
-
-  private sendUiEmpty(
-    res: http.ServerResponse,
-    status: number,
-    withHeaders: boolean,
-  ): void {
-    res.writeHead(status, withHeaders ? UI_SECURITY_HEADERS : {});
-    res.end();
-  }
-
-  // ---------------------------------------------------------------------
-  // Remote site mirror serving (/remote-site/<peerId>/*)
-  // ---------------------------------------------------------------------
-
-  /**
-   * Attempt to serve a mirrored remote P2P site. Returns `true` (and writes a
-   * response) when the request targeted the `/remote-site` prefix.
-   *
-   * This is the render side of the Fase-2 end criterion: peer B renders peer
-   * A's `p2p-hub:website:v1` capability inside the same sandboxed-iframe model
-   * as `/ui`. A never runs a public HTTP server — B fetches assets over the
-   * P2P protocol on request and stores them in `<dataDir>/sites/<peerId>`.
-   *
-   * Hardening mirrors `/ui` (CLAUDE.md principle #10): served WITHOUT the boot
-   * token (the iframe is untrusted remote content and must never hold a token
-   * in its URL), loopback-gated, GET/HEAD-only, strict per-request containment
-   * (shared {@link mirrorDestination} on the write side, {@link resolveAndContainFile}
-   * semantics on the serve side), and the hardened UI CSP with `connect-src
-   * 'none'`. The peerId is validated as hex before it ever builds a path, so
-   * the mirror root is contained by construction. Every failure is a quiet 404.
-   */
-  private async tryServeRemoteSite(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    pathname: string,
-  ): Promise<boolean> {
-    if (!this.lanSiteAllowed) {
-      return false;
-    }
-    if (
-      pathname !== REMOTE_SITE_PREFIX &&
-      !pathname.startsWith(REMOTE_SITE_PREFIX + "/")
-    ) {
-      return false;
-    }
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      this.sendUiEmpty(res, 405, false);
-      return true;
-    }
-
-    const rest = pathname.slice(REMOTE_SITE_PREFIX.length);
-    if (!rest.startsWith("/")) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-    const rawSegments = rest.slice(1).split("/");
-    const peerId = rawSegments[0];
-    // The peerId is a directory name AND the remote task target. It must be a
-    // valid 64-hex identity before it is used for either.
-    if (typeof peerId !== "string" || !PEER_ID_RE.test(peerId)) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    let rawSubpath = rawSegments.slice(1).join("/");
-    if (rawSubpath.length === 0) {
-      rawSubpath = "index.html";
-    }
-
-    if (
-      /%2e/i.test(rawSubpath) ||
-      /%00/i.test(rawSubpath) ||
-      rawSubpath.includes("..") ||
-      rawSubpath.includes("\0")
-    ) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(rawSubpath);
-    } catch {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-    // A directory URL (`/remote-site/<peerId>/sub/`) maps to its index, exactly
-    // as the origin peer's `resolveAndContainFile` would resolve it.
-    if (decoded.endsWith("/")) {
-      decoded += "index.html";
-    }
-
-    const mirrorRoot = path.join(this.options.dataDir, "sites", peerId);
-    const destination = mirrorDestination(mirrorRoot, decoded);
-    if (!destination) {
-      this.sendUiEmpty(res, 404, false);
-      return true;
-    }
-
-    let contents: Buffer;
-    try {
-      contents = await fsp.readFile(destination);
-    } catch {
-      // Miss: fetch the asset from the remote peer over P2P, then serve it.
-      const stored = await mirrorFetchAndStore({
-        fetcher: (pid, p) => this.fetchRemoteSiteAsset(pid, p),
-        mirrorRoot,
-        peerId,
-        path: decoded,
-      });
-      if (!stored) {
-        this.sendUiEmpty(res, 404, false);
-        return true;
-      }
-      try {
-        contents = await fsp.readFile(stored);
-      } catch {
-        this.sendUiEmpty(res, 404, false);
-        return true;
-      }
-    }
-
-    const contentType = contentTypeForPath(destination);
-    res.writeHead(200, {
-      ...UI_SECURITY_HEADERS,
-      "Content-Type": contentType,
-      "Content-Length": contents.length,
-    });
-    res.end(req.method === "HEAD" ? undefined : contents);
-    return true;
-  }
-
-  /**
-   * Outbound `p2p-hub:website:v1` asset request to a remote peer, wired to the
-   * platform's own network transport. Authorization is entirely the remote
-   * peer's platform decision (its broker gate on the transport-verified caller
-   * identity) — this side only formats the versioned envelope and validates the
-   * response. Every failure is mapped to a typed error code, never leaked.
-   */
-  private async fetchRemoteSiteAsset(
-    peerId: string,
-    assetPath: string,
-  ): Promise<
-    | { ok: true; contentType: string; data: string; name: string }
-    | { ok: false; code: WebsiteErrorCode }
-  > {
-    const result = await this.executeRemote(
-      peerId,
-      "peersite.fetchAsset",
-      randomUUID(),
-      buildWebsiteRequest(assetPath),
-    );
-    if (result.status !== "ok" || !result.result) {
-      return { ok: false, code: "not-found" };
-    }
-    const parsed = parseWebsiteResponse(result.result);
-    if (!parsed) {
-      return { ok: false, code: "malformed" };
-    }
-    if (parsed.status === "error") {
-      return { ok: false, code: parsed.code };
-    }
-    return {
-      ok: true,
-      contentType: parsed.contentType,
-      data: parsed.data,
-      name: parsed.name,
-    };
-  }
-
-  // ---------------------------------------------------------------------
-  // Scoped PeerSite API (/peersite/*)
-  // ---------------------------------------------------------------------
-
-  /**
-   * Attempt to handle a scoped PeerSite API request. Returns `true` when the
-   * request targeted `/peersite` and was answered; `false` otherwise. The API
-   * is only active when the site is enabled (the peersite plugin has a
-   * configured root). The scoped site credential is the *only* thing that can
-   * authenticate `/peersite/*` — the boot token never applies here, and the
-   * site credential never applies to `/api/*` or `/ws`.
-   */
-  private async tryServePeersite(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    pathname: string,
-  ): Promise<boolean> {
-    if (!(await this.effectiveSiteRoot())) {
-      return false;
-    }
-    if (
-      pathname !== PEERSITE_PREFIX &&
-      !pathname.startsWith(PEERSITE_PREFIX + "/")
-    ) {
-      return false;
-    }
-
-    if (req.method === "GET" && pathname === "/peersite/status") {
-      this.sendJson(res, 200, {
-        online: true,
-        peerName: this.peerId,
-        activePluginsCount: this.host.listPlugins().length,
-      });
-      return true;
-    }
-
-    if (req.method === "POST" && pathname === "/peersite/message") {
-      if (!this.isSiteAuthorized(req)) {
-        this.sendJson(res, 401, { error: "unauthorized" });
-        return true;
-      }
-      const remote = req.socket.remoteAddress ?? "unknown";
-      if (!this.allowMessage(remote)) {
-        this.sendJson(res, 429, { error: "rate limit exceeded" });
-        return true;
-      }
-      const body = (await readJson(req)) as { message?: unknown };
-      if (typeof body.message !== "string") {
-        this.sendJson(res, 400, {
-          ok: false,
-          error: "message expects { message: string }",
-        });
-        return true;
-      }
-      validateTextLength(body.message, PEERSITE_MESSAGE_MAX_LENGTH);
-      const clean = sanitizeText(body.message);
-      this.broadcast("peersite:message", { message: clean, ts: Date.now() });
-      this.sendJson(res, 200, { ok: true });
-      return true;
-    }
-
-    if (req.method === "POST" && pathname === "/peersite/execute-skill") {
-      if (!this.isSiteAuthorized(req)) {
-        this.sendJson(res, 401, { error: "unauthorized" });
-        return true;
-      }
-      const body = (await readJson(req)) as {
-        serviceId?: unknown;
-        method?: unknown;
-        arguments?: unknown;
-      };
-      const { serviceId, method } = body;
-      if (
-        typeof serviceId !== "string" ||
-        typeof method !== "string" ||
-        !IDENTIFIER_RE.test(serviceId) ||
-        !IDENTIFIER_RE.test(method)
-      ) {
-        this.sendJson(res, 400, {
-          ok: false,
-          error: "execute-skill expects safe serviceId and method identifiers",
-        });
-        return true;
-      }
-      try {
-        await this.trustGate.authorize(
-          "critical",
-          `Execute skill ${serviceId}.${method} from PeerSite`,
-          { authenticated: true },
-        );
-      } catch (err) {
-        if (err instanceof TrustConfirmationDeniedError) {
-          this.sendJson(res, 403, {
-            ok: false,
-            error: "confirmation required",
-            requiredTier: err.requiredTier,
-          });
-          return true;
-        }
-        throw err;
-      }
-      const id = randomUUID();
-      const result = await this.broker.handleHttp({
-        id,
-        skill: `${serviceId}.${method}`,
-        payload: body.arguments,
-      });
-      this.sendJson(res, 200, result);
-      return true;
-    }
-
-    return false;
-  }
-
-  private async buildCapabilities(): Promise<unknown> {
-    const plugins = this.host.listPlugins().map((p) => ({
-      id: p.id,
-      name: p.name ?? p.id,
-      kind: p.kind,
-      version: p.version,
-      // Fase 2B: manifest-declared UI surface. `skills` is the bridge allowlist
-      // the shell must register — never derived from the full skill list.
-      ui: p.ui
-        ? {
-            entry: p.ui.entry,
-            defaultWidth: p.ui.defaultWidth,
-            defaultHeight: p.ui.defaultHeight,
-            skills: p.ui.skills ?? [],
-          }
-        : null,
-    }));
-
-    const skills = this.broker.listSkills().map((s) => ({
-      skill: s.skill,
-      localOnly: s.localOnly,
-      httpExposed: s.httpExposed,
-      httpBridgeOnly: s.httpBridgeOnly,
-      capabilityType: s.capabilityType,
-      pluginId: s.skill.split(".")[0] ?? "",
-    }));
-
-    const events = new Set<string>(DEFAULT_BRIDGED_EVENTS);
-    for (const plugin of this.host.listPlugins()) {
-      for (const event of plugin.exposedEvents ?? []) {
-        events.add(event);
-      }
-    }
-    events.add("peer:connected");
-    events.add("peer:disconnected");
-    events.add("task:started");
-    events.add("task:completed");
-    events.add("vault:updated");
-
-    // Same duck-typed contacts read-seam the host's RemoteGate uses (Fase 2A):
-    // distinguish verified contacts from anonymous/self-signed peers so the
-    // shell can render per-peer trust instead of assuming everyone is equal.
-    const contacts = asContactLookup(this.host.getActivated("contacts"));
-    const peers = this.provider
-      ? await Promise.all(
-          this.provider.listPeers().map(async (peer) => {
-            let trust = "self-signed";
-            if (peer.peerId && contacts) {
-              const info = await contacts.getContact(peer.peerId);
-              if (info?.trustState === "verified") {
-                trust = "verified";
-              }
-            }
-            return {
-              id: peer.id,
-              peerId: peer.peerId ?? null,
-              name: peer.name ?? peer.id,
-              address: peer.address,
-              skills: peer.skills,
-              transport: this.provider!.id,
-              trust,
-            };
-          }),
-        )
-      : [];
-
-    return {
-      local: {
-        plugins,
-        skills,
-        events: [...events],
-        connection: {
-          providerId: this.provider?.id ?? null,
-          ready: this.provider?.isReady() ?? false,
-        },
-      },
-      remote: { peers },
-    };
-  }
-
-  /**
-   * Stap 6 — governance API. Mounted under `/api/` so the existing boot-token
-   * check (`isAuthorized`) applies to every route here, including the SSE
-   * stream, before any handler runs. All writes are tier-2 confirmed inside the
-   * governance service (the boot token alone authorizes nothing on this
-   * surface). The catalog/topology/matrix reads are operator-visible.
-   */
-  private async tryServeGovernance(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    pathname: string,
-  ): Promise<boolean> {
-    if (!pathname.startsWith("/api/governance/v1")) {
-      return false;
-    }
-    const governance = this.governance;
-    if (!governance) {
-      this.sendJson(res, 503, { error: "governance not initialized" });
-      return true;
-    }
-
-    if (req.method === "GET" && pathname === "/api/governance/v1/catalog") {
-      this.sendJson(res, 200, await governance.catalog());
-      return true;
-    }
-
-    if (req.method === "GET" && pathname === "/api/governance/v1/topology") {
-      this.sendJson(res, 200, { peers: await governance.topology() });
-      return true;
-    }
-
-    if (req.method === "GET" && pathname === "/api/governance/v1/matrix") {
-      this.sendJson(res, 200, { entries: governance.matrixList() });
-      return true;
-    }
-
-    if (req.method === "GET" && pathname === "/api/governance/v1/stream") {
-      this.attachGovernanceStream(req, res);
-      return true;
-    }
-
-    const verifyMatch = pathname.match(
-      /^\/api\/governance\/v1\/peers\/([^/]+)\/verify$/,
-    );
-    if (req.method === "POST" && verifyMatch) {
-      const peerId = decodeURIComponent(verifyMatch[1]);
-      if (!GOVERNANCE_PEER_ID_RE.test(peerId)) {
-        this.sendJson(res, 400, { error: "invalid peerId" });
-        return true;
-      }
-      try {
-        const result = await governance.verifyPeer(peerId);
-        this.sendJson(res, 200, result);
-      } catch (err) {
-        this.sendGovernanceWriteError(res, err);
-      }
-      return true;
-    }
-
-    const permissionsMatch = pathname.match(
-      /^\/api\/governance\/v1\/peers\/([^/]+)\/permissions$/,
-    );
-    if (permissionsMatch) {
-      const peerId = decodeURIComponent(permissionsMatch[1]);
-      if (!GOVERNANCE_PEER_ID_RE.test(peerId)) {
-        this.sendJson(res, 400, { error: "invalid peerId" });
-        return true;
-      }
-      if (req.method === "PUT") {
-        const body = await readJson(req);
-        let spec: {
-          peerId: string;
-          skills: string[];
-          topics: string[];
-          customRateLimit?: number;
-        };
-        try {
-          spec = parseGovernancePermissionsSpec(body, peerId);
-        } catch (err) {
-          this.sendJson(res, 400, {
-            ok: false,
-            error: err instanceof Error ? err.message : "invalid body",
-          });
-          return true;
-        }
-        try {
-          const entry = await governance.setPermissions(peerId, spec);
-          this.broadcast("governance:matrix:updated", { peerId });
-          this.sendJson(res, 200, { ok: true, entry });
-        } catch (err) {
-          this.sendGovernanceWriteError(res, err);
-        }
-        return true;
-      }
-      if (req.method === "DELETE") {
-        try {
-          const removed = await governance.removePermissions(peerId);
-          this.broadcast("governance:matrix:updated", { peerId });
-          this.sendJson(res, 200, { ok: true, removed });
-        } catch (err) {
-          this.sendGovernanceWriteError(res, err);
-        }
-        return true;
-      }
-    }
-
-    this.sendJson(res, 404, { error: "not found" });
-    return true;
-  }
-
-  /** Attach an authenticated SSE client. Headers are set here; the body stays
-   * open and is written to by the GovernanceStream until the socket closes. */
-  private attachGovernanceStream(
-    _req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): void {
-    const stream = this.governanceStream;
-    if (!stream) {
-      this.sendJson(res, 503, { error: "governance not initialized" });
-      return;
-    }
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    });
-    // Flush the headers immediately so the client's EventSource fires
-    // `open` without waiting for the first frame.
-    res.flushHeaders();
-    res.write("retry: 15000\n\n");
-    stream.subscribe(res);
-  }
-
-  /** Map governance write failures to typed HTTP responses. Everything else
-   * rethrows (the outer handler turns it into a 500). */
-  private sendGovernanceWriteError(res: http.ServerResponse, err: unknown): void {
-    if (err instanceof AccessDeniedError) {
-      this.sendJson(res, 403, {
-        ok: false,
-        error: err.message,
-        kind: err.kind,
-        name: err.name,
-      });
-      return;
-    }
-    if (err instanceof InvalidRateLimitError) {
-      this.sendJson(res, 422, {
-        ok: false,
-        error: err.message,
-        max: err.max,
-      });
-      return;
-    }
-    if (err instanceof TrustConfirmationDeniedError) {
-      this.sendJson(res, 403, {
-        ok: false,
-        error: err.message,
-        requiredTier: err.requiredTier,
-      });
-      return;
-    }
-    throw err;
-  }
-
-  private async execute(body: ExecuteBody): Promise<TaskResult> {
-    const id =
-      typeof body.requestId === "string" && body.requestId.length > 0
-        ? body.requestId
-        : randomUUID();
-
-    const { serviceId, method } = body;
-    if (
-      typeof serviceId !== "string" ||
-      typeof method !== "string" ||
-      !IDENTIFIER_RE.test(serviceId) ||
-      !IDENTIFIER_RE.test(method)
-    ) {
-      return {
-        taskId: id,
-        status: "error",
-        error: "execute expects serviceId and method as safe identifier strings",
-      };
-    }
-    if (
-      body.peerId !== undefined &&
-      (typeof body.peerId !== "string" || !PEER_ID_RE.test(body.peerId))
-    ) {
-      return {
-        taskId: id,
-        status: "error",
-        error: "execute expects peerId as a safe identifier string",
-      };
-    }
-
-    const skill = `${serviceId}.${method}`;
-
-    this.broadcast("task:started", {
-      requestId: id,
-      serviceId,
-      method,
-      peerId: body.peerId ?? null,
-    });
-
-    const result = body.peerId
-      ? await this.executeRemote(body.peerId, skill, id, body.arguments)
-      : await this.broker.handleHttp({ id, skill, payload: body.arguments });
-
-    this.broadcast("task:completed", {
-      requestId: id,
-      serviceId,
-      method,
-      peerId: body.peerId ?? null,
-      status: result.status,
-    });
-
-    return result;
-  }
-
-  private async executeRemote(
-    peerId: string,
-    skill: string,
-    id: string,
-    args: unknown,
-  ): Promise<TaskResult> {
-    if (!this.provider) {
-      return { taskId: id, status: "error", error: "no active network provider" };
-    }
-    const peers = this.provider.listPeers();
-    // Resolve by the persistent `peerId` (identity) first — the same concept
-    // `ctx.network.sendTask` uses — and fall back to the per-boot instance
-    // `id` for clients that still address peers by session id.
-    const peer =
-      peers.find((p) => p.peerId === peerId) ??
-      peers.find((p) => p.id === peerId);
-    if (!peer) {
-      return { taskId: id, status: "error", error: `unknown peer "${peerId}"` };
-    }
-    return this.provider.sendTask(peer, { id, skill, payload: args });
-  }
-
-  /**
-   * Return the reserved namespace a key falls into (e.g. `ai.`), or null when
-   * the key is writable. This mirrors the `assertWritable` guard the plugin
-   * loader enforces on the plugin-facing {@link VaultContext}; the HTTP client
-   * must not be able to rewrite the AI key/endpoint that core later uses.
-   */
-  private reservedPrefixFor(key: string): string | null {
-    const reserved = this.host.vaultManager().reservedPrefixes;
-    return reserved.find((p) => key.startsWith(p)) ?? null;
-  }
-
-  /** Path of the minimal settings file (only the effective security flags). */
-  private settingsFile(): string {
-    return path.join(this.options.dataDir, "settings.json");
-  }
-
-  private async loadSettings(): Promise<EffectiveSettings> {
-    const stored = await readJsonFile<Partial<EffectiveSettings>>(
-      this.settingsFile(),
-    );
-    return normalizeSettings(stored ?? undefined);
-  }
-
-  private async saveSettings(settings: EffectiveSettings): Promise<void> {
-    await atomicWriteFile(this.settingsFile(), JSON.stringify(settings));
-  }
-
-  /**
-   * Resolve (or generate) the boot token and persist it to the data directory
-   * so the desktop shell can read it out-of-band. The env override exists for
-   * headless/tests; a token is always written so `get_boot_token` never races
-   * a missing file.
-   */
-  private resolveBootToken(): string {
-    const token =
-      this.options.bootToken ??
-      process.env.P2P_HUB_BOOT_TOKEN ??
-      generateBootToken();
-    writeBootToken(this.options.dataDir, token);
-    return token;
-  }
-
-  /**
-   * Authorize an HTTP `/api/*` request via the `Authorization` header only.
-   * A `?token=` query string on an API request would put the boot token in
-   * server access logs, browser history and any reverse-proxy logs — an
-   * avoidable exposure, because a fetch/XHR caller can always set a header.
-   * The query string remains the *only* accepted path for `/ws` (see
-   * {@link isAuthorizedWs}), where the browser WebSocket API forces it.
-   */
-  private isAuthorized(req: http.IncomingMessage): boolean {
-    return safeTokenEqual(
-      tokenFromAuthorization(req.headers.authorization),
-      this.bootToken,
-    );
-  }
-
-  /**
-   * Authorize a `/ws` upgrade via the `Authorization` header or `?token=`
-   * query string. The query string is accepted here only because the browser
-   * WebSocket API cannot attach custom headers to the handshake; this is the
-   * accepted risk documented in CLAUDE.md (mitigated operationally: loopback,
-   * short-lived per-boot token, never logged).
-   */
-  private isAuthorizedWs(req: http.IncomingMessage): boolean {
-    return (
-      safeTokenEqual(
-        tokenFromAuthorization(req.headers.authorization),
-        this.bootToken,
-      ) ||
-      safeTokenEqual(tokenFromQuery(req), this.bootToken)
-    );
-  }
-
-  /**
-   * Resolve the LAN exposure decision at startup. The site root itself is
-   * owned by the `peersite` plugin (see {@link effectiveSiteRoot}); this only
-   * decides whether a configured site may be served beyond loopback.
-   *
-   * Loopback serving is always allowed. Serving beyond loopback is an explicit
-   * opt-in: it requires both `peersiteEnabled` and `peersiteLanExposed` from
-   * the persisted settings, and when enabled it logs a loud exposure + risk
-   * warning (CLAUDE.md principle #8 — no silent widening).
-   */
-  private async initSite(): Promise<void> {
-    const host = this.options.host ?? "127.0.0.1";
-    if (!isLoopbackHost(host)) {
-      const settings = await this.loadSettings();
-      if (!settings.peersiteEnabled || !settings.peersiteLanExposed) {
-        console.warn(
-          "[core-server] PeerSite: the bridge is not bound to loopback and " +
-            "peersiteEnabled/peersiteLanExposed are not both enabled; static + " +
-            "/peersite serving is refused (loopback-only).",
-        );
-        this.lanSiteAllowed = false;
+        sendJson(res, 413, { error: "request body too large" });
         return;
       }
-      const risk = evaluateSettingsRisk(settings).aggregate;
-      console.warn(
-        `[core-server] PeerSite: EXPOSING the static site and /peersite API on ` +
-          `non-loopback "${host}". Anyone who can reach this port can read the ` +
-          `published site and call the scoped peersite API. Active risk level: ` +
-          `${risk}. Keep the site token secret and treat the network as untrusted.`,
-      );
+      if (err instanceof ObjectDepthExceededError || err instanceof SyntaxError) {
+        sendJson(res, 400, { error: "invalid request body" });
+        return;
+      }
+      console.error("[core-server] request failed:", err);
+      sendJson(res, 500, { error: "internal error" });
     }
   }
+
+  // ---------------------------------------------------------------------
+  // Site / peer access helpers
+  // ---------------------------------------------------------------------
 
   /**
    * The currently-active site root, owned by the `peersite` plugin and read
    * through `host.getActivated("peersite")`. Returns `null` (site disabled)
    * when the plugin is absent, has no configured root, or LAN exposure was
-   * refused. The root is already a canonical realpath (validated by the
-   * plugin's `setSiteRoot` via the shared {@link validateSiteRoot}).
+   * refused. The root is already a canonical realpath.
    */
   private async effectiveSiteRoot(): Promise<string | null> {
     if (!this.lanSiteAllowed) {
@@ -1897,8 +419,7 @@ export class CoreServer {
 
   /**
    * The scoped site credential, exposed for the host (desktop shell) to read
-   * out-of-band. It is in-memory only — never persisted and never injected into
-   * served static HTML — and only authorizes `/peersite/*` routes.
+   * out-of-band. In-memory only, never persisted; only authorizes `/peersite/*`.
    */
   siteCredential(): string {
     return this.siteToken;
@@ -1926,124 +447,53 @@ export class CoreServer {
     return true;
   }
 
-  private sendJson(
-    res: http.ServerResponse,
-    status: number,
-    body: unknown,
-  ): void {
-    res.writeHead(status, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(body));
+  /**
+   * Resolve (or generate) the boot token and persist it to the data directory
+   * so the desktop shell can read it out-of-band. The env override exists for
+   * headless/tests; a token is always written so `get_boot_token` never races
+   * a missing file.
+   */
+  private resolveBootToken(): string {
+    const token =
+      this.options.bootToken ??
+      process.env.P2P_HUB_BOOT_TOKEN ??
+      generateBootToken();
+    writeBootToken(this.options.dataDir, token);
+    return token;
   }
-}
 
-/** Human-readable summary shown to the native tier-2 confirmation prompt. */
-function settingsApplySummary(risk: RiskAssessment): string {  if (risk.findings.length === 0) {
-    return "Apply security settings (no known risks)";
-  }
-  return `Apply security settings (${risk.aggregate}): ${risk.findings
-    .map((f) => f.id)
-    .join(", ")}`;
-}
-
-/**
- * Public view of a derived agent identity for the `/api/agents` surface. Only
- * public material is exposed: the peerId, the public key, the operator-signed
- * certificate and its `issuedAt`. The private key never leaves
- * `IdentityManager` — it is structurally absent from this view (CLAUDE.md
- * principle #6).
- */
-function agentView(child: ChildIdentity): {
-  label: string;
-  peerId: string;
-  publicKeyHex: string;
-  certificate: ChildCertificate;
-  createdAt: number;
-} {
-  return {
-    label: child.label,
-    peerId: child.peerId,
-    publicKeyHex: child.publicKeyHex,
-    certificate: child.certificate,
-    createdAt: child.certificate.issuedAt,
-  };
-}
-
-async function readJson(req: http.IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let received = 0;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    received += buf.length;
-    if (received > MAX_PAYLOAD_BYTES) {
-      throw new PayloadTooLargeError(received, MAX_PAYLOAD_BYTES);
-    }
-    chunks.push(buf);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw.trim()) {
-    return {};
-  }
-  validatePayloadSize(raw, MAX_PAYLOAD_BYTES);
-  validateJsonNestingDepth(raw);
-  const parsed: unknown = JSON.parse(raw);
-  validateObjectDepth(parsed);
-  return parsed;
-}
-
-/** Safe charset for a skill name (e.g. `core.ai.generateText`). */
-const GOVERNANCE_SKILL_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
-/** Safe charset for an exposed event topic (e.g. `paint:canvasCreated`). */
-const GOVERNANCE_TOPIC_RE = /^[a-zA-Z0-9][a-zA-Z0-9:._-]*$/;
-
-/** Extract a valid 64-hex peerId from a governance bridge payload, or null. */
-function asGovernancePeerId(payload: unknown): string | null {
-  const raw = (payload ?? {}) as { peerId?: unknown };
-  return typeof raw.peerId === "string" && GOVERNANCE_PEER_ID_RE.test(raw.peerId)
-    ? raw.peerId
-    : null;
-}
-
-/**
- * Parse and shape the `/permissions` (and `governance-ui.registerSkills`)
- * payload. `skills`/`topics` default to `[]` (omitting them clears the peer's
- * lists — explicit, not accidental); `customRateLimit` is passed through and
- * validated against {@link ABSOLUTE_MAX_RATE_LIMIT} by the matrix store, which
- * throws {@link InvalidRateLimitError} above the cap. Every listed skill/topic
- * is additionally validated against the manifest-exposed catalog by the store
- * (the intersection invariant), surfacing as {@link AccessDeniedError}.
- */
-function parseGovernancePermissionsSpec(
-  body: unknown,
-  peerId: string,
-): {
-  peerId: string;
-  skills: string[];
-  topics: string[];
-  customRateLimit?: number;
-} {
-  const raw = (body ?? {}) as Record<string, unknown>;
-  const skills = raw.skills === undefined ? [] : raw.skills;
-  const topics = raw.topics === undefined ? [] : raw.topics;
-  if (
-    !Array.isArray(skills) ||
-    !Array.isArray(topics) ||
-    !skills.every(
-      (s) => typeof s === "string" && GOVERNANCE_SKILL_RE.test(s),
-    ) ||
-    !topics.every(
-      (t) => typeof t === "string" && GOVERNANCE_TOPIC_RE.test(t),
-    )
-  ) {
-    throw new Error(
-      "permissions expects { skills: string[], topics: string[], customRateLimit?: number }",
+  /**
+   * Authorize an HTTP `/api/*` request via the `Authorization` header only.
+   * A `?token=` query string on an API request would put the boot token in
+   * server access logs, browser history and any reverse-proxy logs. The query
+   * string remains the *only* accepted path for `/ws` (see {@link isAuthorizedWs}),
+   * where the browser WebSocket API forces it.
+   */
+  private isAuthorized(req: http.IncomingMessage): boolean {
+    return safeTokenEqual(
+      tokenFromAuthorization(req.headers.authorization),
+      this.bootToken,
     );
   }
-  let customRateLimit: number | undefined;
-  if (raw.customRateLimit !== undefined) {
-    if (typeof raw.customRateLimit !== "number") {
-      throw new Error("customRateLimit must be a number");
-    }
-    customRateLimit = raw.customRateLimit;
+
+  /**
+   * Authorize a `/ws` upgrade via the `Authorization` header or `?token=`
+   * query string. The query string is accepted here only because the browser
+   * WebSocket API cannot attach custom headers to the handshake (see CLAUDE.md
+   * "Accepted risk").
+   */
+  private isAuthorizedWs(req: http.IncomingMessage): boolean {
+    return (
+      safeTokenEqual(
+        tokenFromAuthorization(req.headers.authorization),
+        this.bootToken,
+      ) ||
+      safeTokenEqual(tokenFromQuery(req), this.bootToken)
+    );
   }
-  return { peerId, skills, topics, customRateLimit };
+
+  /** Broadcast an event to every connected WebSocket activity client. */
+  private broadcast(event: string, payload: unknown): void {
+    this.wsBus?.broadcast(event, payload);
+  }
 }
