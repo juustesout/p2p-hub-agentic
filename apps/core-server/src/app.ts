@@ -265,6 +265,15 @@ export class CoreServer {
     return null;
   }
 
+  /**
+   * The per-boot token guarding `/api/*` and `/ws`, or `""` before `start()`.
+   * Exposed so the sidecar host can report it out-of-band (the `[P2P_HUB_READY]`
+   * stdout handshake) without reaching into the bridge's internals.
+   */
+  getBootToken(): string {
+    return this.bootToken;
+  }
+
   async stop(): Promise<void> {
     this.instanceLock?.release();
     this.instanceLock = null;

@@ -5,8 +5,14 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use serde::Deserialize;
+use serde::Serialize;
+use tauri::Manager;
+use tauri::State;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+
+mod sidecar;
 
 /// A native tier-2 confirmation request. Mirrors the `ConfirmationRequest`
 /// discriminated union in `@p2p-hub/core`; the `kind` tag selects which dialog
@@ -168,6 +174,43 @@ fn prompt_for(request: &ConfirmationRequest) -> (String, String) {
     }
 }
 
+/// Resolved backend coordinates handed to the frontend by
+/// `get_backend_config`: the core-server's actual bound port (OS-assigned,
+/// because the sidecar runs with `P2P_HUB_PORT=0`) and the per-boot token that
+/// guards `/api/*` and `/ws`. The token travels the same out-of-band channel
+/// family as `get_boot_token` — it is never exposed over HTTP.
+#[derive(Clone, Serialize)]
+struct BackendConfig {
+    port: u16,
+    token: String,
+}
+
+/// Owns the live core-server sidecar child. `None` means the sidecar failed to
+/// boot; dropping the state (on app exit) kills the child via
+/// [`sidecar::SidecarHandle`]'s `Drop`.
+struct SidecarState(Mutex<Option<sidecar::SidecarHandle>>);
+
+/// Return the core-server's bound port + boot token as reported by the
+/// `[P2P_HUB_READY]` stdout handshake. This is the frontend's entry point for
+/// the backend address; it replaces hard-coded `localhost:8787` assumptions.
+#[tauri::command]
+fn get_backend_config(state: State<SidecarState>) -> Result<BackendConfig, String> {
+    let guard = state
+        .0
+        .lock()
+        .map_err(|_| "sidecar state poisoned".to_string())?;
+    match guard.as_ref().and_then(|h| {
+        let config = h.config();
+        Some(BackendConfig {
+            port: config.port,
+            token: config.token.clone(),
+        })
+    }) {
+        Some(config) => Ok(config),
+        None => Err("core server is not ready".to_string()),
+    }
+}
+
 /// Return the per-boot token the core-server writes to `<data-dir>/boot-token`.
 /// The frontend sends it as an `Authorization` header on `/api/*` requests and
 /// a `?token=` query on the `/ws` upgrade; the token is never exposed over the
@@ -176,11 +219,7 @@ fn prompt_for(request: &ConfirmationRequest) -> (String, String) {
 fn get_boot_token() -> Result<String, String> {
     let data_dir = match std::env::var("P2P_HUB_DATA_DIR") {
         Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => {
-            let home =
-                std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".p2p-hub")
-        }
+        _ => sidecar::default_data_dir(),
     };
     fs::read_to_string(data_dir.join("boot-token"))
         .map(|s| s.trim().to_string())
@@ -221,8 +260,25 @@ fn request_tier2_confirmation(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // Boot the core-server sidecar before the window is shown so the
+            // frontend's first `get_backend_config` call always finds a config.
+            // A boot failure is loud (stderr) and leaves the state `None`; the
+            // frontend then reports the backend as offline instead of crashing.
+            let data_dir = sidecar::default_data_dir();
+            let state = match sidecar::spawn_core_sidecar(Some(data_dir)) {
+                Ok(handle) => SidecarState(Mutex::new(Some(handle))),
+                Err(err) => {
+                    eprintln!("[p2p-hub-shell] core sidecar failed to start: {err}");
+                    SidecarState(Mutex::new(None))
+                }
+            };
+            app.manage(state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_boot_token,
+            get_backend_config,
             request_tier2_confirmation
         ])
         .run(tauri::generate_context!())

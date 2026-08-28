@@ -10,16 +10,36 @@ import type {
   VaultModelInfo,
 } from "../types";
 
-const WS_PATH = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
-
-type StateListener = (state: ConnectionState) => void;
-type EventListener = (event: ActivityEvent) => void;
-
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const DEGRADED_RTT_MS = 1_500;
 const MAX_BACKOFF_MS = 10_000;
 
+type StateListener = (state: ConnectionState) => void;
+type EventListener = (event: ActivityEvent) => void;
+
 let cachedBootToken: string | null | undefined;
+
+interface BackendConfig {
+  /** Origin for `/api/*` fetches, e.g. `http://127.0.0.1:44619`. */
+  baseUrl: string;
+  /** Origin for the `/ws` WebSocket, e.g. `ws://127.0.0.1:44619`. */
+  wsUrl: string;
+  /**
+   * Per-boot token from the sidecar handshake, or `null` when the shell did not
+   * supply one (plain-browser dev then falls back to `resolveBootToken`).
+   */
+  token: string | null;
+}
+
+let cachedBackendConfig: BackendConfig | undefined;
+
+/**
+ * Test-only hook: drop the cached backend config so the next
+ * {@link resolveBackendConfig} re-resolves (Tauri command, then same-origin).
+ */
+export function __resetBackendConfigCache(): void {
+  cachedBackendConfig = undefined;
+}
 
 /**
  * Test-only hook: drop the cached boot token so the next {@link resolveBootToken}
@@ -27,6 +47,55 @@ let cachedBootToken: string | null | undefined;
  */
 export function __resetBootTokenCache(): void {
   cachedBootToken = undefined;
+}
+
+/**
+ * Resolve where the core-server actually is.
+ *
+ * Under Tauri the Rust shell spawns the core-server as a sidecar on an
+ * OS-assigned port and reports `{port, token}` out-of-band (the
+ * `[P2P_HUB_READY]` stdout handshake → `get_backend_config` command), so the
+ * frontend must NOT assume `location.host` or a hard-coded port. In a plain
+ * browser (dev/preview) the Vite proxy forwards the app's own origin to the
+ * core-server, so `location.host` is correct there.
+ */
+async function resolveBackendConfig(): Promise<BackendConfig> {
+  if (cachedBackendConfig !== undefined) {
+    return cachedBackendConfig;
+  }
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const cfg = await invoke<{ port?: number; token?: string }>(
+      "get_backend_config",
+    );
+    if (cfg && Number.isInteger(cfg.port) && (cfg.port as number) > 0) {
+      cachedBackendConfig = {
+        baseUrl: `http://127.0.0.1:${cfg.port}`,
+        wsUrl: `ws://127.0.0.1:${cfg.port}`,
+        token: cfg.token ?? null,
+      };
+      return cachedBackendConfig;
+    }
+  } catch {
+    // Not running under Tauri, or the sidecar is not up yet.
+  }
+  const scheme = location.protocol === "https:" ? "https" : "http";
+  const wsScheme = location.protocol === "https:" ? "wss" : "ws";
+  cachedBackendConfig = {
+    baseUrl: `${scheme}://${location.host}`,
+    wsUrl: `${wsScheme}://${location.host}`,
+    token: null,
+  };
+  return cachedBackendConfig;
+}
+
+/**
+ * The core-server origin as an HTTP URL — the base every `/api/*` call and
+ * every plugin-UI iframe shares. Shares the backend-config cache, so it reflects
+ * the sidecar's OS-assigned port once resolved.
+ */
+export async function resolveCoreOrigin(): Promise<string> {
+  return (await resolveBackendConfig()).baseUrl;
 }
 
 /**
@@ -152,12 +221,13 @@ export class CoreBridge {
     requiredTier?: number;
     error?: string;
   }> {
-    const token = await resolveBootToken();
+    const backend = await resolveBackendConfig();
+    const token = backend.token ?? (await resolveBootToken());
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
-    const res = await fetch("/api/settings/apply", {
+    const res = await fetch(backend.baseUrl + "/api/settings/apply", {
       method: "POST",
       headers,
       body: JSON.stringify(settings),
@@ -185,8 +255,11 @@ export class CoreBridge {
       return;
     }
     this.setState("reconnecting");
-    const token = await resolveBootToken();
-    const wsUrl = token ? `${WS_PATH}?token=${encodeURIComponent(token)}` : WS_PATH;
+    const backend = await resolveBackendConfig();
+    const token = backend.token ?? (await resolveBootToken());
+    const wsUrl = token
+      ? `${backend.wsUrl}/ws?token=${encodeURIComponent(token)}`
+      : `${backend.wsUrl}/ws`;
     this.socket = new WebSocket(wsUrl);
 
     this.socket.onopen = () => {
@@ -291,12 +364,13 @@ export class CoreBridge {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const token = await resolveBootToken();
+    const backend = await resolveBackendConfig();
+    const token = backend.token ?? (await resolveBootToken());
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
-    const res = await fetch(path, {
+    const res = await fetch(backend.baseUrl + path, {
       ...init,
       headers: {
         ...headers,

@@ -80,13 +80,18 @@ export function parseBoolEnv(
   return fallback;
 }
 
-/** Parse a port from an env value, or `null` when absent/invalid. */
+/**
+ * Parse a port from an env value, or `null` when absent/invalid. `0` is valid
+ * and means "let the OS assign a free port" (used by the desktop sidecar: the
+ * core-server reports the actually-bound port over the `[P2P_HUB_READY]`
+ * handshake). Negative values and values above 65535 are rejected.
+ */
 function parsePort(value: string | undefined): number | null {
   if (value === undefined || value.trim() === "") {
     return null;
   }
   const n = Number(value);
-  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+  return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : null;
 }
 
 /** First valid port in a fallback chain, else `fallback`. */

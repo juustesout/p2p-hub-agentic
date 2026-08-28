@@ -1,5 +1,5 @@
 import type { TaskResult } from "../types";
-import { coreBridge } from "./core-bridge";
+import { coreBridge, resolveCoreOrigin } from "./core-bridge";
 
 interface InboundCall {
   source: "p2p-hub-plugin";
@@ -15,15 +15,40 @@ interface OutboundResult extends TaskResult {
   requestId: string;
 }
 
+const explicitCoreOrigin = (
+  import.meta as unknown as { env?: { VITE_CORE_ORIGIN?: string } }
+).env?.VITE_CORE_ORIGIN;
+
 /**
  * Origin the plugin UI iframes are loaded from. The core-server is reached
  * directly (never through the shell's own origin): keeping the iframe
  * cross-origin with the shell means a sandboxed plugin UI can never reach the
  * shell DOM, and `event.origin` stays an exact, verifiable value.
+ *
+ * `let`, not `const`: under the desktop shell the core-server runs as a sidecar
+ * on an OS-assigned port, so this origin is synchronized to the resolved
+ * backend base once `get_backend_config` reports it (see {@link syncCoreOrigin}).
+ * An explicit `VITE_CORE_ORIGIN` build-time override always wins and disables
+ * the sync.
  */
-export const CORE_ORIGIN =
-  (import.meta as unknown as { env?: { VITE_CORE_ORIGIN?: string } }).env
-    ?.VITE_CORE_ORIGIN ?? "http://127.0.0.1:8787";
+export let CORE_ORIGIN = explicitCoreOrigin ?? "http://127.0.0.1:8787";
+
+let coreOriginSynced = false;
+
+/** Resolve the sidecar's real origin once, at module load, unless overridden. */
+async function syncCoreOrigin(): Promise<void> {
+  if (coreOriginSynced || explicitCoreOrigin) {
+    return;
+  }
+  coreOriginSynced = true;
+  try {
+    CORE_ORIGIN = await resolveCoreOrigin();
+  } catch {
+    // Keep the dev default; the bridge will surface an offline state.
+  }
+}
+
+void syncCoreOrigin();
 
 /**
  * The iframe URL for a plugin's bundled UI. Deliberately carries NO query

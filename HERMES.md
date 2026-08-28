@@ -11,13 +11,19 @@ gotcha yourself.
 (TypeScript, npm workspaces). Plugins are loaded by a `PluginHost` in
 `@p2p-hub/core` and exposed through two processes:
 
-- `apps/core-server` — HTTP + WebSocket bridge on `127.0.0.1:8787`.
+- `apps/core-server` — HTTP + WebSocket bridge, default `127.0.0.1:8787`.
 - `apps/desktop-shell` — a Tauri 2 + React shell that is a **thin wrapper**:
   it has almost no logic of its own. Everything it shows comes from the
   core-server over `/api/*` (HTTP) and `/ws` (WebSocket).
 
-Because the shell is a thin wrapper, **you must run the core-server alongside
-it**. The native shell does not start the core-server for you.
+The native Tauri shell **starts the core-server itself** as a *sidecar*: the
+Rust layer spawns `apps/core-server/dist/index.js` with `P2P_HUB_PORT=0` (an
+OS-assigned port) and `P2P_HUB_SIDECAR_READY=1`, waits for the
+`[P2P_HUB_READY] {"port":…,"token":"…"}` stdout handshake, and hands those
+coordinates to the frontend via the `get_backend_config` Tauri command. The
+shell does not need a separately started core-server. Plain-browser dev mode is
+the exception: there is no Rust host, so you still start the core-server first
+and Vite proxies to it.
 
 ## Prerequisites (Windows)
 
@@ -56,39 +62,40 @@ Expect all workspaces green (historically 378 tests, 0 failures). One harmless
 log line `[hooks] action handler for "demo:event" failed: Error: boom` is a
 deliberate test artifact.
 
-## Run — two processes
+## Run
 
-### 1. Start the core-server first
+### Browser/dev mode (Vite on `:5173`) — still two processes
 
 ```sh
+# 1. Start the core-server first
 node apps/core-server/dist/index.js
 ```
 
-- Listens on `127.0.0.1:8787` by default (`P2P_HUB_PORT` overrides).
+- Listens on `127.0.0.1:8787` by default (`P2P_HUB_PORT` overrides; `0` lets the
+  OS assign a port).
 - On boot it writes a per-boot token to `<data-dir>/boot-token`.
 - Default data dir is `~/.p2p-hub` (`P2P_HUB_DATA_DIR` overrides).
 - It auto-resolves the plugins dir from the monorepo (`plugins/`), so plugins
   are picked up from the compiled `dist/` of each plugin.
 
-### 2. Then start the shell
-
-Browser/dev mode (no native window, Vite on `:5173`):
-
 ```sh
+# 2. Then start the shell
 cd apps/desktop-shell && npm run dev
 ```
 
 This runs `build:core` + the core-server + Vite concurrently, and Vite proxies
 `/api` and `/ws` to `127.0.0.1:8787`.
 
-Native Tauri shell:
+### Native Tauri shell — one process (sidecar)
 
 ```sh
 cd apps/desktop-shell/src-tauri && cargo tauri dev
 ```
 
 `beforeDevCommand` runs `npm run ui` (Vite), and `devUrl` points at
-`http://localhost:5173`. Start the core-server yourself first.
+`http://localhost:5173`. The Rust host spawns the core-server sidecar itself
+and the frontend learns the real port + token from `get_backend_config` — do
+NOT start a second core-server on `8787` manually (the sidecar uses port 0).
 
 ## Things to watch out for (gotchas)
 
@@ -110,11 +117,16 @@ them.
    will not exist.
 
 4. **Boot token.** Every `/api/*` request and `/ws` upgrade needs the per-boot
-   token. The native shell reads it out-of-band via the `get_boot_token` Tauri
-   command from `<data-dir>/boot-token`. In plain-browser dev mode (no Tauri),
-   the frontend falls back to `VITE_P2P_HUB_TOKEN`. If `/api/capabilities`
-   returns 401, the core-server was not started first or the data dirs differ
-   (`P2P_HUB_DATA_DIR` must match in both processes).
+   token. The native shell gets it out-of-band: the sidecar reports
+   `{port, token}` over the `[P2P_HUB_READY]` stdout handshake, which the Rust
+   host serves to the frontend via `get_backend_config` (the token also lands in
+   `<data-dir>/boot-token`, read by the legacy `get_boot_token` command). In
+   plain-browser dev mode (no Tauri), the frontend falls back to
+   `VITE_P2P_HUB_TOKEN`. If `/api/capabilities` returns 401, the token is
+   missing or the data dirs differ (`P2P_HUB_DATA_DIR` must match in both
+   processes). Never put the token on a shell's stdout unless the sidecar flag
+   `P2P_HUB_SIDECAR_READY=1` is set — that gate is what keeps a plain terminal
+   run from leaking it into an unwatched log.
 
 5. **Do not bind non-loopback casually.** The bridge is token-guarded but binds
    to `127.0.0.1` by default. Setting `P2P_HUB_HOST=0.0.0.0` alone is refused;

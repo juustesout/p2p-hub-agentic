@@ -42,7 +42,15 @@ test("HTTP port: P2P_HUB_PORT wins, then PORT, then the default", () => {
   assert.equal(cfg({}).port, DEFAULT_HTTP_PORT);
   // An invalid value falls through to the next in the chain.
   assert.equal(cfg({ P2P_HUB_PORT: "abc", PORT: "9001" }).port, 9001);
-  assert.equal(cfg({ P2P_HUB_PORT: "0", PORT: "9001" }).port, 9001);
+});
+
+test("HTTP port: 0 requests an OS-assigned port (desktop sidecar handshake)", () => {
+  assert.equal(cfg({ P2P_HUB_PORT: "0" }).port, 0);
+  assert.equal(
+    cfg({ P2P_HUB_PORT: "0", PORT: "9001" }).port,
+    0,
+    "an explicit 0 must win over the PORT fallback",
+  );
 });
 
 test("P2P port: P2P_HUB_P2P_PORT wins, then P2P_PORT, then the default", () => {

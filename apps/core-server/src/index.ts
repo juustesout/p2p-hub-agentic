@@ -2,6 +2,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CoreServer } from "./app";
 import { loadConfig } from "./config";
+import {
+  SIDECAR_READY_ENV,
+  sidecarReadyLine,
+} from "./sidecar";
 
 function resolvePluginsDir(): string {
   const fromEnv = process.env.P2P_HUB_PLUGINS_DIR;
@@ -62,11 +66,29 @@ async function main(): Promise<void> {
 
   await server.start();
 
+  // The port reported in the log (and, when gated, the ready handshake) is the
+  // *bound* one — with `P2P_HUB_PORT=0` the OS-assigned port is only known
+  // after `listen()`.
+  const bound = server.address();
+  const boundPort = bound?.port ?? port;
+  const boundHost = bound?.host ?? host;
+
   console.log(
-    `[core-server] listening on http://${host}:${port}` +
+    `[core-server] listening on http://${boundHost}:${boundPort}` +
       (networking ? "" : " (networking disabled: local-only)") +
       (wanEnabled ? " (WAN transport enabled)" : ""),
   );
+
+  // Sidecar handshake (desktop shell): a single machine-readable line on
+  // stdout carrying the bound port + boot token. Gated on the env flag so a
+  // normal terminal run never puts the token on an unwatched stdout. The
+  // prefix is delimiter-anchored in `sidecarReadyLine`; the host scans for the
+  // exact `[P2P_HUB_READY] ` line.
+  if (process.env[SIDECAR_READY_ENV]) {
+    process.stdout.write(
+      sidecarReadyLine({ port: boundPort, token: server.getBootToken() }) + "\n",
+    );
+  }
 
   const shutdown = async () => {
     await server.stop();

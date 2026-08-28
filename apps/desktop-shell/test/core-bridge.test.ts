@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import "./test-globals";
 import { __tauri } from "./stubs/tauri-core";
-import { CoreBridge, __resetBootTokenCache } from "../src/services/core-bridge";
+import { CoreBridge, __resetBackendConfigCache, __resetBootTokenCache } from "../src/services/core-bridge";
 import type { ExecuteRequest } from "../src/types";
 
 interface CapturedRequest {
@@ -34,6 +34,7 @@ describe("core-bridge", () => {
     bridge = new CoreBridge();
     fetchCalls = [];
     __resetBootTokenCache();
+    __resetBackendConfigCache();
     __tauri.invoke = async () => {
       throw new Error("not stubbed");
     };
@@ -67,7 +68,7 @@ describe("core-bridge", () => {
     await bridge.execute(request);
 
     assert.equal(fetchCalls.length, 1);
-    assert.equal(fetchCalls[0].url, "/api/execute");
+    assert.equal(fetchCalls[0].url, "http://127.0.0.1:8787/api/execute");
     assert.equal(fetchCalls[0].init?.method, "POST");
     const headers = fetchCalls[0].init?.headers as Record<string, string>;
     assert.equal(headers.Authorization, "Bearer boot-token-abc");
@@ -86,6 +87,57 @@ describe("core-bridge", () => {
     assert.equal(fetchCalls.length, 1);
     const headers = fetchCalls[0].init?.headers as Record<string, string>;
     assert.equal(headers.Authorization, undefined);
+  });
+
+  it("uses the sidecar's OS-assigned port and token from get_backend_config", async () => {
+    // The Rust shell spawns the core-server on an ephemeral port and reports
+    // {port, token} via get_backend_config — the frontend must follow that
+    // instead of assuming location.host.
+    __tauri.invoke = async (command: string) =>
+      command === "get_backend_config"
+        ? { port: 44619, token: "boot-token-abc" }
+        : undefined;
+
+    bridge.connect();
+    await tick();
+
+    const instances = stubWebSocketInstances();
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].url, "ws://127.0.0.1:44619/ws?token=boot-token-abc");
+  });
+
+  it("targets API calls at the sidecar-provided port with its token", async () => {
+    __tauri.invoke = async (command: string) =>
+      command === "get_backend_config"
+        ? { port: 44619, token: "boot-token-abc" }
+        : undefined;
+    const request: ExecuteRequest = {
+      serviceId: "notes",
+      method: "save",
+      requestId: "req-1",
+      arguments: { text: "hello" },
+    };
+
+    await bridge.execute(request);
+
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, "http://127.0.0.1:44619/api/execute");
+    const headers = fetchCalls[0].init?.headers as Record<string, string>;
+    assert.equal(headers.Authorization, "Bearer boot-token-abc");
+  });
+
+  it("rejects a malformed get_backend_config payload and falls back", async () => {
+    // A broken sidecar handshake payload must fail closed to the same-origin
+    // dev proxy, never produce a garbage URL.
+    __tauri.invoke = async (command: string) =>
+      command === "get_backend_config" ? { port: "not-a-port" } : undefined;
+
+    bridge.connect();
+    await tick();
+
+    const instances = stubWebSocketInstances();
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].url, "ws://127.0.0.1:8787/ws");
   });
 
   it("appends the token to the WebSocket query string when one is available", async () => {
