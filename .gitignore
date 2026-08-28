@@ -11,3 +11,6 @@ afwerklijst.md
 apps/desktop-shell/src-tauri/target/
 apps/desktop-shell/src-tauri/gen/
 apps/desktop-shell/src-tauri/Cargo.lock
+
+# SEA sidecar binary (built by `npm run build:sea`, ~120 MiB — never commit it)
+apps/desktop-shell/src-tauri/bin/

@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -106,16 +106,30 @@ impl Drop for SidecarHandle {
     }
 }
 
+/// The name of the SEA sidecar binary produced by `npm run build:sea`.
+///
+/// It is what Tauri's `bundle.externalBin` bundles next to the app executable
+/// in a release bundle, and also the name the dev build drops into
+/// `src-tauri/bin/` (triple-suffixed). Deliberately not the shell's own name:
+/// the binary IS the core-server, not a second copy of the shell.
+const SEA_BIN_NAME: &str = "p2p-hub-core";
+
 /// Resolve the program + arguments that start the core-server.
 ///
 /// Resolution order:
-///   1. `P2P_HUB_CORE_BIN` env var — an explicit override. This is also the
-///      future Single-Executable-Application path (a node-wrapped binary set
-///      here); packaging that SEA is a documented open follow-up, not built in
-///      this slice.
-///   2. Dev layouts: `node <repo>/core-server/dist/index.js`, discovered from
-///      the shell executable's own directory (and the process cwd as a
-///      fallback). This mirrors the pre-sidecar `npm run dev` flow.
+///   1. `P2P_HUB_CORE_BIN` env var — an explicit override. This is the escape
+///      hatch for anything the built-in search misses (a manually placed
+///      binary, a remote/debug build, a script, …).
+///   2. In **release** builds: the Single Executable Application binary
+///      (`p2p-hub-core`) produced by `npm run build:sea` and bundled by Tauri
+///      (`bundle.externalBin`). A shipped desktop app has no Node — the SEA
+///      binary is the only thing that can run there. The node-script dev
+///      layouts below remain a fallback so a release binary still boots on a
+///      machine that has the monorepo checked out.
+///   3. In **debug** builds: the dev layouts (`node <repo>/core-server/dist/
+///      index.js`), which are always current after `npm run build`. The SEA
+///      binary is accepted as a fallback so `cargo tauri dev` after a
+///      `build:sea` works the same way.
 pub fn resolve_core_command() -> Result<(String, Vec<String>), String> {
     if let Ok(bin) = std::env::var("P2P_HUB_CORE_BIN") {
         if !bin.is_empty() {
@@ -123,9 +137,17 @@ pub fn resolve_core_command() -> Result<(String, Vec<String>), String> {
         }
     }
 
+    let mut sea: Vec<PathBuf> = Vec::new();
     let mut scripts: Vec<PathBuf> = Vec::new();
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
+            sea.extend(find_sea_binary_in(exe_dir));
+            // Bundled resources layout (Tauri `resources`, macOS Contents/Resources).
+            sea.extend(find_sea_binary_in(&exe_dir.join("../resources")));
+            // Dev build output: <shell>/src-tauri/bin/<p2p-hub-core-<triple>>.
+            sea.extend(find_sea_binary_in(&exe_dir.join("../../bin")));
+
             // <shell>/src-tauri/target/debug/p2p-hub-shell -> <repo>/core-server/dist/index.js
             scripts.push(exe_dir.join("../../../../core-server/dist/index.js"));
             // cargo test binary: target/debug/deps/... -> one level deeper
@@ -141,20 +163,88 @@ pub fn resolve_core_command() -> Result<(String, Vec<String>), String> {
         scripts.push(cwd.join("core-server/dist/index.js"));
     }
 
-    for script in &scripts {
-        if script.exists() {
-            return Ok(("node".to_string(), vec![script.display().to_string()]));
+    let mut attempts: Vec<String> = Vec::new();
+
+    match pick_entrypoint(&sea, &scripts, cfg!(debug_assertions)) {
+        Some(command) => Ok(command),
+        None => {
+            attempts.extend(
+                sea.iter()
+                    .map(|p| format!("SEA candidate (not present): {}", p.display()))
+                    .chain(
+                        scripts.iter().map(|p| {
+                            format!("node script candidate (not present): {}", p.display())
+                        }),
+                    ),
+            );
+            Err(format!(
+                "no core-server entrypoint found (set P2P_HUB_CORE_BIN); tried: {}",
+                attempts.join("; ")
+            ))
         }
     }
+}
 
-    Err(format!(
-        "no core-server entrypoint found (set P2P_HUB_CORE_BIN); tried: {}",
+/// Given the discovered SEA binaries and node-script layouts, pick the command
+/// that boots the core-server.
+///
+/// `release` mirrors `cfg!(debug_assertions)` at the call site:
+/// * **release** — the SEA binary wins (a shipped app has no Node); the node
+///   script remains a fallback so a release binary still boots on a dev
+///   machine with the monorepo checked out.
+/// * **debug** — the node script wins (always current after `npm run build`);
+///   the SEA binary is the fallback so `cargo tauri dev` against a built
+///   binary behaves like release.
+fn pick_entrypoint(
+    sea: &[PathBuf],
+    scripts: &[PathBuf],
+    release: bool,
+) -> Option<(String, Vec<String>)> {
+    let sea_cmd = || {
+        sea.iter()
+            .find(|bin| bin.exists())
+            .map(|bin| (bin.display().to_string(), Vec::new()))
+    };
+    let script_cmd = || {
         scripts
             .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
+            .find(|p| p.exists())
+            .map(|script| ("node".to_string(), vec![script.display().to_string()]))
+    };
+    if release {
+        sea_cmd().or_else(script_cmd)
+    } else {
+        script_cmd().or_else(sea_cmd)
+    }
+}
+
+/// Look for a runnable `p2p-hub-core` binary inside `dir`.
+///
+/// Prefers the bare Tauri-bundled name (`p2p-hub-core[.exe]`), then any
+/// `p2p-hub-core*` file in the directory (the SEA build writes the
+/// triple-suffixed `p2p-hub-core-<target-triple>` name into `src-tauri/bin/`;
+/// scanning for the prefix avoids baking every target-triple into Rust).
+fn find_sea_binary_in(dir: &Path) -> Vec<PathBuf> {
+    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
+    let bare = dir.join(format!("{SEA_BIN_NAME}{exe_ext}"));
+    if bare.exists() {
+        return vec![bare];
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(SEA_BIN_NAME))
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 /// Environment for the sidecar child: inherit the parent's `P2P_HUB_*`
@@ -398,5 +488,150 @@ mod tests {
         assert_eq!(env.get("P2P_HUB_PORT").map(String::as_str), Some("0"));
         assert_eq!(env.get("P2P_HUB_SIDECAR_READY").map(String::as_str), Some("1"));
         assert!(!env.contains_key("P2P_HUB_SIDECAR_READY") || env["P2P_HUB_SIDECAR_READY"] == "1");
+    }
+
+    // ------------------------------------------------------------------
+    // SEA binary resolution
+    // ------------------------------------------------------------------
+
+    fn temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "p2p-hub-sidecar-test-{}-{name}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn sea_binary_search_prefers_the_bare_tauri_name_over_the_triple_name() {
+        let dir = temp_dir("prefers-bare");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let bare = dir.join("p2p-hub-core");
+        let triple = dir.join("p2p-hub-core-x86_64-unknown-linux-gnu");
+        std::fs::write(&bare, "").expect("write bare");
+        std::fs::write(&triple, "").expect("write triple");
+
+        let found = find_sea_binary_in(&dir);
+        assert_eq!(
+            found.first().map(|p| p.file_name().unwrap().to_str().unwrap()),
+            Some("p2p-hub-core"),
+            "the Tauri-bundled bare name must win over the triple-suffixed dev copy"
+        );
+    }
+
+    #[test]
+    fn sea_binary_search_falls_back_to_the_triple_suffixed_dev_copy() {
+        let dir = temp_dir("triple-fallback");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let triple = dir.join("p2p-hub-core-aarch64-apple-darwin");
+        std::fs::write(&triple, "").expect("write triple");
+
+        let found = find_sea_binary_in(&dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].file_name().unwrap().to_str().unwrap(),
+            "p2p-hub-core-aarch64-apple-darwin"
+        );
+    }
+
+    #[test]
+    fn sea_binary_search_ignores_unrelated_files() {
+        let dir = temp_dir("ignores-unrelated");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        // A sibling binary that happens to live in the same dir must NOT be
+        // picked up — only the p2p-hub-core family is a valid core-server.
+        std::fs::write(dir.join("other-tool"), "").expect("write other");
+        std::fs::write(dir.join("p2p-hub-core"), "").expect("write core");
+
+        let found = find_sea_binary_in(&dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].file_name().unwrap().to_str().unwrap(),
+            "p2p-hub-core"
+        );
+    }
+
+    #[test]
+    fn sea_binary_search_is_empty_for_a_dir_without_a_binary() {
+        let dir = temp_dir("no-binary");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        assert!(find_sea_binary_in(&dir).is_empty());
+        // A missing dir is the same as an empty one — never an error.
+        assert!(find_sea_binary_in(&dir.join("does-not-exist")).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // entrypoint selection (release vs debug profile)
+    // ------------------------------------------------------------------
+
+    fn named(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "").expect("write fixture");
+        p
+    }
+
+    #[test]
+    fn release_prefers_the_sea_binary_over_a_present_node_script() {
+        let dir = temp_dir("release-prefers-sea");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let sea = vec![named(&dir, "p2p-hub-core")];
+        let scripts = vec![named(&dir, "index.js")];
+
+        let (program, args) = pick_entrypoint(&sea, &scripts, true).unwrap();
+        assert_eq!(program, sea[0].display().to_string());
+        assert!(args.is_empty(), "a SEA binary takes no arguments");
+    }
+
+    #[test]
+    fn release_falls_back_to_the_node_script_when_no_sea_binary_exists() {
+        let dir = temp_dir("release-fallback-script");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let script = named(&dir, "index.js");
+
+        let (program, args) = pick_entrypoint(&[], &vec![script.clone()], true).unwrap();
+        assert_eq!(program, "node");
+        assert_eq!(args, vec![script.display().to_string()]);
+    }
+
+    #[test]
+    fn debug_prefers_the_node_script_over_a_present_sea_binary() {
+        let dir = temp_dir("debug-prefers-script");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let sea = vec![named(&dir, "p2p-hub-core")];
+        let scripts = vec![named(&dir, "index.js")];
+
+        let (program, args) = pick_entrypoint(&sea, &scripts, false).unwrap();
+        assert_eq!(program, "node");
+        assert_eq!(args, vec![scripts[0].display().to_string()]);
+    }
+
+    #[test]
+    fn debug_falls_back_to_the_sea_binary_when_no_node_script_exists() {
+        let dir = temp_dir("debug-fallback-sea");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let sea = vec![named(&dir, "p2p-hub-core")];
+
+        let (program, args) = pick_entrypoint(&sea, &[], false).unwrap();
+        assert_eq!(program, sea[0].display().to_string());
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn both_profiles_fail_closed_when_nothing_is_found() {
+        let dir = temp_dir("nothing-found");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let missing = vec![dir.join("does-not-exist")];
+        assert!(pick_entrypoint(&missing, &missing, true).is_none());
+        assert!(pick_entrypoint(&missing, &missing, false).is_none());
+    }
+
+    #[test]
+    fn a_missing_node_script_is_skipped_in_favor_of_the_next_candidate() {
+        let dir = temp_dir("skip-missing-script");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let present = named(&dir, "present.js");
+        let scripts = vec![dir.join("missing.js"), present.clone()];
+
+        let (_program, args) = pick_entrypoint(&[], &scripts, false).unwrap();
+        assert_eq!(args, vec![present.display().to_string()]);
     }
 }

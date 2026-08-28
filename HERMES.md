@@ -17,13 +17,33 @@ gotcha yourself.
   core-server over `/api/*` (HTTP) and `/ws` (WebSocket).
 
 The native Tauri shell **starts the core-server itself** as a *sidecar*: the
-Rust layer spawns `apps/core-server/dist/index.js` with `P2P_HUB_PORT=0` (an
-OS-assigned port) and `P2P_HUB_SIDECAR_READY=1`, waits for the
+Rust layer spawns the core-server with `P2P_HUB_PORT=0` (an OS-assigned port)
+and `P2P_HUB_SIDECAR_READY=1`, waits for the
 `[P2P_HUB_READY] {"port":…,"token":"…","state":"locked"|"ready"}` stdout
 handshake, and hands those coordinates to the frontend via the
 `get_backend_config` Tauri command. The shell does not need a separately
 started core-server. Plain-browser dev mode is the exception: there is no Rust
 host, so you still start the core-server first and Vite proxies to it.
+
+### Sidecar resolution: SEA binary vs dev layout
+
+`resolve_core_command` (in `src-tauri/src/sidecar.rs`) picks what actually gets
+spawned, in this order:
+
+1. **`P2P_HUB_CORE_BIN`** — explicit override, always wins.
+2. **Release builds**: the Single Executable Application binary
+   `p2p-hub-core` produced by `npm run build:sea` and bundled by Tauri
+   (`bundle.externalBin`). A shipped desktop app has no Node — the SEA binary
+   is the only thing that can run there. The node-script dev layouts below
+   remain a fallback so a release binary still boots on a machine with the
+   monorepo checked out.
+3. **Debug builds**: `node <repo>/core-server/dist/index.js` (always current
+   after `npm run build`), with the SEA binary as the fallback so
+   `cargo tauri dev` against a built binary behaves like release.
+
+The SEA binary is produced by `npm run build:sea` (see below) and must exist
+before `cargo tauri dev` / `tauri build`, because Tauri requires the
+`externalBin` file at build time.
 
 ### Vault lock-gate (Slice 2)
 
@@ -113,6 +133,9 @@ This runs `build:core` + the core-server + Vite concurrently, and Vite proxies
 ### Native Tauri shell — one process (sidecar)
 
 ```sh
+# 1. Build the SEA sidecar binary once (also produces the Tauri externalBin)
+npm run build:sea
+# 2. Run the shell
 cd apps/desktop-shell/src-tauri && cargo tauri dev
 ```
 
@@ -120,6 +143,48 @@ cd apps/desktop-shell/src-tauri && cargo tauri dev
 `http://localhost:5173`. The Rust host spawns the core-server sidecar itself
 and the frontend learns the real port + token from `get_backend_config` — do
 NOT start a second core-server on `8787` manually (the sidecar uses port 0).
+
+### Standalone core-server binary (`p2p-hub-core`, SEA)
+
+`apps/core-server` builds itself into a **Single Executable Application**: a
+single `p2p-hub-core` binary (the Node runtime + the whole core-server + all
+its runtime dependencies inlined) that runs on any glibc Linux / Windows /
+macOS machine **without Node installed**. It is the desktop app's production
+sidecar and the target of the standalone boot tests.
+
+```sh
+# From apps/core-server (or the repo root):
+npm run build:sea     # bundle + SEA blob (V8 code cache) + inject + Tauri copy
+npm run test:sea      # regression suite against the built binary
+```
+
+- **Bundling**: esbuild bundles `src/index.ts` → `dist/bundle.cjs`
+  (CommonJS, Node 22 target, minified). The bundle carries the crypto +
+  native-module prelude: `*.node` requires are never inlined (they ship as
+  files next to the binary; the prelude retries `<bin>/bin/lib`,
+  `<bin>/lib`, `<bin>/bin` and otherwise fails loudly with the module path).
+- **Blob**: `node --experimental-sea-config sea-config.json` → the V8 code
+  cache is generated **at blob-build time** (Node ≥ 21 behavior — there is no
+  "run once to warm the cache" step).
+- **Injection**: `postject` embeds the blob in a copy of `process.execPath`.
+  On macOS the result is re-signed (ad-hoc) because injection invalidates the
+  original signature.
+- **Outputs**:
+  - `apps/core-server/dist/bin/p2p-hub-core[.exe]` — runnable standalone.
+  - `apps/desktop-shell/src-tauri/bin/p2p-hub-core-<target-triple>` — the
+    Tauri `externalBin` copy (gitignored, rebuilt by `build:sea`).
+- The binary reports its version at boot (`[core-server] p2p-hub-core v0.1.0`);
+  standalone (non-Tauri) runs print it too.
+
+Manual standalone smoke (boots a fresh server on an OS-assigned port):
+
+```sh
+P2P_HUB_PORT=0 P2P_HUB_SIDECAR_READY=1 ./apps/core-server/dist/bin/p2p-hub-core
+```
+
+With no monorepo `plugins/` present the binary falls back to
+`<dataDir>/plugins` (created empty, with a warning) instead of failing to
+boot; `P2P_HUB_PLUGINS_DIR` pointing at a missing dir still fails loudly.
 
 ### Systray, OS notifications & window lifecycle (Slice 2)
 
@@ -227,6 +292,22 @@ them.
 
 14. **`docs/journey/` stays untracked; `docs/wiki/` is never created.** Do not
     `git add` the journey notes, and do not invent a wiki directory.
+
+15. **Sandboxed plugin loading is unavailable under the SEA binary.** The
+    Fase-3 process sandbox (`core/src/sandbox/launcher.ts`) spawns
+    `process.execPath`; inside a SEA binary that path IS the binary, so
+    a sandboxed plugin would "spawn the whole core-server again". The SEA
+    binary therefore loads plugins in-process only, and — with no bundled
+    plugins dir — normally loads none. Bundled/on-disk plugins under SEA are a
+    future packaging step; `P2P_HUB_PLUGINS_DIR` remains the escape hatch for
+    pointing at real plugin dirs, in which case plugins load via the in-process
+    loader (the sandbox path never activates).
+
+16. **The SEA binary is large (~120 MiB) and gitignored.** `dist/bin/` and
+    `src-tauri/bin/` are build artifacts — never commit them. `build:sea`
+    always regenerates them from the current bundle; if a test or the Tauri
+    build complains about a missing `p2p-hub-core-<triple>`, run `npm run
+    build:sea` first.
 
 ## Quick sanity checklist before reporting "it works"
 

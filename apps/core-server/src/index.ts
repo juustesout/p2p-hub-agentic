@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CoreServer } from "./app";
@@ -7,6 +8,15 @@ import {
   sidecarReadyLine,
 } from "./sidecar";
 
+// The SEA build stamps the version via an esbuild `define`; a plain tsc build
+// (dev flow) has no such define, so `typeof` falls back to a dev marker. Using
+// `typeof` keeps this safe on the identifier being absent entirely.
+declare const __P2P_HUB_CORE_VERSION__: string;
+const coreVersion =
+  typeof __P2P_HUB_CORE_VERSION__ !== "undefined"
+    ? __P2P_HUB_CORE_VERSION__
+    : "0.0.0-dev";
+
 function resolvePluginsDir(): string {
   const fromEnv = process.env.P2P_HUB_PLUGINS_DIR;
   if (fromEnv) {
@@ -14,7 +24,14 @@ function resolvePluginsDir(): string {
   }
   // In the monorepo the compiled server lives at apps/core-server/dist, so
   // the repo's `plugins/` directory is three levels up.
-  return path.resolve(__dirname, "../../../plugins");
+  const monorepo = path.resolve(__dirname, "../../../plugins");
+  if (fs.existsSync(monorepo)) {
+    return monorepo;
+  }
+  // Standalone / SEA deployment: no monorepo on the target machine. Fall back
+  // to `<dataDir>/plugins` so the server boots plugin-less instead of failing
+  // to find a plugins dir that can never exist here.
+  return path.join(resolveDataDir(), "plugins");
 }
 
 function resolveDataDir(): string {
@@ -50,8 +67,22 @@ async function main(): Promise<void> {
         `token secret and treat the surrounding network as untrusted.`,
     );
   }
+  const pluginsDir = resolvePluginsDir();
+  if (!fs.existsSync(pluginsDir)) {
+    if (process.env.P2P_HUB_PLUGINS_DIR) {
+      throw new Error(
+        `[core-server] P2P_HUB_PLUGINS_DIR "${pluginsDir}" does not exist`,
+      );
+    }
+    // Standalone/SEA boot with no monorepo and no bundled plugins: create an
+    // empty dir so the plugin host scans an empty set instead of failing.
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    console.warn(
+      `[core-server] no plugins found; created empty plugins dir "${pluginsDir}"`,
+    );
+  }
   const server = new CoreServer({
-    pluginsDir: resolvePluginsDir(),
+    pluginsDir,
     dataDir: resolveDataDir(),
     host,
     port,
@@ -65,7 +96,7 @@ async function main(): Promise<void> {
   });
 
   await server.start();
-
+  console.log(`[core-server] p2p-hub-core v${coreVersion}`);
   // The port reported in the log (and, when gated, the ready handshake) is the
   // *bound* one — with `P2P_HUB_PORT=0` the OS-assigned port is only known
   // after `listen()`.
@@ -78,6 +109,18 @@ async function main(): Promise<void> {
       (networking ? "" : " (networking disabled: local-only)") +
       (wanEnabled ? " (WAN transport enabled)" : ""),
   );
+
+  // The shutdown handlers must be registered BEFORE the ready handshake is
+  // emitted: the desktop shell (and the SEA regression suite) sends SIGTERM the
+  // moment it reads the handshake line, so an unregistered handler in that
+  // window would kill the process by default signal handling instead of a
+  // clean `process.exit(0)`.
+  const shutdown = async () => {
+    await server.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
   // Sidecar handshake (desktop shell): a single machine-readable line on
   // stdout carrying the bound port + boot token. Gated on the env flag so a
@@ -93,13 +136,6 @@ async function main(): Promise<void> {
       }) + "\n",
     );
   }
-
-  const shutdown = async () => {
-    await server.stop();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
 }
 
 void main().catch((err) => {
