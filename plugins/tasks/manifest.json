@@ -4,5 +4,43 @@
   "version": "0.1.0",
   "kind": "generic",
   "entry": "./dist/index.js",
-  "permissions": ["storage:read:contacts"]
+  "permissions": [
+    "storage:read:contacts",
+    "storage:read:notepad",
+    "network:skill:tasks.requestMutation",
+    "network:http:tasks.addMember",
+    "network:http:tasks.addTask",
+    "network:http:tasks.assignResource",
+    "network:http:tasks.createProject",
+    "network:http:tasks.delegateTask",
+    "network:http:tasks.getCapacity",
+    "network:http:tasks.getCriticalPath",
+    "network:http:tasks.getProject",
+    "network:http:tasks.listProjects",
+    "network:http:tasks.listTasks",
+    "network:http:tasks.setDependencies",
+    "network:http:tasks.setDependency",
+    "network:http:tasks.updateTask"
+  ],
+  "exposedEvents": ["tasks:project:*"],
+  "ui": {
+    "entry": "dist/index.html",
+    "skills": [
+      "tasks.addMember",
+      "tasks.addTask",
+      "tasks.assignResource",
+      "tasks.createProject",
+      "tasks.delegateTask",
+      "tasks.getCapacity",
+      "tasks.getCriticalPath",
+      "tasks.getProject",
+      "tasks.listProjects",
+      "tasks.listTasks",
+      "tasks.setDependencies",
+      "tasks.setDependency",
+      "tasks.updateTask"
+    ],
+    "defaultWidth": 1100,
+    "defaultHeight": 720
+  }
 }

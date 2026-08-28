@@ -28,6 +28,14 @@ import { IdentityManager } from "./identity/identity-manager";
 import { isValidChildLabel } from "./identity/child-identity";
 
 /**
+ * Re-export the identity manager class so a second node (own vault → own
+ * persistent keypair) can be constructed in tests and tooling. `loadPlugin`
+ * already exposes it as a parameter type, so this is the same surface, just
+ * importable from the package root instead of a deep path.
+ */
+export { IdentityManager } from "./identity/identity-manager";
+
+/**
  * Validate an agent label before it is used as a vault key/URL segment for a
  * derived agent identity. Re-exported so the HTTP bridge can reject a malformed
  * label with a clean 4xx before any vault write happens — the label becomes a

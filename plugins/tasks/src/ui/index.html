@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <title>SmartTasks</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>SmartTasks</h1>
+      <p class="subtitle">
+        Project/task collaboration: dependencies, delegation &amp;
+        proof-of-completion, critical path and per-peer capacity.
+      </p>
+      <div id="status" class="status status--offline">Loading…</div>
+    </header>
+
+    <main id="app" hidden>
+      <aside class="sidebar">
+        <h2>Projects</h2>
+        <form id="newProjectForm" class="inline-form">
+          <input
+            id="newProjectName"
+            type="text"
+            placeholder="New project name"
+            autocomplete="off"
+          />
+          <button type="submit" class="btn btn--primary">Create</button>
+        </form>
+        <ul id="projectList" class="list"></ul>
+        <p id="noProjects" class="empty" hidden>No projects yet.</p>
+      </aside>
+
+      <section id="project" class="content" hidden>
+        <div class="project-head">
+          <h2 id="projectName"></h2>
+          <div id="capacityChips" class="chips"></div>
+        </div>
+
+        <section class="panel">
+          <h3>Critical path</h3>
+          <p id="criticalPathLine" class="critical-line">—</p>
+        </section>
+
+        <section class="panel">
+          <h3>Capacity</h3>
+          <table id="capacityTable" class="table">
+            <thead>
+              <tr>
+                <th>Peer</th>
+                <th>Estimated (h)</th>
+                <th>Spent (h)</th>
+                <th>Working days</th>
+                <th>Est. h/day</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p id="noCapacity" class="empty" hidden>
+            No assignments or time entries yet. Assign resources and log time
+            to see per-peer capacity.
+          </p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h3>Tasks</h3>
+            <button id="reloadBtn" class="btn btn--small">Reload</button>
+          </div>
+          <form id="newTaskForm" class="inline-form new-task">
+            <input id="newTaskName" type="text" placeholder="Task name" autocomplete="off" />
+            <input id="newTaskHours" type="number" min="0" step="0.5" placeholder="Est. hours" />
+            <input id="newTaskStart" type="date" />
+            <input id="newTaskFinish" type="date" />
+            <button type="submit" class="btn btn--primary">Add task</button>
+          </form>
+          <div id="taskBoard" class="board"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h3>Gantt</h3>
+            <div>
+              <button id="proposeBtn" class="btn btn--small">Propose auto-shift</button>
+              <button id="applyBtn" class="btn btn--small btn--primary" disabled>Apply proposal</button>
+            </div>
+          </div>
+          <p id="ganttNote" class="hint"></p>
+          <div id="gantt" class="gantt"></div>
+          <p id="proposalSummary" class="hint"></p>
+        </section>
+      </section>
+    </main>
+
+    <div id="standalone" hidden>
+      <p>
+        This is the SmartTasks console. It is designed to run inside the
+        desktop shell; in standalone preview it shows no live data.
+      </p>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
