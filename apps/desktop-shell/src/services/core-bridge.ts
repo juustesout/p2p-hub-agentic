@@ -6,6 +6,7 @@ import type {
   ExecuteRequest,
   RiskAssessment,
   TaskResult,
+  VaultGateState,
   VaultKeyMeta,
   VaultModelInfo,
 } from "../types";
@@ -29,6 +30,12 @@ interface BackendConfig {
    * supply one (plain-browser dev then falls back to `resolveBootToken`).
    */
   token: string | null;
+  /**
+   * Vault lock-gate hint from the boot handshake (`state: "locked"`), or
+   * `null` when the shell supplied no config (plain-browser dev). This is a
+   * startup hint only — `/api/health` is the authoritative source.
+   */
+  locked: boolean | null;
 }
 
 let cachedBackendConfig: BackendConfig | undefined;
@@ -65,7 +72,7 @@ async function resolveBackendConfig(): Promise<BackendConfig> {
   }
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    const cfg = await invoke<{ port?: number; token?: string }>(
+    const cfg = await invoke<{ port?: number; token?: string; locked?: boolean }>(
       "get_backend_config",
     );
     if (cfg && Number.isInteger(cfg.port) && (cfg.port as number) > 0) {
@@ -73,6 +80,7 @@ async function resolveBackendConfig(): Promise<BackendConfig> {
         baseUrl: `http://127.0.0.1:${cfg.port}`,
         wsUrl: `ws://127.0.0.1:${cfg.port}`,
         token: cfg.token ?? null,
+        locked: cfg.locked === true ? true : cfg.locked === false ? false : null,
       };
       return cachedBackendConfig;
     }
@@ -85,8 +93,18 @@ async function resolveBackendConfig(): Promise<BackendConfig> {
     baseUrl: `${scheme}://${location.host}`,
     wsUrl: `${wsScheme}://${location.host}`,
     token: null,
+    locked: null,
   };
   return cachedBackendConfig;
+}
+
+/**
+ * The vault lock-gate hint from the boot handshake, or `null` when unavailable
+ * (plain-browser dev). `getHealth()` remains authoritative; this only lets the
+ * shell seed a fail-closed lock state before the first health poll.
+ */
+export async function initialLockHint(): Promise<boolean | null> {
+  return (await resolveBackendConfig()).locked;
 }
 
 /**
@@ -244,6 +262,69 @@ export class CoreBridge {
       requiredTier: body?.requiredTier,
       error: body?.error,
     };
+  }
+
+  // -------------------------------------------------------------------
+  // Vault lock-gate (Slice 2)
+  // -------------------------------------------------------------------
+
+  /**
+   * Poll `/api/health` for the lock-gate state. While `locked` the desktop
+   * shows the unlock screen; `vaultExists` distinguishes "first run, nothing
+   * to unlock" from "a vault exists but the key is not entered yet".
+   */
+  async getHealth(): Promise<VaultGateState> {
+    const body = await this.request<{
+      ok?: boolean;
+      locked?: boolean;
+      vaultExists?: boolean;
+      networkPaused?: boolean;
+    }>("/api/health");
+    return {
+      locked: body.locked === true,
+      vaultExists: body.vaultExists === true,
+      networkPaused: body.networkPaused === true,
+    };
+  }
+
+  /**
+   * Unlock the vault with the operator's master key. A wrong key returns
+   * `{ ok: false, error: "invalid master key" }` — deliberately terse (no
+   * hint about whether the vault even exists), surfaced as a 401.
+   */
+  async unlockVault(
+    masterKey: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const backend = await resolveBackendConfig();
+    const token = backend.token ?? (await resolveBootToken());
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const res = await fetch(backend.baseUrl + "/api/vault/unlock", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ masterKey }),
+    });
+    const body = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      error?: string;
+    } | null;
+    if (res.ok) {
+      return { ok: true };
+    }
+    return { ok: false, error: body?.error ?? `unlock failed: ${res.status}` };
+  }
+
+  async lockVault(): Promise<void> {
+    await this.request<{ ok: boolean }>("/api/vault/lock", { method: "POST" });
+  }
+
+  async setNetworkPaused(paused: boolean): Promise<void> {
+    await this.request<{ ok: boolean }>(
+      paused ? "/api/network/pause" : "/api/network/resume",
+      { method: "POST" },
+    );
   }
 
   // -------------------------------------------------------------------

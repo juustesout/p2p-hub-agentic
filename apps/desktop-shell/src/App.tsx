@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useApp } from "./state/AppState";
 import { pluginBridge } from "./services/plugin-bridge";
+import { LockScreen } from "./components/LockScreen";
 import { Taskbar } from "./components/Taskbar";
 import { StartMenu } from "./components/StartMenu";
 import { PeerInspector } from "./components/PeerInspector";
@@ -14,7 +15,7 @@ import { WindowManager, type ManagedWindow } from "./components/WindowManager";
 import type { CapabilityPlugin } from "./types";
 
 export default function App() {
-  const { capabilities } = useApp();
+  const { capabilities, vaultGate, gateKnown } = useApp();
   const [startOpen, setStartOpen] = useState(false);
   const [hermesOpen, setHermesOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
@@ -35,6 +36,17 @@ export default function App() {
       }
     }
   }, [capabilities]);
+
+  // Vault lock-gate (Slice 2): before the first `/api/health` read the shell
+  // cannot know whether the vault is locked, so it renders a plain backdrop
+  // (fail-closed — never the desktop with its stale vault view). While
+  // `locked`, the whole desktop is replaced by the unlock screen.
+  if (!gateKnown) {
+    return <div className="h-full w-full bg-slate-950" />;
+  }
+  if (vaultGate.locked) {
+    return <LockScreen />;
+  }
 
   const openWindow = (
     id: string,

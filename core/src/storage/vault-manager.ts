@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { atomicWriteFile, readJsonFile } from "./atomic-write";
@@ -78,10 +79,13 @@ function resolveMasterKey(explicit?: string): {
  */
 export class VaultManager {
   private readonly dataDir: string;
-  private readonly masterKey: string;
+  private masterKey: string;
   readonly reservedPrefixes: string[];
   /** True when the master key fell back to the insecure dev-only key. */
-  readonly usesFallbackKey: boolean;
+  get usesFallbackKey(): boolean {
+    return this.usedFallback;
+  }
+  private usedFallback: boolean;
   private salt: Buffer | null = null;
   private entries: Record<string, EncryptedEntry> = {};
   private derivedKey: Buffer | null = null;
@@ -95,7 +99,7 @@ export class VaultManager {
 
     const { masterKey, usedFallback } = resolveMasterKey(options.masterKey);
     this.masterKey = masterKey;
-    this.usesFallbackKey = usedFallback;
+    this.usedFallback = usedFallback;
 
     if (usedFallback) {
       console.warn(
@@ -246,5 +250,96 @@ export class VaultManager {
       await this.save();
       return true;
     });
+  }
+
+  /**
+   * Whether a vault file already exists on disk. A fresh data directory (no
+   * file) is the first-run signal: there are no secrets to protect, so the
+   * sidecar boots straight to ready. A present file means a vault was created
+   * before and must be unlocked with the correct master key before anything
+   * that touches secrets (identity, P2P transports) starts.
+   *
+   * This reads the file's *existence* only — never its contents, so it never
+   * decrypts and never fails on a corrupt file (a corrupt vault surfaces
+   * loudly through {@link readJsonFile} when a real operation loads it).
+   */
+  async hasVaultFile(): Promise<boolean> {
+    try {
+      const stat = await fs.promises.stat(this.filePath());
+      return stat.isFile();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Parse the vault file without decrypting anything. A vault file that exists
+   * but cannot be parsed throws {@link StorageCorruptionError} — the caller
+   * (the sidecar, on boot) treats that as a loud startup failure, never as
+   * "locked, ask for the key". A missing file is fine (fresh install). This is
+   * the fail-loud companion to {@link hasVaultFile}: existence alone must not
+   * paper over corruption.
+   */
+  async assertLoadable(): Promise<void> {
+    await readJsonFile<VaultFile>(this.filePath());
+  }
+
+  /**
+   * Verify a candidate master key against the existing vault, without mutating
+   * state. Returns `true` only when every stored entry decrypts under the
+   * candidate; `false` when the vault does not exist (nothing to verify) or a
+   * decryption fails. Never reports *why* a key failed — the caller treats it
+   * as "wrong key", never as "tampered ciphertext" (CLAUDE.md principle #7).
+   *
+   * A vault that exists but holds zero entries is unverifiable and accepts any
+   * candidate: there is nothing to protect, so rejecting the operator's key
+   * would only lock them out of an empty store.
+   */
+  async verifyKey(candidate: string): Promise<boolean> {
+    const parsed = await readJsonFile<VaultFile>(this.filePath());
+    if (parsed === null) {
+      return false;
+    }
+    const salt = Buffer.from(parsed.salt, "hex");
+    const derived = crypto.scryptSync(candidate, salt, KEY_LENGTH);
+    const entries = parsed.entries ?? {};
+    if (Object.keys(entries).length === 0) {
+      return true;
+    }
+    for (const entry of Object.values(entries)) {
+      try {
+        const decipher = crypto.createDecipheriv(
+          "aes-256-gcm",
+          derived,
+          Buffer.from(entry.iv, "hex"),
+        );
+        decipher.setAuthTag(Buffer.from(entry.tag, "hex"));
+        Buffer.concat([
+          decipher.update(Buffer.from(entry.data, "hex")),
+          decipher.final(),
+        ]);
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Replace the effective master key and drop any cached derivation. Used by
+   * the sidecar unlock flow: the server boots with a placeholder/dev key, the
+   * operator's key is verified with {@link verifyKey}, and only then installed
+   * here so every subsequent encrypt/decrypt uses the real key. A key installed
+   * this way is never the dev fallback (unless the operator literally types it),
+   * so `usesFallbackKey` follows the installed value.
+   */
+  setKey(key: string): void {
+    this.masterKey = key;
+    this.derivedKey = null;
+    this.derivedKeySaltHex = null;
+    this.usedFallback = key === DEV_MASTER_KEY;
   }
 }

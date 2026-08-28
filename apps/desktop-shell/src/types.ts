@@ -104,3 +104,24 @@ export interface Toast {
   kind: "info" | "success" | "error";
   ts: number;
 }
+
+/**
+ * Vault lock-gate + network state as reported by `/api/health`. `locked` gates
+ * the whole desktop UI (Slice 2): while true, nothing P2P or storage-backed is
+ * reachable and the shell renders the unlock screen.
+ */
+export interface VaultGateState {
+  locked: boolean;
+  vaultExists: boolean;
+  networkPaused: boolean;
+}
+
+/**
+ * A fully sanitized OS-notification spec. The shell constructs these from
+ * bridged events via {@link sanitizeNotification} — it never contains message
+ * text, secret values or raw payload fields (lock-screen privacy).
+ */
+export interface NotificationSpec {
+  title: string;
+  body: string;
+}

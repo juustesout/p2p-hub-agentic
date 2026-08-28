@@ -19,11 +19,35 @@ gotcha yourself.
 The native Tauri shell **starts the core-server itself** as a *sidecar*: the
 Rust layer spawns `apps/core-server/dist/index.js` with `P2P_HUB_PORT=0` (an
 OS-assigned port) and `P2P_HUB_SIDECAR_READY=1`, waits for the
-`[P2P_HUB_READY] {"port":…,"token":"…"}` stdout handshake, and hands those
-coordinates to the frontend via the `get_backend_config` Tauri command. The
-shell does not need a separately started core-server. Plain-browser dev mode is
-the exception: there is no Rust host, so you still start the core-server first
-and Vite proxies to it.
+`[P2P_HUB_READY] {"port":…,"token":"…","state":"locked"|"ready"}` stdout
+handshake, and hands those coordinates to the frontend via the
+`get_backend_config` Tauri command. The shell does not need a separately
+started core-server. Plain-browser dev mode is the exception: there is no Rust
+host, so you still start the core-server first and Vite proxies to it.
+
+### Vault lock-gate (Slice 2)
+
+If a vault file already exists (`~/.p2p-hub/vault.json`) and networking is
+enabled, the sidecar boots **locked**: the HTTP/WS bridge binds and answers
+health, but P2P transports and plugin storage stay down until the operator
+enters the master key.
+
+- The ready handshake reports `"state":"locked"`, and `/api/health` returns
+  `{locked: true, vaultExists: true, networkPaused: false}`. Unknown or
+  missing `state` is rejected fail-closed on both the Rust and frontend sides.
+- The shell renders a full-screen unlock screen (no desktop, no stale vault
+  data) until the master key is in. Unlock goes through
+  `POST /api/vault/unlock` (`{masterKey}`). A wrong key returns a terse
+  401 `"invalid master key"` — no hint about whether the vault exists.
+- Only after a successful unlock does the core-server call `host.boot()`,
+  start the LAN/WAN transports, broadcast `vault:unlocked`, and let the
+  desktop render.
+- A fresh install (no vault file) boots straight to `"state":"ready"` — no
+  unlock screen.
+- **Plain-browser dev mode is not locked.** Without the sidecar flag the
+  server runs as before; the lock-gate only activates under the Tauri sidecar
+  (where a real desktop with a real key is expected). The same vault file in
+  both processes is why dev and native must agree on `P2P_HUB_DATA_DIR`.
 
 ## Prerequisites (Windows)
 
@@ -58,7 +82,7 @@ Tests use `node:test` and run against compiled output, so build first:
 npm run build && npm test
 ```
 
-Expect all workspaces green (historically 378 tests, 0 failures). One harmless
+Expect all workspaces green (historically 1038 tests, 0 failures). One harmless
 log line `[hooks] action handler for "demo:event" failed: Error: boom` is a
 deliberate test artifact.
 
@@ -96,6 +120,31 @@ cd apps/desktop-shell/src-tauri && cargo tauri dev
 `http://localhost:5173`. The Rust host spawns the core-server sidecar itself
 and the frontend learns the real port + token from `get_backend_config` — do
 NOT start a second core-server on `8787` manually (the sidecar uses port 0).
+
+### Systray, OS notifications & window lifecycle (Slice 2)
+
+The native shell owns the OS chrome; the webview owns the logic. Their split:
+
+- **Systray.** Built in `lib.rs::setup()`: a disabled status header
+  ("P2P Hub — connecting…" until the webview reads health and pushes
+  `set_tray_state`), then Open Dashboard / Lock Vault / Pause-or-Resume
+  Network / Quit P2P Hub. Lock and pause are **intents only**: the tray emits
+  `p2p:lock-vault` / `p2p:toggle-network` to the `main` webview, which calls
+  `/api/vault/lock` and `/api/network/pause|resume` (the JS tests cover the
+  actual HTTP). `set_tray_state` (status text + pause/resume label) is invoked
+  from the frontend on health changes.
+- **Close = hide, Quit = exit.** `on_window_event` intercepts
+  `CloseRequested` and hides the window instead (the sidecar keeps running).
+  Quit-from-tray sets a `QuitState(AtomicBool)`, SIGTERMs the sidecar via
+  `SidecarHandle::stop()` and calls `app.exit(0)`.
+- **OS notifications.** The frontend sanitizes bridged events
+  (`chat:messageReceived`, `tasks:taskUpdated` accept/decline/completion) in
+  `src/services/notify-lib.ts` — never message text or raw payloads, only
+  sanitized labels like "Nieuw bericht van Peer X" — then calls the `notify`
+  Rust command (`tauri-plugin-notification`). Click-to-focus is exposed as the
+  `focus_main_window` command. Tray-event wiring lives in
+  `src/services/tray.ts`; plain-browser dev has no tray/notification surface
+  and degrades silently.
 
 ## Things to watch out for (gotchas)
 
@@ -159,6 +208,26 @@ them.
     `core/`, `sdk/`, `apps/core-server/`, or a plugin `manifest.json`, read
     `CLAUDE.md` first.
 
+11. **Tray requires the `tray-icon` feature.** `Cargo.toml` pins
+    `tauri = { version = "2", features = ["tray-icon"] }`. Dropping that
+    feature breaks the tray (`tauri::tray` is `cfg`-gated behind it) and
+    `set_tray_state`. The first `cargo check` after adding
+    `tauri-plugin-notification` fetches new crates — do not read an offline
+    failure as a code error.
+
+12. **The tray menu ids are load-bearing.** `set_tray_state` rebuilds the menu
+    with the same ids (`tray-status/open/lock/pause/quit`) so
+    `tray_action_for` dispatch stays stable. Rename one and the toggle stops
+    firing.
+
+13. **Notification payloads are sanitized before they reach Rust.** The `notify`
+    command is deliberately dumb — the frontend (`notify-lib.ts`) strips
+    message text and secrets. Never push raw event payloads into a
+    notification title/body; the OS lock screen would render them.
+
+14. **`docs/journey/` stays untracked; `docs/wiki/` is never created.** Do not
+    `git add` the journey notes, and do not invent a wiki directory.
+
 ## Quick sanity checklist before reporting "it works"
 
 - `npm run build` exits clean.
@@ -168,3 +237,8 @@ them.
 - The shell window loads and `GET /api/capabilities` returns 200 (not 401).
 - The native dialog appears for a critical settings change (no JS `confirm`
   fallback exists).
+- With an existing vault file, the shell boots to the unlock screen and
+  `/api/health` reports `locked: true`; wrong key → 401, right key → desktop +
+  `vault:unlocked`.
+- Close button hides to tray and the sidecar keeps running; tray Quit exits
+  the process.

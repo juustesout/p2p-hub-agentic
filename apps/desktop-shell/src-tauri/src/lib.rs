@@ -5,10 +5,13 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use serde::Deserialize;
 use serde::Serialize;
-use tauri::Manager;
+use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager};
 use tauri::State;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
@@ -178,17 +181,25 @@ fn prompt_for(request: &ConfirmationRequest) -> (String, String) {
 /// `get_backend_config`: the core-server's actual bound port (OS-assigned,
 /// because the sidecar runs with `P2P_HUB_PORT=0`) and the per-boot token that
 /// guards `/api/*` and `/ws`. The token travels the same out-of-band channel
-/// family as `get_boot_token` — it is never exposed over HTTP.
+/// family as `get_boot_token` — it is never exposed over HTTP. `locked` is the
+/// vault lock gate reported by the boot handshake (`state: "locked"`).
 #[derive(Clone, Serialize)]
 struct BackendConfig {
     port: u16,
     token: String,
+    locked: bool,
 }
 
 /// Owns the live core-server sidecar child. `None` means the sidecar failed to
 /// boot; dropping the state (on app exit) kills the child via
 /// [`sidecar::SidecarHandle`]'s `Drop`.
 struct SidecarState(Mutex<Option<sidecar::SidecarHandle>>);
+
+/// Raised when the user chooses Quit from the tray. The close-to-tray hook
+/// consults it: while `false`, a window close hides to tray instead of exiting;
+/// once `true`, the window is allowed to close and the process exits after the
+/// sidecar has been stopped.
+struct QuitState(AtomicBool);
 
 /// Return the core-server's bound port + boot token as reported by the
 /// `[P2P_HUB_READY]` stdout handshake. This is the frontend's entry point for
@@ -204,6 +215,7 @@ fn get_backend_config(state: State<SidecarState>) -> Result<BackendConfig, Strin
         Some(BackendConfig {
             port: config.port,
             token: config.token.clone(),
+            locked: config.state == "locked",
         })
     }) {
         Some(config) => Ok(config),
@@ -256,10 +268,194 @@ fn request_tier2_confirmation(
     Ok(confirmed)
 }
 
+// ---------------------------------------------------------------------
+// Systray + OS notifications + window lifecycle (Slice 2)
+// ---------------------------------------------------------------------
+
+/// Tray menu item identifiers. Menu rebuilds (via `set_tray_state`) keep the
+/// same ids so `tray_action_for` dispatch stays stable.
+const TRAY_ID: &str = "p2p-hub-main";
+const TRAY_STATUS_ID: &str = "tray-status";
+const TRAY_OPEN_ID: &str = "tray-open";
+const TRAY_LOCK_ID: &str = "tray-lock";
+const TRAY_PAUSE_ID: &str = "tray-pause";
+const TRAY_QUIT_ID: &str = "tray-quit";
+
+/// Events emitted to the webview when the operator uses a tray quick action.
+/// The webview owns the actual HTTP calls (`/api/vault/lock`, network pause)
+/// so the JS tests can cover them; the tray only forwards the intent.
+const EVT_LOCK_VAULT: &str = "p2p:lock-vault";
+const EVT_TOGGLE_NETWORK: &str = "p2p:toggle-network";
+
+/// The label of the Pause/Resume toggle — the only tray text that changes
+/// based on state. Pure so it is unit-testable without a live tray.
+fn pause_toggle_label(network_paused: bool) -> &'static str {
+    if network_paused {
+        "Resume Network"
+    } else {
+        "Pause Network"
+    }
+}
+
+/// What a tray menu id asks the shell to do. Unknown ids (tray internals,
+/// future items) map to `None` — never a surprising action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayAction {
+    OpenDashboard,
+    LockVault,
+    ToggleNetwork,
+    Quit,
+}
+
+fn tray_action_for(id: &str) -> Option<TrayAction> {
+    match id {
+        TRAY_OPEN_ID => Some(TrayAction::OpenDashboard),
+        TRAY_LOCK_ID => Some(TrayAction::LockVault),
+        TRAY_PAUSE_ID => Some(TrayAction::ToggleNetwork),
+        TRAY_QUIT_ID => Some(TrayAction::Quit),
+        _ => None,
+    }
+}
+
+/// Window-close handling: hide to tray unless the user chose Quit. Pure so the
+/// close-vs-quit decision is testable (the brief's "close ≠ quit" invariant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseDecision {
+    HideToTray,
+    Quit,
+}
+
+fn decide_close(quitting: bool) -> CloseDecision {
+    if quitting {
+        CloseDecision::Quit
+    } else {
+        CloseDecision::HideToTray
+    }
+}
+
+/// Show and focus the main window (notification click, Open Dashboard, and the
+/// tray's focus-on-click). A window that was hidden to tray must come back to
+/// the foreground, not just `show()` in the background.
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Stop the managed core sidecar (Quit path). `None` (boot failure) is a
+/// no-op. Kept separate so the quit flow is testable against a real child.
+fn stop_managed_sidecar(state: &SidecarState) -> Result<(), String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "sidecar state poisoned".to_string())?;
+    if let Some(handle) = guard.as_mut() {
+        handle.stop();
+    }
+    Ok(())
+}
+
+/// Quit from the tray: mark the close-to-tray hook as quitting, SIGTERM the
+/// core sidecar, then exit the process.
+fn quit_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(state) = app.try_state::<QuitState>() {
+        state.0.store(true, Ordering::SeqCst);
+    }
+    if let Some(state) = app.try_state::<SidecarState>() {
+        let _ = stop_managed_sidecar(&state);
+    }
+    app.exit(0);
+}
+
+/// Build the tray menu. The first item is a disabled status line (updated via
+/// `set_tray_state`); the rest are the brief's quick actions.
+fn build_tray_menu<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    status: &str,
+    network_paused: bool,
+) -> tauri::Result<Menu<R>> {
+    let status_item = MenuItem::with_id(app, TRAY_STATUS_ID, status, false, None::<&str>)?;
+    let open = MenuItem::with_id(app, TRAY_OPEN_ID, "Open Dashboard", true, None::<&str>)?;
+    let lock = MenuItem::with_id(app, TRAY_LOCK_ID, "Lock Vault", true, None::<&str>)?;
+    let pause = MenuItem::with_id(
+        app,
+        TRAY_PAUSE_ID,
+        pause_toggle_label(network_paused),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit P2P Hub", true, None::<&str>)?;
+    let items: &[&dyn IsMenuItem<R>] = &[
+        &status_item,
+        &PredefinedMenuItem::separator(app)?,
+        &open,
+        &lock,
+        &pause,
+        &PredefinedMenuItem::separator(app)?,
+        &quit,
+    ];
+    Menu::with_items(app, items)
+}
+
+/// Replace the tray menu, preserving ids, with a fresh status + toggle label.
+#[tauri::command]
+fn set_tray_state(
+    app: tauri::AppHandle,
+    status: String,
+    network_paused: bool,
+) -> Result<(), String> {
+    let menu = build_tray_menu(&app, &status, network_paused).map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Show an OS notification. The webview is the sole caller and has already
+/// sanitized the title/body (no message text, no secret values); this command
+/// is deliberately dumb — it never reads vault state.
+#[tauri::command]
+fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(&title)
+        .body(&body)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
+/// Bring the main window to the foreground — the notification click handler.
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    show_main_window(&app);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(|window, event| {
+            // Close-to-tray (Slice 2): the window close button hides the shell
+            // instead of exiting — the sidecar keeps running. Only a tray Quit
+            // (which sets QuitState and stops the sidecar first) lets the
+            // window actually close.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let quitting = window
+                    .app_handle()
+                    .try_state::<QuitState>()
+                    .map(|s| s.0.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+                if decide_close(quitting) == CloseDecision::HideToTray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             // Boot the core-server sidecar before the window is shown so the
             // frontend's first `get_backend_config` call always finds a config.
@@ -274,12 +470,44 @@ pub fn run() {
                 }
             };
             app.manage(state);
+            app.manage(QuitState(AtomicBool::new(false)));
+
+            // Systray: a disabled status line on top, then the quick actions.
+            // The initial "connecting…" status is replaced by the webview the
+            // moment it reads health (via `set_tray_state`).
+            let menu = build_tray_menu(
+                app.handle(),
+                "P2P Hub — connecting…",
+                false,
+            )?;
+            let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+                .tooltip("P2P Hub")
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match tray_action_for(event.id().as_ref()) {
+                    Some(TrayAction::OpenDashboard) => show_main_window(app),
+                    Some(TrayAction::LockVault) => {
+                        let _ = app.emit_to("main", EVT_LOCK_VAULT, ());
+                    }
+                    Some(TrayAction::ToggleNetwork) => {
+                        let _ = app.emit_to("main", EVT_TOGGLE_NETWORK, ());
+                    }
+                    Some(TrayAction::Quit) => quit_app(app),
+                    None => {}
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_boot_token,
             get_backend_config,
-            request_tier2_confirmation
+            request_tier2_confirmation,
+            notify,
+            focus_main_window,
+            set_tray_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -495,5 +723,45 @@ mod tests {
             !message.contains("Agent "),
             "an operator-initiated prompt must not claim an agent did it, got: {message}"
         );
+    }
+
+    #[test]
+    fn tray_action_for_maps_every_quick_action_id() {
+        assert_eq!(tray_action_for("tray-open"), Some(TrayAction::OpenDashboard));
+        assert_eq!(tray_action_for("tray-lock"), Some(TrayAction::LockVault));
+        assert_eq!(tray_action_for("tray-pause"), Some(TrayAction::ToggleNetwork));
+        assert_eq!(tray_action_for("tray-quit"), Some(TrayAction::Quit));
+        // Unknown ids (tray internals, future items) never map to an action.
+        assert_eq!(tray_action_for("tray-status"), None);
+        assert_eq!(tray_action_for(""), None);
+    }
+
+    #[test]
+    fn pause_toggle_label_flips_with_network_state() {
+        assert_eq!(pause_toggle_label(false), "Pause Network");
+        assert_eq!(pause_toggle_label(true), "Resume Network");
+    }
+
+    #[test]
+    fn decide_close_hides_to_tray_unless_quitting() {
+        // The brief's core invariant: the window close button must hide the
+        // shell (sidecar keeps running), only a tray Quit must exit.
+        assert_eq!(decide_close(false), CloseDecision::HideToTray);
+        assert_eq!(decide_close(true), CloseDecision::Quit);
+    }
+
+    #[test]
+    fn stop_managed_sidecar_is_a_noop_when_none_and_errs_on_poisoned_state() {
+        let empty = SidecarState(Mutex::new(None));
+        assert_eq!(stop_managed_sidecar(&empty), Ok(()));
+
+        let poisoned = SidecarState(Mutex::new(None));
+        // Poison the mutex by panicking while *holding* the guard (dropping it
+        // during unwind is what poisons the lock).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.0.lock().unwrap();
+            panic!("poison");
+        }));
+        assert!(stop_managed_sidecar(&poisoned).is_err());
     }
 }

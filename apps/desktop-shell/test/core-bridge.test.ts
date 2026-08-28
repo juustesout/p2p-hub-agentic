@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import "./test-globals";
 import { __tauri } from "./stubs/tauri-core";
-import { CoreBridge, __resetBackendConfigCache, __resetBootTokenCache } from "../src/services/core-bridge";
+import { CoreBridge, __resetBackendConfigCache, __resetBootTokenCache, initialLockHint } from "../src/services/core-bridge";
 import type { ExecuteRequest } from "../src/types";
 
 interface CapturedRequest {
@@ -29,10 +29,12 @@ function tick(): Promise<void> {
 describe("core-bridge", () => {
   let bridge: CoreBridge;
   let fetchCalls: CapturedRequest[];
+  let fetchResponse: Response | (() => Response);
 
   beforeEach(() => {
     bridge = new CoreBridge();
     fetchCalls = [];
+    fetchResponse = { ok: true, json: async () => ({ ok: true }) } as Response;
     __resetBootTokenCache();
     __resetBackendConfigCache();
     __tauri.invoke = async () => {
@@ -41,10 +43,7 @@ describe("core-bridge", () => {
     globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : String(input);
       fetchCalls.push({ url, init });
-      return {
-        ok: true,
-        json: async () => ({ ok: true }),
-      } as Response;
+      return typeof fetchResponse === "function" ? fetchResponse() : fetchResponse;
     };
     const ctor = (globalThis as unknown as { WebSocket: StubWebSocketCtor }).WebSocket as StubWebSocketCtor;
     ctor.instances = [];
@@ -192,5 +191,80 @@ describe("core-bridge", () => {
     instances[0].onmessage?.({ data: "not json" });
     await tick();
     assert.equal(received.length, 1, "malformed frames are ignored");
+  });
+
+  it("reads the lock-gate state from /api/health", async () => {
+    fetchResponse = {
+      ok: true,
+      json: async () => ({
+        ok: true,
+        locked: true,
+        vaultExists: true,
+        networkPaused: false,
+      }),
+    } as Response;
+
+    const gate = await bridge.getHealth();
+
+    assert.equal(gate.locked, true);
+    assert.equal(gate.vaultExists, true);
+    assert.equal(gate.networkPaused, false);
+  });
+
+  it("returns ok on a successful unlock", async () => {
+    fetchResponse = { ok: true, json: async () => ({ ok: true }) } as Response;
+
+    const result = await bridge.unlockVault("the-master-key");
+
+    assert.equal(result.ok, true);
+    assert.equal(result.error, undefined);
+    const headers = fetchCalls[0].init?.headers as Record<string, string>;
+    assert.equal(headers.Authorization, undefined);
+    const body = JSON.parse(String(fetchCalls[0].init?.body));
+    assert.equal(body.masterKey, "the-master-key");
+  });
+
+  it("surfaces a wrong-key 401 as a terse non-throwing failure", async () => {
+    fetchResponse = {
+      ok: false,
+      json: async () => ({ ok: false, error: "invalid master key" }),
+    } as Response;
+
+    const result = await bridge.unlockVault("wrong");
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "invalid master key");
+  });
+
+  it("posts lock/pause/resume to their operator routes", async () => {
+    await bridge.lockVault();
+    assert.equal(fetchCalls[0].url, "http://127.0.0.1:8787/api/vault/lock");
+
+    await bridge.setNetworkPaused(true);
+    assert.equal(fetchCalls[1].url, "http://127.0.0.1:8787/api/network/pause");
+
+    await bridge.setNetworkPaused(false);
+    assert.equal(fetchCalls[2].url, "http://127.0.0.1:8787/api/network/resume");
+  });
+
+  it("exposes the boot-handshake lock hint", async () => {
+    __tauri.invoke = async (command: string) =>
+      command === "get_backend_config"
+        ? { port: 44619, token: "boot-token-abc", locked: true }
+        : undefined;
+
+    assert.equal(await initialLockHint(), true);
+    __resetBackendConfigCache();
+
+    __tauri.invoke = async (command: string) =>
+      command === "get_backend_config"
+        ? { port: 44619, token: "boot-token-abc", locked: false }
+        : undefined;
+    assert.equal(await initialLockHint(), false);
+    __resetBackendConfigCache();
+  });
+
+  it("returns null for the lock hint without a Tauri config", async () => {
+    assert.equal(await initialLockHint(), null);
   });
 });

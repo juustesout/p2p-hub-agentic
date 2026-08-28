@@ -86,7 +86,11 @@ async function main(): Promise<void> {
   // exact `[P2P_HUB_READY] ` line.
   if (process.env[SIDECAR_READY_ENV]) {
     process.stdout.write(
-      sidecarReadyLine({ port: boundPort, token: server.getBootToken() }) + "\n",
+      sidecarReadyLine({
+        port: boundPort,
+        token: server.getBootToken(),
+        state: server.bootState(),
+      }) + "\n",
     );
   }
 

@@ -91,6 +91,14 @@ export class CoreServer {
   private peerId = "";
   private readonly messageTimestamps = new Map<string, number[]>();
 
+  /** Vault lock-gate state: transports + plugin storage gated until unlocked. */
+  private vaultUnlocked = false;
+  private vaultExists = false;
+  /** Network pause toggle: transports stopped, vault stays unlocked. */
+  private networkPaused = false;
+  /** Whether the deferred boot phase (`PluginHost.boot` + wiring) has run. */
+  private booted = false;
+
   /** Periodic peer-discovery poller (owns the known-peer set). */
   private readonly peerPoller: { poll(): Promise<void> };
 
@@ -166,6 +174,11 @@ export class CoreServer {
         broadcast: (event, payload) => this.broadcast(event, payload),
         loadSettings: () => loadSettings(this.options.dataDir),
         saveSettings: (settings) => saveSettings(this.options.dataDir, settings),
+        isVaultUnlocked: () => this.vaultUnlocked,
+        unlockVault: (key) => this.unlockVault(key),
+        lockVault: () => this.lockVault(),
+        setNetworkPaused: (paused) => this.setNetworkPaused(paused),
+        vaultState: () => this.vaultState(),
       },
     };
   }
@@ -181,58 +194,41 @@ export class CoreServer {
     } catch (err) {
       this.instanceLock?.release();
       this.instanceLock = null;
+      // The lock gate binds the HTTP/WS bridge *before* the vault check, so a
+      // failed boot (corrupt vault, bad config) must not leak a live listener.
+      this.wsBus?.close();
+      this.wsBus = null;
+      if (this.httpServer) {
+        await new Promise<void>((resolve) => {
+          this.httpServer!.close(() => resolve());
+        });
+        this.httpServer = null;
+      }
       throw err;
     }
   }
 
+  /**
+   * Boot the HTTP/WS bridge and — unless a pre-existing vault demands a master
+   * key first — the full plugin/networking stack.
+   *
+   * Vault lock gate (Slice 2): when a vault file already exists AND networking
+   * is enabled, the server starts **locked**. It binds the loopback bridge and
+   * serves the operator API (health, `POST /api/vault/unlock`), but defers
+   * `PluginHost.boot()` (plugin storage, identity) and every P2P transport
+   * until the correct master key arrives. A vault that does not exist yet is
+   * first run — there is nothing to protect, so the server boots straight to
+   * ready exactly as before. Networking-disabled (local-only) mode never locks:
+   * it touches neither the vault nor any transport, and a corrupt vault must
+   * not fail a local-only boot (Fase 0D invariant).
+   */
   private async startLocked(): Promise<void> {
-    await this.host.boot();
-
     this.bootToken = this.resolveBootToken();
     this.siteToken = generateSiteToken();
     this.lanSiteAllowed = await decideSiteExposure(
       this.options.host ?? "127.0.0.1",
       () => loadSettings(this.options.dataDir),
     );
-
-    registerCoreSkills(this.broker, this.host.vaultManager());
-    registerMediaSkill(this.broker, this.trustGate);
-    wireEventBridge(
-      this.host,
-      (event, payload) => this.broadcast(event, payload),
-      this.options.bridgedEvents,
-    );
-    wirePeerAccessConfirmations(this.host, this.trustGate, () => this.peersite());
-    wireMediaAccessConfirmations(this.host, this.trustGate, () => this.media());
-    await this.initGovernance();
-
-    if (this.options.networking !== false) {
-      this.provider = await startNetworking({
-        broker: this.broker,
-        host: this.host,
-        registry: this.registry,
-        p2pPort: this.options.p2pPort,
-        p2pBindHost: this.options.p2pBindHost,
-      });
-    } else {
-      console.warn(
-        "[core-server] networking disabled: no LAN discovery, no inbound P2P " +
-          "calls, no peer identity is created. Local-only mode.",
-      );
-    }
-
-    if (this.options.wanEnabled) {
-      // WAN transport (network-libp2p), strictly opt-in. Shares the p2p-hub
-      // identity with the LAN transport (Optie B unification); dials only
-      // operator-configured relays/listen addresses, never discovers.
-      this.wanProvider = await startWanProvider({
-        broker: this.broker,
-        host: this.host,
-        registry: this.registry,
-        relayAddr: this.options.wanRelayAddr,
-        listenAddrs: this.options.wanListenAddrs,
-      });
-    }
 
     this.httpServer = http.createServer((req, res) => {
       void this.handleHttp(req, res);
@@ -252,8 +248,192 @@ export class CoreServer {
       this.httpServer!.listen(port, host, () => resolve());
     });
 
-    this.peerTimer = setInterval(() => void this.peerPoller.poll(), 2000);
-    void this.peerPoller.poll();
+    const vault = this.host.vaultManager();
+    this.vaultExists = await vault.hasVaultFile();
+    const shouldLock = this.vaultExists && this.options.networking !== false;
+    if (shouldLock) {
+      // Fail loudly on a corrupt vault at boot (CLAUDE.md principle #9) — the
+      // lock gate defers plugin loading, but corruption is never "locked".
+      await vault.assertLoadable();
+      console.warn(
+        "[core-server] existing vault detected: starting LOCKED. P2P transports " +
+          "and plugin storage stay disabled until the master key is provided " +
+          "via POST /api/vault/unlock.",
+      );
+      return;
+    }
+
+    this.vaultUnlocked = true;
+    await this.finishBoot();
+  }
+
+  /**
+   * The lock-gate status as of `start()`: `"locked"` when a pre-existing vault
+   * is awaiting its master key, `"ready"` otherwise. Reported over the sidecar
+   * boot handshake so the desktop shell can show the unlock screen without
+   * probing storage itself.
+   */
+  bootState(): "locked" | "ready" {
+    return this.vaultUnlocked ? "ready" : "locked";
+  }
+
+  /**
+   * Complete the deferred boot phase and bring P2P transports up, if unlocked.
+   *
+   * Idempotent: `PluginHost.boot()` and the skill/governance wiring run exactly
+   * once; later calls only (re)start transports. Called by {@link startLocked}
+   * on first run and by `POST /api/vault/unlock` / `POST /api/network/resume`.
+   */
+  async finishBoot(): Promise<void> {
+    if (!this.booted) {
+      await this.host.boot();
+      registerCoreSkills(this.broker, this.host.vaultManager());
+      registerMediaSkill(this.broker, this.trustGate);
+      wireEventBridge(
+        this.host,
+        (event, payload) => this.broadcast(event, payload),
+        this.options.bridgedEvents,
+      );
+      wirePeerAccessConfirmations(this.host, this.trustGate, () => this.peersite());
+      wireMediaAccessConfirmations(this.host, this.trustGate, () => this.media());
+      await this.initGovernance();
+      this.booted = true;
+    }
+
+    if (this.vaultUnlocked && !this.networkPaused) {
+      await this.startP2P();
+    }
+
+    if (this.peerTimer === null) {
+      this.peerTimer = setInterval(() => void this.peerPoller.poll(), 2000);
+      void this.peerPoller.poll();
+    }
+  }
+
+  /** Start the LAN provider and (opt-in) WAN transport. */
+  private async startP2P(): Promise<void> {
+    if (this.options.networking === false) {
+      console.warn(
+        "[core-server] networking disabled: no LAN discovery, no inbound P2P " +
+          "calls, no peer identity is created. Local-only mode.",
+      );
+      return;
+    }
+    this.provider = await startNetworking({
+      broker: this.broker,
+      host: this.host,
+      registry: this.registry,
+      p2pPort: this.options.p2pPort,
+      p2pBindHost: this.options.p2pBindHost,
+    });
+    if (this.options.wanEnabled) {
+      // WAN transport (network-libp2p), strictly opt-in. Shares the p2p-hub
+      // identity with the LAN transport (Optie B unification); dials only
+      // operator-configured relays/listen addresses, never discovers.
+      this.wanProvider = await startWanProvider({
+        broker: this.broker,
+        host: this.host,
+        registry: this.registry,
+        relayAddr: this.options.wanRelayAddr,
+        listenAddrs: this.options.wanListenAddrs,
+      });
+    }
+  }
+
+  /** Stop both P2P transports and drop them from the registries. */
+  private async stopP2P(): Promise<void> {
+    if (this.provider) {
+      this.registry.unregister(this.provider.id);
+      this.host.networkRegistry().unregister(this.provider.id);
+      await this.provider.stop();
+      this.provider = null;
+    }
+    if (this.wanProvider) {
+      this.registry.unregister(this.wanProvider.id);
+      this.host.networkRegistry().unregister(this.wanProvider.id);
+      await this.wanProvider.stop();
+      this.wanProvider = null;
+    }
+  }
+
+  /**
+   * Unlock the vault with the operator's master key, then complete the boot
+   * phase (plugins, identity, transports) and broadcast `vault:unlocked`.
+   *
+   * Security shape (CLAUDE.md principles #6/#7): the raw key is verified
+   * against the vault here and installed on the VaultManager — it never leaves
+   * this call and is never echoed in a response. A wrong key returns a bare
+   * "invalid master key" (401), never *why* it failed.
+   */
+  async unlockVault(masterKey: string): Promise<{ ok: boolean; error?: string }> {
+    if (this.vaultUnlocked) {
+      return { ok: true };
+    }
+    if (typeof masterKey !== "string" || masterKey.length === 0) {
+      return { ok: false, error: "a master key is required" };
+    }
+    const vault = this.host.vaultManager();
+    const vaultExists = await vault.hasVaultFile();
+    if (vaultExists) {
+      const valid = await vault.verifyKey(masterKey);
+      if (!valid) {
+        return { ok: false, error: "invalid master key" };
+      }
+    }
+    vault.setKey(masterKey);
+    this.vaultUnlocked = true;
+    this.networkPaused = false;
+    await this.finishBoot();
+    this.broadcast("vault:unlocked", { at: new Date().toISOString() });
+    return { ok: true };
+  }
+
+  /**
+   * Lock the vault: stop every P2P transport and block the HTTP vault surface
+   * again (the unlock endpoint stays reachable). Plugins stay loaded — the
+   * lock is a session gate on network + operator storage access, not a reload.
+   * A server that was never unlocked stays locked.
+   */
+  async lockVault(): Promise<void> {
+    if (!this.booted) {
+      return;
+    }
+    await this.stopP2P();
+    this.vaultUnlocked = false;
+    this.broadcast("vault:locked", { at: new Date().toISOString() });
+  }
+
+  /**
+   * Pause (stop transports, keep the vault unlocked) or resume the P2P layer.
+   * While paused, peers cannot reach any skill and no discovery happens; the
+   * vault and plugin surface stay available to the local operator.
+   */
+  async setNetworkPaused(paused: boolean): Promise<{ ok: boolean; error?: string }> {
+    if (!this.vaultUnlocked) {
+      return { ok: false, error: "vault is locked" };
+    }
+    if (paused === this.networkPaused) {
+      return { ok: true };
+    }
+    if (paused) {
+      await this.stopP2P();
+      this.networkPaused = true;
+      this.broadcast("network:paused", { at: new Date().toISOString() });
+    } else {
+      await this.startP2P();
+      this.networkPaused = false;
+      this.broadcast("network:resumed", { at: new Date().toISOString() });
+    }
+    return { ok: true };
+  }
+
+  /** Current lock/pause state, surfaced via `GET /api/health`. */
+  vaultState(): { locked: boolean; vaultExists: boolean; networkPaused: boolean } {
+    return {
+      locked: !this.vaultUnlocked,
+      vaultExists: this.vaultExists,
+      networkPaused: this.networkPaused,
+    };
   }
 
   /** Bound address of the HTTP server, or null before `start()`. */
@@ -283,20 +463,7 @@ export class CoreServer {
     }
     this.governanceStream?.stop();
     this.governanceStream = null;
-    if (this.provider) {
-      // Drop the provider from both registries so a stopped server leaves no
-      // stale reference for plugin `ctx.network` lookups or API listings.
-      this.registry.unregister(this.provider.id);
-      this.host.networkRegistry().unregister(this.provider.id);
-      await this.provider.stop();
-      this.provider = null;
-    }
-    if (this.wanProvider) {
-      this.registry.unregister(this.wanProvider.id);
-      this.host.networkRegistry().unregister(this.wanProvider.id);
-      await this.wanProvider.stop();
-      this.wanProvider = null;
-    }
+    await this.stopP2P();
     if (this.wsBus) {
       this.wsBus.close();
       this.wsBus = null;

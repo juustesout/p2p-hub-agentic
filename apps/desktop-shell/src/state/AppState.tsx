@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -14,12 +15,15 @@ import type {
   ExecuteRequest,
   TaskResult,
   Toast,
+  VaultGateState,
   VaultKeyMeta,
   VaultModelInfo,
 } from "../types";
-import { coreBridge } from "../services/core-bridge";
+import { coreBridge, initialLockHint } from "../services/core-bridge";
 import { activityBus } from "../services/activity-bus";
 import { pluginBridge } from "../services/plugin-bridge";
+import { notificationsService } from "../services/notifications";
+import { attachTrayEvents, type TrayHandlers } from "../services/tray";
 
 interface VaultState {
   keys: VaultKeyMeta[];
@@ -33,8 +37,17 @@ interface AppState {
   activities: ActivityEvent[];
   toasts: Toast[];
   vault: VaultState;
+  /** Vault lock-gate + network state (Slice 2). `locked` gates the UI. */
+  vaultGate: VaultGateState;
+  /** True once `/api/health` has been read at least once. Until then the UI
+   *  must not render anything — it cannot know whether the vault is locked. */
+  gateKnown: boolean;
   refreshCapabilities: () => Promise<void>;
   refreshVault: () => Promise<void>;
+  refreshHealth: () => Promise<void>;
+  unlockVault: (masterKey: string) => Promise<{ ok: boolean; error?: string }>;
+  lockVault: () => Promise<void>;
+  setNetworkPaused: (paused: boolean) => Promise<void>;
   execute: (req: ExecuteRequest) => Promise<TaskResult>;
   vaultSet: (key: string, value: string) => Promise<void>;
   vaultDelete: (key: string) => Promise<void>;
@@ -45,6 +58,17 @@ const emptyVault: VaultState = {
   keys: [],
   model: { hasModel: false, hasBaseUrl: false, hasApiKey: false },
   masterKeyConfigured: false,
+};
+
+/**
+ * Fail-closed default: assume the vault is locked until `/api/health` is read.
+ * `gateKnown` flips true on the first successful read; until then the shell
+ * renders nothing (it cannot know whether the vault needs unlocking).
+ */
+const closedVaultGate: VaultGateState = {
+  locked: true,
+  vaultExists: false,
+  networkPaused: false,
 };
 
 const AppContext = createContext<AppState | null>(null);
@@ -63,6 +87,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [activities, setActivities] = useState<ActivityEvent[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [vault, setVault] = useState<VaultState>(emptyVault);
+  const [vaultGate, setVaultGate] = useState<VaultGateState>(closedVaultGate);
+  const [gateKnown, setGateKnown] = useState(false);
+
+  // Mirror for the tray handlers: they must read the *current* pause state
+  // without forcing the whole effect to re-run on every health poll.
+  const vaultGateRef = useRef(vaultGate);
+  vaultGateRef.current = vaultGate;
+
+  // Seed the lock state from the boot-handshake hint (Slice 2). This is a
+  // startup hint only — `/api/health` in `refreshHealth` is authoritative and
+  // flips `gateKnown` once read.
+  useEffect(() => {
+    let cancelled = false;
+    void initialLockHint().then((hint) => {
+      if (!cancelled && hint !== null) {
+        setVaultGate((g) => ({ ...g, locked: hint }));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const pushToast = useCallback(
     (title: string, body: string, kind: Toast["kind"] = "info") => {
@@ -102,9 +148,52 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshHealth = useCallback(async () => {
+    try {
+      const gate = await coreBridge.getHealth();
+      setVaultGate(gate);
+      setGateKnown(true);
+      if (gate.locked) {
+        // The vault surface is gated while locked — don't leak a stale
+        // unlocked vault view into the lock screen.
+        setVault(emptyVault);
+      }
+    } catch {
+      // Core-server not reachable yet; keep last-known gate.
+    }
+  }, []);
+
+  const unlockVault = useCallback(
+    async (masterKey: string) => {
+      const result = await coreBridge.unlockVault(masterKey);
+      if (result.ok) {
+        await refreshHealth();
+        await refreshVault();
+        void refreshCapabilities();
+      }
+      return result;
+    },
+    [refreshHealth, refreshVault, refreshCapabilities],
+  );
+
+  const lockVault = useCallback(async () => {
+    await coreBridge.lockVault();
+    await refreshHealth();
+    setVault(emptyVault);
+  }, [refreshHealth]);
+
+  const setNetworkPaused = useCallback(
+    async (paused: boolean) => {
+      await coreBridge.setNetworkPaused(paused);
+      await refreshHealth();
+    },
+    [refreshHealth],
+  );
+
   useEffect(() => {
     pluginBridge.attach();
     coreBridge.connect();
+    notificationsService.attach();
 
     const offState = coreBridge.onStateChange(setConnection);
     const offEvents = activityBus.subscribeAll((event) => {
@@ -114,6 +203,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     function routeEvent(event: ActivityEvent) {
       switch (event.event) {
+        case "vault:unlocked":
+          setVaultGate((g) => ({ ...g, locked: false }));
+          void refreshVault();
+          void refreshCapabilities();
+          break;
+        case "vault:locked":
+          setVaultGate((g) => ({ ...g, locked: true }));
+          setVault(emptyVault);
+          break;
+        case "network:paused":
+          setVaultGate((g) => ({ ...g, networkPaused: true }));
+          break;
+        case "network:resumed":
+          setVaultGate((g) => ({ ...g, networkPaused: false }));
+          break;
         case "calendar:eventAdded": {
           const payload = event.payload as { title?: unknown } | null;
           pushToast("Calendar", `New event: ${String(payload?.title ?? "untitled")}`, "success");
@@ -149,6 +253,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    let unlistenTray: (() => void) | undefined;
+    const trayHandlers: TrayHandlers = {
+      onLockVault: () => {
+        void lockVault();
+      },
+      onToggleNetwork: () => {
+        void setNetworkPaused(!vaultGateRef.current.networkPaused);
+      },
+    };
+    void attachTrayEvents(trayHandlers).then((un) => {
+      unlistenTray = un;
+    });
+
+    void refreshHealth();
     void refreshCapabilities();
     void refreshVault();
 
@@ -156,15 +274,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // that appear without emitting events.
     const interval = window.setInterval(() => {
       void refreshCapabilities();
+      void refreshHealth();
     }, 10_000);
 
     return () => {
       window.clearInterval(interval);
+      unlistenTray?.();
+      notificationsService.detach();
       offState();
       offEvents();
       coreBridge.disconnect();
     };
-  }, [pushToast, refreshCapabilities, refreshVault]);
+  }, [pushToast, refreshCapabilities, refreshVault, refreshHealth, lockVault, setNetworkPaused]);
 
   const execute = useCallback(
     async (req: ExecuteRequest): Promise<TaskResult> => {
@@ -204,8 +325,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       activities,
       toasts,
       vault,
+      vaultGate,
+      gateKnown,
       refreshCapabilities,
       refreshVault,
+      refreshHealth,
+      unlockVault,
+      lockVault,
+      setNetworkPaused,
       execute,
       vaultSet,
       vaultDelete,
@@ -217,8 +344,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       activities,
       toasts,
       vault,
+      vaultGate,
+      gateKnown,
       refreshCapabilities,
       refreshVault,
+      refreshHealth,
+      unlockVault,
+      lockVault,
+      setNetworkPaused,
       execute,
       vaultSet,
       vaultDelete,

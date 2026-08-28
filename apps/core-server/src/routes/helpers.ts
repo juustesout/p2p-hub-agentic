@@ -66,8 +66,23 @@ export const UI_SECURITY_HEADERS: Record<string, string> = {
   "Referrer-Policy": "no-referrer",
 };
 
-/** Hook events bridged to the WebSocket activity bus by default. */
-export const DEFAULT_BRIDGED_EVENTS = ["core:ready", "calendar:eventAdded"];
+/**
+ * Hook events bridged to the WebSocket activity bus by default. The Slice 2
+ * additions drive the desktop shell's OS notifications: task delegations and
+ * incoming chat (`tasks:taskUpdated`, `chat:messageReceived` — sanitized by the
+ * shell before anything reaches the OS) and the vault/network lifecycle
+ * (`vault:unlocked`, `vault:locked`, `network:paused`, `network:resumed`).
+ */
+export const DEFAULT_BRIDGED_EVENTS = [
+  "core:ready",
+  "calendar:eventAdded",
+  "vault:unlocked",
+  "vault:locked",
+  "network:paused",
+  "network:resumed",
+  "tasks:taskUpdated",
+  "chat:messageReceived",
+];
 
 /** Write a JSON response. */
 export function sendJson(

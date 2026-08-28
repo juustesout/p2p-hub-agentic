@@ -33,6 +33,16 @@ export interface OperatorContext {
   broadcast(event: string, payload: unknown): void;
   loadSettings(): Promise<EffectiveSettings>;
   saveSettings(settings: EffectiveSettings): Promise<void>;
+  /** Vault lock-gate state (Slice 2). */
+  isVaultUnlocked(): boolean;
+  unlockVault(masterKey: string): Promise<{ ok: boolean; error?: string }>;
+  lockVault(): Promise<void>;
+  setNetworkPaused(paused: boolean): Promise<{ ok: boolean; error?: string }>;
+  vaultState(): {
+    locked: boolean;
+    vaultExists: boolean;
+    networkPaused: boolean;
+  };
 }
 
 interface ExecuteBody {
@@ -60,7 +70,11 @@ export async function serveOperator(
   }
 
   if (req.method === "GET" && pathname === "/api/health") {
-    sendJson(res, 200, { ok: true, uptime: process.uptime() });
+    sendJson(res, 200, {
+      ok: true,
+      uptime: process.uptime(),
+      ...ctx.vaultState(),
+    });
     return true;
   }
   if (req.method === "GET" && pathname === "/api/capabilities") {
@@ -72,7 +86,55 @@ export async function serveOperator(
     sendJson(res, 200, await execute(ctx, body));
     return true;
   }
+  if (req.method === "POST" && pathname === "/api/vault/unlock") {
+    const body = (await readJsonBody(req)) as { masterKey?: unknown };
+    if (typeof body.masterKey !== "string") {
+      sendJson(res, 400, {
+        ok: false,
+        error: "unlock expects { masterKey: string }",
+      });
+      return true;
+    }
+    const result = await ctx.unlockVault(body.masterKey);
+    if (!result.ok) {
+      sendJson(res, 401, { ok: false, error: result.error });
+      return true;
+    }
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+  if (req.method === "POST" && pathname === "/api/vault/lock") {
+    if (!ctx.isVaultUnlocked()) {
+      sendJson(res, 200, { ok: true });
+      return true;
+    }
+    await ctx.lockVault();
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+  if (req.method === "POST" && pathname === "/api/network/pause") {
+    const result = await ctx.setNetworkPaused(true);
+    if (!result.ok) {
+      sendJson(res, 403, { ok: false, error: result.error });
+      return true;
+    }
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+  if (req.method === "POST" && pathname === "/api/network/resume") {
+    const result = await ctx.setNetworkPaused(false);
+    if (!result.ok) {
+      sendJson(res, 403, { ok: false, error: result.error });
+      return true;
+    }
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
   if (req.method === "GET" && pathname === "/api/vault/keys") {
+    if (!ctx.isVaultUnlocked()) {
+      sendJson(res, 403, { ok: false, error: "vault is locked" });
+      return true;
+    }
     const vault = ctx.host.vaultManager();
     sendJson(res, 200, {
       keys: await vault.listSecretMetadata(),
@@ -81,6 +143,10 @@ export async function serveOperator(
     return true;
   }
   if (req.method === "GET" && pathname === "/api/vault/model") {
+    if (!ctx.isVaultUnlocked()) {
+      sendJson(res, 403, { ok: false, error: "vault is locked" });
+      return true;
+    }
     const vault = ctx.host.vaultManager();
     const hasModel = await vault.hasSecret("ai.model");
     const hasBaseUrl = await vault.hasSecret("ai.baseUrl");
@@ -89,6 +155,10 @@ export async function serveOperator(
     return true;
   }
   if (req.method === "POST" && pathname === "/api/vault/set") {
+    if (!ctx.isVaultUnlocked()) {
+      sendJson(res, 403, { ok: false, error: "vault is locked" });
+      return true;
+    }
     const body = (await readJsonBody(req)) as { key?: unknown; value?: unknown };
     if (typeof body.key !== "string" || typeof body.value !== "string") {
       sendJson(res, 400, {
@@ -111,6 +181,10 @@ export async function serveOperator(
     return true;
   }
   if (req.method === "DELETE" && pathname.startsWith("/api/vault/")) {
+    if (!ctx.isVaultUnlocked()) {
+      sendJson(res, 403, { ok: false, error: "vault is locked" });
+      return true;
+    }
     const key = decodeURIComponent(pathname.slice("/api/vault/".length));
     const reserved = reservedPrefixFor(ctx, key);
     if (reserved) {

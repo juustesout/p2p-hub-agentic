@@ -10,8 +10,13 @@
  * so the server emits a single machine-readable line once it is ready:
  *
  * ```
- * [P2P_HUB_READY] {"port":41823,"token":"a1b2c3d4..."}
+ * [P2P_HUB_READY] {"port":41823,"token":"a1b2c3d4...","state":"ready"}
  * ```
+ *
+ * `state` reports the vault lock gate (Slice 2): `"locked"` when a
+ * pre-existing vault is awaiting its master key (the bridge is up and the
+ * operator API — `/api/health`, `/api/vault/unlock` — is reachable, but no
+ * plugins, identity or P2P transports exist yet), `"ready"` otherwise.
  *
  * The host scans stdout for the exact `[P2P_HUB_READY] ` prefix (delimiter-
  * anchored with a trailing space — a bare `startsWith("[P2P_HUB_READY]")`
@@ -39,6 +44,11 @@ export interface SidecarReady {
   port: number;
   /** The per-boot token guarding `/api/*` and `/ws`. */
   token: string;
+  /**
+   * Vault lock-gate status: `"locked"` (vault awaiting its master key, only
+   * the operator API is live) or `"ready"` (full boot, P2P transports up).
+   */
+  state: "locked" | "ready";
 }
 
 /** Format the ready line exactly as the host expects it. */
@@ -48,8 +58,9 @@ export function sidecarReadyLine(ready: SidecarReady): string {
 
 /**
  * Parse a `[P2P_HUB_READY]` line, or `null` when it is not one. Fail-closed:
- * a wrong prefix, malformed JSON, an out-of-range port or an empty token all
- * parse to `null` — a host must never half-accept a broken handshake.
+ * a wrong prefix, malformed JSON, an out-of-range port, an empty token or an
+ * unknown `state` all parse to `null` — a host must never half-accept a broken
+ * handshake.
  */
 export function parseSidecarReady(line: string): SidecarReady | null {
   if (!line.startsWith(SIDECAR_READY_PREFIX + " ")) {
@@ -65,7 +76,11 @@ export function parseSidecarReady(line: string): SidecarReady | null {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return null;
   }
-  const { port, token } = parsed as { port?: unknown; token?: unknown };
+  const { port, token, state } = parsed as {
+    port?: unknown;
+    token?: unknown;
+    state?: unknown;
+  };
   if (
     typeof port !== "number" ||
     !Number.isInteger(port) ||
@@ -77,5 +92,8 @@ export function parseSidecarReady(line: string): SidecarReady | null {
   if (typeof token !== "string" || token.length === 0) {
     return null;
   }
-  return { port, token };
+  if (state !== "locked" && state !== "ready") {
+    return null;
+  }
+  return { port, token, state };
 }

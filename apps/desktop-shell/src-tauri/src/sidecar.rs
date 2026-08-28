@@ -6,9 +6,12 @@
 //! `P2P_HUB_SIDECAR_READY=1`, then reads a single machine-readable line on the
 //! child's stdout:
 //!
-//!   `[P2P_HUB_READY] {"port":<bound>,"token":"<boot-token>"}`
+//!   `[P2P_HUB_READY] {"port":<bound>,"token":"<boot-token>","state":"ready"}`
 //!
-//! The line format/prefix is defined once on the Node side
+//! `state` is the vault lock gate (Slice 2): `"ready"` for a full boot, or
+//! `"locked"` when a pre-existing vault is awaiting its master key (the bridge
+//! is up, but plugins/identity/P2P transports are deferred). The line
+//! format/prefix is defined once on the Node side
 //! (`apps/core-server/src/sidecar.ts`) and mirrored here; the delimiter is
 //! anchored on the prefix + a space so a `[P2P_HUB_READYING]`-class mismatch can
 //! never be misread as the handshake (CLAUDE.md principle #2). Fail-closed both
@@ -37,14 +40,16 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct SidecarConfig {
     pub port: u16,
     pub token: String,
+    /// `"locked"` (vault awaiting its master key) or `"ready"` (full boot).
+    pub state: String,
 }
 
 /// Parse a single stdout line from the core-server. Returns `None` (never an
 /// error, never a panic) unless the line is exactly the delimiter-anchored
-/// handshake with a valid port and a non-empty token. Log output that merely
-/// *starts* with the prefix is rejected — the trailing-space anchor is what
-/// makes `[P2P_HUB_READYING]` and `[P2P_HUB_READY]{...}` distinguishable from
-/// `[P2P_HUB_READY] {...}`.
+/// handshake with a valid port, a non-empty token and a known `state`. Log
+/// output that merely *starts* with the prefix is rejected — the trailing-space
+/// anchor is what makes `[P2P_HUB_READYING]` and `[P2P_HUB_READY]{...}`
+/// distinguishable from `[P2P_HUB_READY] {...}`.
 pub fn parse_ready_line(line: &str) -> Option<SidecarConfig> {
     let trimmed = line.trim();
     let payload = trimmed.strip_prefix(SIDECAR_READY_PREFIX)?;
@@ -57,9 +62,14 @@ pub fn parse_ready_line(line: &str) -> Option<SidecarConfig> {
     if token.is_empty() {
         return None;
     }
+    let state = value.get("state")?.as_str()?;
+    if state != "locked" && state != "ready" {
+        return None;
+    }
     Some(SidecarConfig {
         port: port as u16,
         token: token.to_string(),
+        state: state.to_string(),
     })
 }
 
@@ -221,6 +231,7 @@ pub fn spawn_core_sidecar(data_dir: Option<PathBuf>) -> Result<SidecarHandle, St
                 config: SidecarConfig {
                     port: 0,
                     token: String::new(),
+                    state: "locked".to_string(),
                 },
                 drainer: Some(drainer),
             };
@@ -249,6 +260,7 @@ pub fn spawn_core_sidecar(data_dir: Option<PathBuf>) -> Result<SidecarHandle, St
                     config: SidecarConfig {
                         port: 0,
                         token: String::new(),
+                        state: "locked".to_string(),
                     },
                     drainer: Some(drainer),
                 };
@@ -270,12 +282,28 @@ mod tests {
 
     #[test]
     fn parse_accepts_the_exact_handshake_line() {
-        let line = "[P2P_HUB_READY] {\"port\":44619,\"token\":\"abc123\"}";
+        let line = "[P2P_HUB_READY] {\"port\":44619,\"token\":\"abc123\",\"state\":\"ready\"}";
         assert_eq!(
             parse_ready_line(line),
             Some(SidecarConfig {
                 port: 44619,
-                token: "abc123".to_string()
+                token: "abc123".to_string(),
+                state: "ready".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_distinguishes_locked_from_ready() {
+        let locked = parse_ready_line(
+            "[P2P_HUB_READY] {\"port\":44619,\"token\":\"abc123\",\"state\":\"locked\"}",
+        );
+        assert_eq!(
+            locked,
+            Some(SidecarConfig {
+                port: 44619,
+                token: "abc123".to_string(),
+                state: "locked".to_string(),
             })
         );
     }
@@ -310,15 +338,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_an_unknown_or_missing_boot_state() {
+        // `state` is the vault lock gate; an unrecognised value is never
+        // half-accepted as if the host knew what it meant (CLAUDE.md #2/#7).
+        assert_eq!(
+            parse_ready_line("[P2P_HUB_READY] {\"port\":1,\"token\":\"x\"}"),
+            None
+        );
+        assert_eq!(
+            parse_ready_line("[P2P_HUB_READY] {\"port\":1,\"token\":\"x\",\"state\":\"unlocking\"}"),
+            None
+        );
+        assert_eq!(
+            parse_ready_line("[P2P_HUB_READY] {\"port\":1,\"token\":\"x\",\"state\":true}"),
+            None
+        );
+    }
+
+    #[test]
     fn parse_tolerates_whitespace_around_the_line() {
         // read_line keeps the trailing `\n`; JSON whitespace after the delimiter
         // is fine — the port/token checks are the fail-closed part.
         assert_eq!(
-            parse_ready_line("[P2P_HUB_READY]   {\"port\":1,\"token\":\"x\"}\n"),
+            parse_ready_line("[P2P_HUB_READY]   {\"port\":1,\"token\":\"x\",\"state\":\"ready\"}\n"),
             Some(SidecarConfig {
                 port: 1,
-                token: "x".to_string()
+                token: "x".to_string(),
+                state: "ready".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn stop_kills_a_live_child_process() {
+        // Quit-from-tray is `SidecarHandle::stop()` + app exit; close-to-tray
+        // never touches the handle. This proves stop() actually reaps a live
+        // child (the core-server), not just a bookkeeping flag.
+        let child = Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let mut handle = SidecarHandle {
+            child,
+            config: SidecarConfig {
+                port: 0,
+                token: String::new(),
+                state: "locked".to_string(),
+            },
+            drainer: None,
+        };
+        handle.stop();
+        assert!(
+            handle.child.try_wait().ok().flatten().is_some(),
+            "stop() must kill and reap the child process"
         );
     }
 
