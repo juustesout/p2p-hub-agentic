@@ -186,15 +186,19 @@ export const MAX_TOPIC_LENGTH = 256;
 export const MAX_ACK_REASON_LENGTH = 128;
 
 /**
- * A wire `topic`: `[A-Za-z0-9_][A-Za-z0-9_.-]*` with an optional
- * namespace segment (`:name`) and an optional trailing `:*` wildcard. Follows
+ * A wire `topic`: `[A-Za-z0-9_][A-Za-z0-9_.-]*` with zero to three
+ * namespace segments (`:name`) and an optional trailing `:*` wildcard. Follows
  * the hook-event naming convention (`calendar:eventAdded`), so a peer cannot
  * smuggle path-like or control characters into a topic; the `:`-delimiter is
- * what namespace checks anchor on (CLAUDE.md principle #2). Wildcards are only
- * the terminal `:*` form — never a bare `*` or a mid-string star.
+ * what namespace checks anchor on (CLAUDE.md principle #2). The segment count
+ * is bounded (mirrors `MAX_TOPIC_SEGMENTS` in core's `EVENT_TOPIC_RE`) so a
+ * peer cannot construct unbounded nesting on the wire; a `:` is never allowed
+ * *inside* a segment value, so `:` stays the one unambiguous delimiter.
+ * Wildcards are only the terminal `:*` form — never a bare `*` or a
+ * mid-string star.
  */
 const TOPIC_RE =
-  /^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*)?(?::\*)?$/;
+  /^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*){0,3}(?::\*)?$/;
 
 /** A subscription id is bounded and dot/underscore/dash safe (map keys). */
 const SUBSCRIPTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

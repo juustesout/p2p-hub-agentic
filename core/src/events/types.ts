@@ -67,13 +67,25 @@ export type EventMessageHandler = (
 ) => Promise<SubAckBody | null> | SubAckBody | null;
 
 /**
- * A topic: `[A-Za-z0-9_][A-Za-z0-9_.-]*` with an optional hook-style namespace
- * segment (`:name`) and an optional trailing `:*` wildcard. Mirrors the wire
- * contract's `TOPIC_RE` exactly (namespace segment optional, wildcard only the
- * terminal `:*` form) so a wire-valid topic is never hub-rejected confusingly.
+ * Maximum number of `:segment` parts after the base in a topic. Bounded on
+ * purpose (the same DoS-capping discipline as every other depth cap in the
+ * codebase): enough for per-entity topics like `tasks:project:<id>:updated`
+ * (base + 3 segments), never unbounded nesting.
+ */
+export const MAX_TOPIC_SEGMENTS = 3;
+
+/**
+ * A topic: `[A-Za-z0-9_][A-Za-z0-9_.-]*` with zero to {@link MAX_TOPIC_SEGMENTS}
+ * delimiter-separated segments (`:name`) and an optional trailing `:*` wildcard.
+ * A `:` is never allowed *inside* a segment value, so `:` is the one unambiguous
+ * delimiter — the same invariant that keeps dotted plugin ids from colliding
+ * (a segment may still contain `.`/`-`/`_`, but never a colon, so no encoding
+ * trick can smuggle a fake delimiter into a topic). Mirrors the wire contract's
+ * `TOPIC_RE` (wildcard only the terminal `:*` form) so a wire-valid topic is
+ * never hub-rejected confusingly.
  */
 export const EVENT_TOPIC_RE =
-  /^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*)?(?::\*)?$/;
+  /^[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-]*){0,3}(?::\*)?$/;
 
 /** Whether a topic ends in the terminal `:*` wildcard. */
 export function isWildcardTopic(topic: string): boolean {

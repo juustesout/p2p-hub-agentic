@@ -70,6 +70,27 @@ export type SubAckReason =
   | "subscription-not-found"
   | "peer-not-resolvable";
 
+/**
+ * Per-peer authorization hook for a topic namespace, registered by a plugin
+ * (via `ctx.events.registerSubscriptionGuard`) and consulted IN ADDITION to the
+ * static `exposedEvents` gate — never instead of. Runs at two moments:
+ *
+ *   1. on an inbound `sub_req` (a denial answers with `"not-authorized"`), and
+ *   2. right before every `event_emit` dispatch to a specific, already
+ *      subscribed peer (a denial silently skips that one recipient — a member
+ *      removed *after* subscribing stops receiving immediately, no resubscribe
+ *      needed).
+ *
+ * A guard is namespace-anchored: the registered namespace must end with `:`
+ * (delimiter-anchored, CLAUDE.md principle #2) and applies to every topic that
+ * starts with it. Multiple guards for one topic all must pass (AND). A throwing
+ * or absent guard is a denial, never an open door.
+ */
+export type SubscriptionGuard = (
+  peerId: string,
+  topic: string,
+) => boolean | Promise<boolean>;
+
 export interface PeerSubscription {
   peerId: string;
   /** Resolved discovered peer used to fan events out. */
@@ -138,6 +159,7 @@ export class SubscriptionHub {
   private exposed = new Set<string>();
   private subscriptions = new Map<string, PeerSubscription>();
   private sequences = new Map<string, number>();
+  private readonly guards = new Map<string, SubscriptionGuard>();
   private readonly network: EventNetwork;
   private readonly emitGate: TelemetryGate;
   private readonly peerRateLimit: ((peerId: string) => number | undefined) | undefined;
@@ -178,6 +200,55 @@ export class SubscriptionHub {
   /** The current exposed-event set (exact topics only). */
   exposedEvents(): string[] {
     return [...this.exposed];
+  }
+
+  /**
+   * Register (or replace) the per-peer guard for a topic namespace. The
+   * namespace must be non-empty and end with `:` so the match is
+   * delimiter-anchored (CLAUDE.md principle #2) — a `tasks:project:` guard
+   * covers `tasks:project:<id>:updated` but never `tasks:projectEvil:x`.
+   * Re-registering the same namespace replaces its guard. Guards are never
+   * auto-removed on plugin deactivation (a stale guard fails closed, never
+   * opens).
+   */
+  registerSubscriptionGuard(namespace: string, guard: SubscriptionGuard): void {
+    if (
+      typeof namespace !== "string" ||
+      namespace.length === 0 ||
+      !namespace.endsWith(":")
+    ) {
+      throw new Error(
+        'subscription guard namespace must be non-empty and end with ":"',
+      );
+    }
+    if (typeof guard !== "function") {
+      throw new Error("subscription guard must be a function");
+    }
+    this.guards.set(namespace, guard);
+  }
+
+  /**
+   * Evaluate every guard whose namespace anchors the topic. AND semantics: all
+   * matching guards must grant. A topic that matches no guard is allowed
+   * through (the peer/exposure gates still apply). A throwing guard is a
+   * denial, never an open door.
+   */
+  private async guardsAllow(peerId: string, topic: string): Promise<boolean> {
+    for (const [namespace, guard] of this.guards) {
+      if (!topic.startsWith(namespace)) {
+        continue;
+      }
+      let granted = false;
+      try {
+        granted = await guard(peerId, topic);
+      } catch {
+        granted = false;
+      }
+      if (!granted) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -235,6 +306,12 @@ export class SubscriptionHub {
       if (!topicMatches(subscription.topic, topic)) {
         continue;
       }
+      // Re-authorize this specific recipient right before dispatch: a member
+      // that was removed after subscribing stops receiving immediately. A
+      // denial silently skips that one subscriber — never fails the whole emit.
+      if (!(await this.guardsAllow(subscription.peerId, topic))) {
+        continue;
+      }
       let allowed = true;
       try {
         this.applyPeerRateLimit(subscription.peerId, topic);
@@ -279,8 +356,25 @@ export class SubscriptionHub {
     this.sequences.clear();
   }
 
+  /**
+   * Whether `topic` may leave the process. `exposedEvents` stays the static,
+   * manifest-level gate — "may this topic *pattern* ever leave the process" —
+   * so a topic passes when it is listed exactly OR when it matches an exposed
+   * wildcard pattern (e.g. the manifest exposing `tasks:project:*` exposes every
+   * `tasks:project:<id>:updated`). Matching is delimiter-anchored
+   * (`topicMatches`, CLAUDE.md principle #2). The per-namespace subscription
+   * guard is a separate, per-peer gate on top of this one — never a replacement.
+   */
   private isExposed(topic: string): boolean {
-    return this.exposed.has(topic);
+    if (this.exposed.has(topic)) {
+      return true;
+    }
+    for (const entry of this.exposed) {
+      if (isWildcardTopic(entry) && topicMatches(entry, topic)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -340,6 +434,14 @@ export class SubscriptionHub {
     // Exact topics must be exposed; wildcards are registered (emit re-auth).
     if (!isWildcardTopic(topic) && !this.isExposed(topic)) {
       return this.reject(body, "topic-not-exposed");
+    }
+
+    // The per-namespace subscription guard (if one is registered for this
+    // topic) is a second, independent gate on top of exposure: project
+    // membership, for example. Denied peers get the same opaque reason as the
+    // peer gate so a non-member cannot probe topic existence.
+    if (!(await this.guardsAllow(peerId, topic))) {
+      return this.reject(body, "not-authorized");
     }
 
     if (this.countForPeer(peerId) >= MAX_SUBSCRIPTIONS_PER_PEER) {

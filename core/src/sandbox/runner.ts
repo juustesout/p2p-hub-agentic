@@ -374,6 +374,9 @@ function createSandboxPluginContext(runtime: SandboxRuntime): PluginContext {
       publishRemote: unavailable("ctx.events.publishRemote"),
       subscribeRemote: unavailable("ctx.events.subscribeRemote"),
       unsubscribeRemote: unavailable("ctx.events.unsubscribeRemote"),
+      registerSubscriptionGuard: unavailable(
+        "ctx.events.registerSubscriptionGuard",
+      ),
     },
     access: {
       issue: unavailable("ctx.access.issue"),

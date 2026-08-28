@@ -717,6 +717,15 @@ function buildEventsCapability(
       }
       return layer.adapter.unsubscribeRemote(subscriptionId);
     },
+    registerSubscriptionGuard: (namespace, guard) => {
+      // Events are an opt-in enhancement: without an event-capable layer the
+      // guard simply never runs (fail-closed, not fail-open — no layer means no
+      // remote events at all). The hub validates the namespace delimiter.
+      void resolveEventLayer().then(
+        (layer) => layer?.hub.registerSubscriptionGuard(namespace, guard),
+        () => {},
+      );
+    },
   };
 }
 

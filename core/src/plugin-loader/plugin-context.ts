@@ -12,6 +12,7 @@ import type {
   SkillRegistrationOptions,
 } from "../task-broker/task-broker";
 import type { RemoteEvent } from "../events/remote-event-adapter";
+import type { SubscriptionGuard } from "../events/subscription-hub";
 
 /**
  * Namespace-aware view over the shared {@link HookRegistry}. `emit` and
@@ -158,6 +159,20 @@ export interface EventsCapability {
    * refresh). Resolves `false` when no such subscription existed.
    */
   unsubscribeRemote(subscriptionId: string): Promise<boolean>;
+  /**
+   * Register a per-peer authorization guard for `namespace` (which must end
+   * with `:` — the match is delimiter-anchored). The guard is consulted by the
+   * remote hub IN ADDITION to the static `exposedEvents` gate, at subscribe
+   * time and again right before each event is dispatched to a specific
+   * subscriber (so a peer removed from the guard immediately stops receiving).
+   * A registered guard is the plugin's own per-project membership gate (e.g.
+   * `tasks:project:`); it never replaces the manifest exposure gate. No-op
+   * when the host has no event-capable network — the guard simply never runs.
+   */
+  registerSubscriptionGuard(
+    namespace: string,
+    guard: SubscriptionGuard,
+  ): void;
 }
 
 /**
