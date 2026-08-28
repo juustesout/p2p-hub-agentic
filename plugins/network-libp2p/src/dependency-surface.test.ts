@@ -33,6 +33,9 @@ const APPROVED_DEPENDENCIES: ReadonlySet<string> = new Set([
   "@libp2p/circuit-relay-v2",
   "@libp2p/autonat",
   "@libp2p/dcutr",
+  // key handling: reconstructing a libp2p node from the p2p-hub Ed25519 key
+  // (Optie B / identity unification) needs `privateKeyFromRaw`
+  "@libp2p/crypto",
   // peer-metadata exchange consumed by circuit-relay-v2 (see services block
   // in the provider); explicitly not a discovery/routing mechanism
   "@libp2p/identify",

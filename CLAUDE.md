@@ -466,6 +466,41 @@ When asked to review or verify security-relevant work in this repo:
   review-worthy change, not a routine chore, and be ready for the "reservation
   via `addresses.listen` on `/p2p-circuit`" mechanism to shift between
   releases.
+- **Kademlia-DHT / open global discovery: considered and deliberately rejected
+  (27-08).** There is **no DHT slice, no DHT brief, and no plan to add one** —
+  a future session that proposes it must engage with this reasoning, not
+  re-litigate from scratch. Reasons, in order of strength:
+  1. **The problem DHT would solve does not exist here.** The fixed VPS relay
+     gives every contact a stable `/p2p-circuit` multiaddr that is independent
+     of the peer's changing home IP/ISP: as long as the peer's PeerId and the
+     relay's PeerId are constant, `…/<RELAY_ID>/p2p-circuit/p2p/<PEER_ID>` never
+     changes. Peer-address mobility — the canonical DHT use case — is already
+     handled. No unique application use case remains that ENS / invites /
+     contacts / direct relay routing do not already cover.
+  2. **It is a paradigm shift, not an extension.** An open DHT turns a
+     strictly invite-only, trust-first network into an open global overlay,
+     contradicting deny-by-default and the privacy-first foundation. If it were
+     ever built, a node must be **client-mode only** — never server-mode, which
+     would turn home nodes into third-party infrastructure. But even a client
+     query ("where is PeerId X?") leaks *which peers a node has relationships
+     with* to the queried DHT node — unacceptable in this privacy model.
+  3. **Vanilla Kademlia (what `@libp2p/kad-dht` is) is not safe here.** Sybil
+     (mass-generated virtual PeerIds) enables Eclipse attacks (sitting on the
+     target's hash range to intercept/manipulate its queries). S/Kademlia or
+     crypto-puzzle / IP-rate-limited ID generation would be a prerequisite.
+  4. **A new defense layer would be required, not "more of the same".** The
+     TaskBroker per-peer rate limit (a hard start precondition of
+     `network-libp2p`) protects the *application* layer against bursts from
+     *known, authorized* peers **after** auth. Open discovery would let unknown
+     peers force transport-level TCP/Noise handshakes (CPU cost) *before* the
+     broker ever sees them — a connection-flood surface the current
+     rate-limiting does not touch. An open-discovery model needs its own
+     transport-level connection gate; that was never built and is not implied.
+  Consequence: keep the `network-libp2p` dependency-surface test's hard block on
+  `@libp2p/kad-dht` and gossipsub in place as a deliberate architectural guard,
+  and treat any proposal to lift it as an architecture decision requiring this
+  reasoning revisited. The WAN layer is functionally complete with Slice 1
+  (relay + Optie-B identity unification + direct contact routing).
 
 ## Known blind spots & CI limitations
 

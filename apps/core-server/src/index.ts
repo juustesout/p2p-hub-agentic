@@ -27,8 +27,17 @@ async function main(): Promise<void> {
     console.error(`[core-server] ${loaded.error}`);
     process.exit(1);
   }
-  const { host, exposed, port, p2pPort, p2pBindHost, networking } =
-    loaded.config;
+  const {
+    host,
+    exposed,
+    port,
+    p2pPort,
+    p2pBindHost,
+    networking,
+    wanEnabled,
+    wanRelayAddr,
+    wanListenAddrs,
+  } = loaded.config;
   if (exposed) {
     console.warn(
       `[core-server] WARNING: binding the HTTP/WS bridge to non-loopback ` +
@@ -46,13 +55,17 @@ async function main(): Promise<void> {
     p2pBindHost,
     masterKey: process.env.P2P_HUB_VAULT_KEY,
     networking,
+    wanEnabled,
+    wanRelayAddr,
+    wanListenAddrs,
   });
 
   await server.start();
 
   console.log(
     `[core-server] listening on http://${host}:${port}` +
-      (networking ? "" : " (networking disabled: local-only)"),
+      (networking ? "" : " (networking disabled: local-only)") +
+      (wanEnabled ? " (WAN transport enabled)" : ""),
   );
 
   const shutdown = async () => {

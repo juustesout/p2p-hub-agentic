@@ -47,7 +47,7 @@ skills, vault, ai), and plugins are reached either over the local P2P layer
 |------|-----------|
 | **1. Identity** | Ed25519 keypairs per peer; transport identity binding (Fase 1B) pins the presented TLS certificate fingerprint to the announced `peerId` via the mDNS TXT side channel. |
 | **2. Capability** | Versioned, default-deny wire contracts (`p2p-hub:website:v1`, `p2p-hub:peersite:auth:v1`). Unknown protocol/version or malformed envelopes are rejected. |
-| **3. Transport** | `network-light`: mDNS discovery + encrypted, authenticated TCP. Transport-agnostic by design (`network-agentanycast` is an alternative daemon-backed transport). |
+| **3. Transport** | `network-light`: mDNS discovery + encrypted, authenticated TCP. `network-libp2p`: opt-in WAN transport over a circuit-relay for reaching peers behind NAT (same identity, no discovery). Transport-agnostic by design (`network-agentanycast` is an alternative daemon-backed transport). |
 | **4. Content** | Local-first assets served under strict directory containment, with per-asset byte caps and byte-exact transfer. |
 
 **Agents get their own derived identities** (child keypairs, not the
@@ -117,6 +117,73 @@ binding with Ed25519. There is no anonymous mode.
 
 ---
 
+## Reaching peers beyond the LAN (WAN relay, opt-in)
+
+The LAN transport (`network-light`) finds peers over mDNS on the local network.
+To reach peers on the internet — e.g. behind NAT/CGNAT — the core-server can
+additionally run the **WAN transport** (`network-libp2p`) against an
+operator-supplied [circuit-relay v2](https://libp2p.io/docs/circuit-relay/)
+node. This is strictly **opt-in** (`P2P_HUB_WAN_ENABLED`, default `false`): a
+default boot keeps the zero-public-surface posture unchanged.
+
+The WAN transport:
+
+* **Shares the p2p-hub identity.** The libp2p transport PeerId is derived from
+  the *same* Ed25519 identity as the LAN peerId (`IdentityManager`'s
+  `exportLibp2pKeySeed()`), so a peer is addressable by one identity over both
+  LAN and WAN — no dual-identity split.
+* **Is a pure bytepipe.** It carries the exact same authenticated wire contract
+  as the LAN transport (`hello` → `hello_ack` → `auth` → `task` → `result`) and
+  **discovers nothing**: it only dials the relay and listen addresses you
+  configure. There is no WAN discovery/routing surface.
+* **Keeps the TaskBroker as the single authorization point.** A
+  network-exposed skill without a `remote` policy is still denied before
+  dispatch, no anonymous traffic, and the broker-wide per-peer rate-limit gate
+  is a hard start precondition.
+* **E2E-encrypted content, visible participant metadata.** The relay forwards
+  bytes and never terminates the Noise session, so message *content* stays
+  confidential. That does **not** hide *who talks to whom*: the relay operator
+  can observe the two endpoint PeerIds of every relayed connection plus its
+  volume and timing — the same metadata trade-off this project already
+  documents for the LAN transport and ENS resolution. Relay through an operator
+  you control.
+
+### Run against a relay
+
+> **Whose relay is this?** The address below is a **first-party** relay operated
+> by this project's own developer (the VPS is owned and paid through July 2027)
+> and was used to verify this wiring end-to-end (reachability + encrypted
+> reservation + relayed address, confirmed live). It is operator-controlled
+> infrastructure, not an unaffiliated third-party service — but it is still a
+> **single point of metadata**: every peer that uses it routes its connection
+> metadata (endpoints + volume/timing) through this operator, and availability
+> depends on that one VPS. For full sovereignty and redundancy, point
+> `P2P_HUB_WAN_RELAY` at relays you run yourself (a circuit-relay node is ~20
+> lines: `circuitRelayServer()` + tcp + noise + yamux) or configure more than
+> one.
+
+```bash
+# Build once (the WAN provider is a workspace dependency)
+npm run build
+
+# Start the core-server with the WAN transport wired to a relay
+P2P_HUB_WAN_ENABLED=true \
+P2P_HUB_WAN_RELAY="/ip4/144.172.102.63/tcp/4002/p2p/12D3KooWJYuvYQS7jkknLkNfrNaqEtcej2qKn5uZwQgZwHUT2TyV" \
+npm run start -w @p2p-hub/core-server
+```
+
+At startup the node dials the relay, claims an encrypted reservation and
+advertises a relayed (`/p2p-circuit`) address, so peers behind NAT become
+reachable. Full env-var table lives in `apps/core-server/src/config.ts`:
+
+| Variable | Meaning |
+| --- | --- |
+| `P2P_HUB_WAN_ENABLED` | Enable the WAN transport. Default `false`; ignored while networking is disabled. |
+| `P2P_HUB_WAN_RELAY` | Operator circuit-relay v2 multiaddr to dial and reserve through. |
+| `P2P_HUB_WAN_LISTEN` | Optional comma-separated listen multiaddrs (default loopback ephemeral). |
+
+---
+
 ## Getting started
 
 ### Prerequisites
@@ -179,6 +246,7 @@ p2p-hub/
 ├── core/                 # PluginHost, TaskBroker, vault, identity, site mirroring
 ├── plugins/
 │   ├── network-light/    # LAN transport: mDNS discovery + encrypted TCP
+│   ├── network-libp2p/   # WAN transport: opt-in circuit-relay bytepipe (see below)
 │   ├── peersite/         # P2P static-site publishing (website:v1)
 │   ├── chat/             # Signed 1-on-1 messaging over the network
 │   ├── contacts/         # Identity registry (challenge-response proof of possession)
@@ -188,6 +256,7 @@ p2p-hub/
 │   └── ...               # demo plugins (calendar, tasks, notes, paint, calc)
 ├── apps/
 │   ├── core-server/      # Loopback HTTP/WS bridge to core capabilities
+│   │                     # + opt-in WAN transport wiring (P2P_HUB_WAN_*)
 │   ├── desktop-shell/    # Tauri desktop shell for the P2P network
 │   ├── testlab/          # Multi-peer integration lab (smoke scenarios)
 │   └── create-p2p-plugin # Plugin scaffold & signing tooling

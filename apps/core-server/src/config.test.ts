@@ -26,6 +26,9 @@ test("loadConfig applies the default fallback chain on an empty environment", ()
   assert.equal(config.p2pPort, DEFAULT_P2P_PORT);
   assert.equal(config.p2pBindHost, DEFAULT_P2P_BIND_HOST);
   assert.equal(config.networking, true);
+  assert.equal(config.wanEnabled, false);
+  assert.equal(config.wanRelayAddr, "");
+  assert.deepEqual(config.wanListenAddrs, []);
 });
 
 test("HTTP port: P2P_HUB_PORT wins, then PORT, then the default", () => {
@@ -90,6 +93,34 @@ test("P2P_ENABLE_NETWORKING is parsed as a boolean and P2P_HUB_NETWORKING is the
   );
   // Unrecognized values fall back to the default instead of flipping.
   assert.equal(cfg({ P2P_ENABLE_NETWORKING: "maybe" }).networking, true);
+});
+
+test("WAN transport config: opt-in default, relay/listen parsing, gated on networking", () => {
+  // Strictly opt-in.
+  assert.equal(cfg({}).wanEnabled, false);
+
+  // Enabled on its own flag.
+  const enabled = cfg({ P2P_HUB_WAN_ENABLED: "1" });
+  assert.equal(enabled.wanEnabled, true);
+  assert.equal(enabled.wanRelayAddr, "");
+  assert.deepEqual(enabled.wanListenAddrs, []);
+
+  // Relay + listen multiaddrs parse (comma-separated, trimmed, empties dropped).
+  const wired = cfg({
+    P2P_HUB_WAN_ENABLED: "1",
+    P2P_HUB_WAN_RELAY: " /ip4/1.2.3.4/tcp/4001/p2p/12D3KooWxyz ",
+    P2P_HUB_WAN_LISTEN: "/ip4/0.0.0.0/tcp/4277, , /ip6/::/tcp/4277",
+  });
+  assert.equal(wired.wanRelayAddr, "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWxyz");
+  assert.deepEqual(wired.wanListenAddrs, [
+    "/ip4/0.0.0.0/tcp/4277",
+    "/ip6/::/tcp/4277",
+  ]);
+
+  // A WAN flag with networking disabled must never boot a WAN-only node.
+  const gated = cfg({ P2P_HUB_WAN_ENABLED: "1", P2P_HUB_NETWORKING: "0" });
+  assert.equal(gated.networking, false);
+  assert.equal(gated.wanEnabled, false);
 });
 
 test("the HTTP bridge bind gate is preserved: non-loopback host still requires P2P_HUB_EXPOSE=1", () => {

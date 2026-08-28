@@ -216,6 +216,32 @@ export class IdentityManager {
   }
 
   /**
+   * Export the operator keypair in the exact raw form libp2p's
+   * `privateKeyFromRaw` expects — a 64-byte Ed25519 `seed ‖ publicKey`
+   * buffer — so a libp2p WAN transport node can be started with *this same*
+   * identity (Optie B / unification, see HANDOVER "WAN-onderzoek Vraag 2").
+   *
+   * This is the single, deliberate exception to "the private key never leaves
+   * this class": the PKCS8 PEM string itself never escapes — only this
+   * purpose-built, fixed-shape Uint8Array is handed out, and only via an
+   * explicit capability call. The WAN provider wiring in core-server is the
+   * only intended caller. Deriving the public half from the loaded KeyObject
+   * (never from caller-supplied bytes) keeps seed and pub provably the same
+   * keypair.
+   */
+  async exportLibp2pKeySeed(): Promise<Uint8Array> {
+    await this.getOrCreateIdentity();
+    const jwk = (this.privateKey as crypto.KeyObject).export({ format: "jwk" }) as {
+      d: string;
+      x: string;
+    };
+    return Buffer.concat([
+      Buffer.from(jwk.d, "base64url"),
+      Buffer.from(jwk.x, "base64url"),
+    ]);
+  }
+
+  /**
    * The operator keypair's raw 32-byte Ed25519 seed, extracted from the private
    * key's JWK form. Read-only, never leaves this class — it is the input to
    * {@link deriveChildIdentity}'s HKDF, never exposed to any caller.

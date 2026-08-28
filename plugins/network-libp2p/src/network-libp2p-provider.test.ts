@@ -144,6 +144,57 @@ test("start succeeds with the rate-limiting gate and identity in place", async (
   }
 });
 
+test("Optie B: a privateKeyRaw node reports the same transport public key as the p2p-hub identity", async () => {
+  // Build the exact `seed ‖ publicKey` 64-byte buffer `IdentityManager` hands
+  // to a WAN provider. The transport key must then be THIS key, not a random
+  // libp2p one.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  const privJwk = privateKey.export({ format: "jwk" }) as { d: string };
+  const pubJwk = publicKey.export({ format: "jwk" }) as { x: string };
+  const seedRaw = Buffer.concat([
+    Buffer.from(privJwk.d, "base64url"),
+    Buffer.from(pubJwk.x, "base64url"),
+  ]);
+  const identity = {
+    peerId: Buffer.from(pubJwk.x, "base64url").toString("hex"),
+    publicKeyHex: Buffer.from(pubJwk.x, "base64url").toString("hex"),
+  };
+  const provider = new NetworkLibp2pProvider({
+    listenAddresses: ["/ip4/127.0.0.1/tcp/0"],
+    identity,
+    identitySigner: async (data) => crypto.sign(null, data, privateKey),
+    hasBrokerRateLimiting: () => true,
+    privateKeyRaw: seedRaw,
+  });
+  try {
+    await provider.start();
+    // The exposed transport public-key hex equals the p2p-hub identity peerId —
+    // same key material, so the WAN PeerId and the mDNS peerId are one identity.
+    assert.equal(provider.transportPublicKeyHex, identity.peerId);
+  } finally {
+    await provider.stop();
+  }
+});
+
+test("Optie A: without privateKeyRaw the transport key is random, not the p2p-hub identity", async () => {
+  const keys = makeIdentity();
+  const provider = new NetworkLibp2pProvider({
+    listenAddresses: ["/ip4/127.0.0.1/tcp/0"],
+    identity: keys.identity,
+    identitySigner: keys.signer,
+    hasBrokerRateLimiting: () => true,
+  });
+  try {
+    await provider.start();
+    // The transport generated its own random Ed25519 key: the transport public
+    // key differs from the p2p-hub identity the provider is configured with.
+    assert.ok(provider.transportPublicKeyHex);
+    assert.notEqual(provider.transportPublicKeyHex, keys.identity.peerId);
+  } finally {
+    await provider.stop();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Happy path: full wire-contract roundtrip through a local relay (NAT sim)
 // ---------------------------------------------------------------------------

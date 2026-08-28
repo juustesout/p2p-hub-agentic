@@ -45,4 +45,28 @@ export interface CoreServerOptions {
    * fail hard on a corrupt vault.
    */
   networking?: boolean;
+  /**
+   * WAN transport (network-libp2p) toggle. Default `false` — the libp2p
+   * transport is strictly opt-in: it opens outbound TCP connections to an
+   * operator-configured relay and listens on WAN-reachable addresses, so it
+   * must never come up implicitly. Implies `networking !== false`: the WAN
+   * node is wired alongside the LAN transport, sharing one p2p-hub identity.
+   */
+  wanEnabled?: boolean;
+  /**
+   * Operator-supplied circuit-relay v2 relay multiaddr (e.g.
+   * `/ip4/1.2.3.4/tcp/4001/p2p/12D3KooW...`). When set, the WAN transport
+   * opens a relayed reservation and advertises a `/p2p-circuit` address, which
+   * makes the node reachable behind NAT/CGNAT. The relay is derived from
+   * operator config, never discovered (libp2p is a pure bytepipe, no WAN
+   * discovery surface).
+   */
+  wanRelayAddr?: string;
+  /**
+   * Optional explicit listen multiaddrs for the WAN transport (TCP only).
+   * Defaults to loopback ephemeral (`/ip4/127.0.0.1/tcp/0`) plus the relayed
+   * circuit address. Use to bind a specific WAN-facing interface/port, e.g.
+   * `["/ip4/0.0.0.0/tcp/4277"]`.
+   */
+  wanListenAddrs?: string[];
 }

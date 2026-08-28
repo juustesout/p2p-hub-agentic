@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import type { Connection, PeerId, Stream } from "@libp2p/interface";
 import { createLibp2p } from "libp2p";
+import { privateKeyFromRaw } from "@libp2p/crypto/keys";
 import { tcp } from "@libp2p/tcp";
 import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { autoNAT } from "@libp2p/autonat";
@@ -99,6 +100,17 @@ export interface NetworkLibp2pOptions {
    */
   hasBrokerRateLimiting?: () => boolean;
   /**
+   * Optie B (identity unification): the raw 64-byte Ed25519 key
+   * (`seed ‖ publicKey`) that the p2p-hub `IdentityManager` exports via
+   * `exportLibp2pKeySeed()`. When present, libp2p's node is created with this
+   * exact private key so the libp2p PeerId *equals* the p2p-hub Ed25519
+   * identity (same public key, same peerId over LAN and WAN). Absent (default)
+   * = libp2p generates its own random transport key (Optie A / gescheiden).
+   * The value is a purpose-built Uint8Array; the PKCS8 PEM never leaves
+   * `IdentityManager` (CLAUDE.md principle #6).
+   */
+  privateKeyRaw?: Uint8Array;
+  /**
    * Maximum serialized envelope length this instance accepts on a single
    * incoming message. Advertised in the handshake as `limits.maxPayloadBytes`
    * so a compliant peer refuses to send anything larger. Defaults to
@@ -176,6 +188,7 @@ export class NetworkLibp2pProvider implements NetworkProvider {
   private readonly listenAddresses: string[];
   private readonly relayAddresses: string[];
   private readonly hasBrokerRateLimiting: (() => boolean) | null;
+  private readonly privateKeyRaw: Uint8Array | null;
   private readonly maxPayloadBytes: number;
 
   private node: Awaited<ReturnType<typeof createLibp2p>> | null = null;
@@ -191,6 +204,7 @@ export class NetworkLibp2pProvider implements NetworkProvider {
     this.listenAddresses = [...(options.listenAddresses ?? [])];
     this.relayAddresses = [...(options.relayAddresses ?? [])];
     this.hasBrokerRateLimiting = options.hasBrokerRateLimiting ?? null;
+    this.privateKeyRaw = options.privateKeyRaw ?? null;
     this.maxPayloadBytes = options.maxPayloadBytes ?? MAX_PAYLOAD_BYTES;
   }
 
@@ -201,6 +215,20 @@ export class NetworkLibp2pProvider implements NetworkProvider {
   /** This provider's libp2p PeerId string, once started. */
   get transportPeerId(): string | null {
     return this.peerId?.toString() ?? null;
+  }
+
+  /**
+   * Raw public-key hex of the started node's libp2p PeerId. When the node was
+   * created with `privateKeyRaw` (Optie B / unification) this equals the
+   * p2p-hub Ed25519 `peerId` — the transport-identity match the WAN wiring
+   * guarantees. Null before start or for non-Ed25519 transport keys.
+   */
+  get transportPublicKeyHex(): string | null {
+    const peerId = this.peerId;
+    if (!peerId || peerId.type !== "Ed25519") {
+      return null;
+    }
+    return Buffer.from(peerId.publicKey.raw).toString("hex");
   }
 
   /** Multiaddrs this node currently advertises (direct + relayed circuits). */
@@ -251,46 +279,46 @@ export class NetworkLibp2pProvider implements NetworkProvider {
       multiaddr(relayAddr).encapsulate("/p2p-circuit").toString(),
     );
 
+    // Optie B (identity unification): when the operator wired the p2p-hub
+    // identity key, create the libp2p node from it so the transport PeerId IS
+    // the p2p-hub Ed25519 identity (same public key as over mDNS). The
+    // `privateKey` option is the only way libp2p v3 accepts a fixed key — a
+    // `peerId` option does not exist (proven pitfall, see HANDOVER Vraag 2).
+    const nodeConfig: Parameters<typeof createLibp2p>[0] = {
+      addresses: { listen: [...directListen, ...relayedListen] },
+      transports: [
+        tcp(),
+        circuitRelayTransport({ reservationCompletionTimeout: 5_000 }),
+      ],
+      streamMuxers: [yamux()],
+      connectionEncrypters: [noise()],
+      services: {
+        autoNAT: autoNAT(),
+        dcutr: dcutr(),
+        // Required by circuit-relay-v2-transport (it consumes the identify
+        // capability to observe relayed/observed addresses). This is the
+        // standard libp2p peer-metadata exchange (`/ipfs/id/1.0.0`), not a
+        // WAN discovery/routing mechanism, and the plugin never *uses* the
+        // peer information it gathers for discovery or reachability beyond
+        // what the caller explicitly dials/relays.
+        identify: identify(),
+      },
+      ...(this.privateKeyRaw
+        ? { privateKey: privateKeyFromRaw(this.privateKeyRaw) }
+        : {}),
+    };
+
     let node: Awaited<ReturnType<typeof createLibp2p>>;
     try {
-      node = await createLibp2p({
-        addresses: { listen: [...directListen, ...relayedListen] },
-        transports: [
-          tcp(),
-          circuitRelayTransport({ reservationCompletionTimeout: 5_000 }),
-        ],
-        streamMuxers: [yamux()],
-        connectionEncrypters: [noise()],
-        services: {
-          autoNAT: autoNAT(),
-          dcutr: dcutr(),
-          // Required by circuit-relay-v2-transport (it consumes the identify
-          // capability to observe relayed/observed addresses). This is the
-          // standard libp2p peer-metadata exchange (`/ipfs/id/1.0.0`), not a
-          // WAN discovery/routing mechanism, and the plugin never *uses* the
-          // peer information it gathers for discovery or reachability beyond
-          // what the caller explicitly dials/relays.
-          identify: identify(),
-        },
-      });
+      node = await createLibp2p(nodeConfig);
       await node.start();
     } catch {
       // A configured relay that is down must not crash start — the node simply
       // stays reachable only on its direct addresses. libp2p already stopped the
       // failed node before rethrowing, so recreate it with direct listen only.
       node = await createLibp2p({
+        ...nodeConfig,
         addresses: { listen: directListen },
-        transports: [
-          tcp(),
-          circuitRelayTransport({ reservationCompletionTimeout: 5_000 }),
-        ],
-        streamMuxers: [yamux()],
-        connectionEncrypters: [noise()],
-        services: {
-          autoNAT: autoNAT(),
-          dcutr: dcutr(),
-          identify: identify(),
-        },
       });
       await node.start();
     }

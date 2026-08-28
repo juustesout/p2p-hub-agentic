@@ -181,3 +181,42 @@ test("deleteChildIdentity removes an agent from the registry and the vault", asy
   assert.equal(await manager.deleteChildIdentity("retired-agent"), false);
   assert.equal(await manager.getChildIdentity("kept-agent") !== null, true);
 });
+
+test("exportLibp2pKeySeed: fixed 64-byte `seed ‖ publicKey`, public half equals the operator peerId", async () => {
+  const manager = new IdentityManager({ vault: await makeVault() });
+  const identity = await manager.getOrCreateIdentity();
+
+  const seed = await manager.exportLibp2pKeySeed();
+  assert.ok(seed instanceof Uint8Array);
+  assert.equal(seed.byteLength, 64);
+
+  // The last 32 bytes are the raw Ed25519 public key — hex-equal to the
+  // operator's peerId. This is the Optie B acceptance property: a libp2p node
+  // built from this seed ends up with the SAME transport identity as mDNS.
+  const publicHalf = Buffer.from(seed.buffer, seed.byteOffset + 32, 32);
+  assert.equal(publicHalf.toString("hex"), identity.publicKeyHex);
+
+  // The seed half is a valid private-seed: re-deriving a JWK private key from
+  // it and exporting gives back the same public key, proving seed and pub
+  // belong to the same keypair (not caller-supplied bytes).
+  const d = Buffer.from(seed.buffer, seed.byteOffset, 32).toString("base64url");
+  const x = publicHalf.toString("base64url");
+  const reconstructed = crypto.createPrivateKey({
+    key: { kty: "OKP", crv: "Ed25519", d, x },
+    format: "jwk",
+  });
+  const rawPublic = crypto.createPublicKey(reconstructed).export({ format: "jwk" }) as {
+    x: string;
+  };
+  assert.equal(rawPublic.x, x);
+});
+
+test("exportLibp2pKeySeed is deterministic across IdentityManager instances on the same vault", async () => {
+  const vault = await makeVault();
+  const first = new IdentityManager({ vault });
+  const second = new IdentityManager({ vault });
+
+  const a = await first.exportLibp2pKeySeed();
+  const b = await second.exportLibp2pKeySeed();
+  assert.equal(Buffer.from(a).toString("hex"), Buffer.from(b).toString("hex"));
+});

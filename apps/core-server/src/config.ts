@@ -11,6 +11,9 @@ import { decideBindHost } from "./host";
  * | P2P transport port | `P2P_HUB_P2P_PORT` → `P2P_PORT` | `32837` |
  * | P2P transport bind host | `P2P_BIND_HOST` | `0.0.0.0` |
  * | Networking enabled | `P2P_ENABLE_NETWORKING` → `P2P_HUB_NETWORKING` | `true` |
+ * | WAN transport enabled | `P2P_HUB_WAN_ENABLED` | `false` |
+ * | WAN relay multiaddr | `P2P_HUB_WAN_RELAY` | *(none)* |
+ * | WAN listen multiaddrs | `P2P_HUB_WAN_LISTEN` (comma-separated) | *(none)* |
  *
  * The HTTP/WS **bridge** bind host deliberately does NOT default to `0.0.0.0`:
  * it stays loopback-by-default behind the `P2P_HUB_EXPOSE=1` gate
@@ -38,6 +41,17 @@ export interface ServerConfig {
   p2pBindHost: string;
   /** Whether the P2P transport (mDNS discovery + TLS) is enabled. */
   networking: boolean;
+  /**
+   * Whether the WAN transport (network-libp2p) is enabled. Strictly opt-in
+   * (default `false`): it opens outbound connections to an operator relay and
+   * must never come up implicitly. Ignored (treated as `false`) when
+   * `networking` is off.
+   */
+  wanEnabled: boolean;
+  /** Operator-supplied circuit-relay v2 relay multiaddr, or empty when unset. */
+  wanRelayAddr: string;
+  /** Explicit WAN listen multiaddrs, or empty when unset. */
+  wanListenAddrs: string[];
 }
 
 export type LoadConfigResult =
@@ -102,6 +116,17 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoadConfigResult {
     env.P2P_ENABLE_NETWORKING ?? env.P2P_HUB_NETWORKING,
     true,
   );
+  // The WAN transport is only meaningful next to the LAN transport (they share
+  // one p2p-hub identity); a `wanEnabled` value with networking off is ignored
+  // rather than erroring, so a `P2P_HUB_WAN_ENABLED=1 P2P_HUB_NETWORKING=0`
+  // environment cannot boot a WAN-only node by accident.
+  const wanEnabled =
+    networking && parseBoolEnv(env.P2P_HUB_WAN_ENABLED, false);
+  const wanRelayAddr = (env.P2P_HUB_WAN_RELAY ?? "").trim();
+  const wanListenAddrs = (env.P2P_HUB_WAN_LISTEN ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
 
   return {
     config: {
@@ -111,6 +136,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoadConfigResult {
       p2pPort,
       p2pBindHost,
       networking,
+      wanEnabled,
+      wanRelayAddr,
+      wanListenAddrs,
     },
   };
 }

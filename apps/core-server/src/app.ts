@@ -27,6 +27,8 @@ import {
   wirePeerAccessConfirmations,
 } from "./access-confirm";
 import { createPeerPoller, startNetworking } from "./network";
+import { startWanProvider } from "./wan-provider";
+import type { WanProviderHandle } from "./wan-provider";
 import { WsActivityBus, wireEventBridge } from "./ws-bus";
 import { decideSiteExposure } from "./site-exposure";
 import { loadSettings, saveSettings } from "./settings";
@@ -74,6 +76,7 @@ export class CoreServer {
   private readonly broker: TaskBroker;
   private readonly registry = new NetworkRegistry();
   private provider: NetworkLightProvider | null = null;
+  private wanProvider: WanProviderHandle | null = null;
 
   private httpServer: http.Server | null = null;
   private wsBus: WsActivityBus | null = null;
@@ -218,6 +221,19 @@ export class CoreServer {
       );
     }
 
+    if (this.options.wanEnabled) {
+      // WAN transport (network-libp2p), strictly opt-in. Shares the p2p-hub
+      // identity with the LAN transport (Optie B unification); dials only
+      // operator-configured relays/listen addresses, never discovers.
+      this.wanProvider = await startWanProvider({
+        broker: this.broker,
+        host: this.host,
+        registry: this.registry,
+        relayAddr: this.options.wanRelayAddr,
+        listenAddrs: this.options.wanListenAddrs,
+      });
+    }
+
     this.httpServer = http.createServer((req, res) => {
       void this.handleHttp(req, res);
     });
@@ -265,6 +281,12 @@ export class CoreServer {
       this.host.networkRegistry().unregister(this.provider.id);
       await this.provider.stop();
       this.provider = null;
+    }
+    if (this.wanProvider) {
+      this.registry.unregister(this.wanProvider.id);
+      this.host.networkRegistry().unregister(this.wanProvider.id);
+      await this.wanProvider.stop();
+      this.wanProvider = null;
     }
     if (this.wsBus) {
       this.wsBus.close();
