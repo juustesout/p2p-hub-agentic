@@ -2,3 +2,12 @@ node_modules/
 dist/
 *.tsbuildinfo
 *.log
+
+# Working memos (user-owned, deliberately kept out of the repo per HANDOVER)
+HANDOVER.md
+afwerklijst.md
+
+# Tauri build artifacts (deliberately not tracked)
+apps/desktop-shell/src-tauri/target/
+apps/desktop-shell/src-tauri/gen/
+apps/desktop-shell/src-tauri/Cargo.lock
