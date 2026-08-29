@@ -1,0 +1,13 @@
+# Beleid: Elke PR vereist menselijke review van de eigenaar
+*                       @juustesout
+
+# Beveiliging van CI/CD Workflows en Agent Governance
+/.github/               @juustesout
+
+# Beveiligde Backend, Auth, IPC & Core routing
+/apps/core-server/src/auth.ts         @juustesout
+/apps/core-server/src/routes/       @juustesout
+/apps/core-server/src/site-exposure.ts @juustesout
+
+# P2P Transport & Cryptografie
+/plugins/network-libp2p/              @juustesout
