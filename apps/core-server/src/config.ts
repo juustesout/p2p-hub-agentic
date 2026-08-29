@@ -37,7 +37,10 @@ export interface ServerConfig {
   /**
    * Explicit extra Host-header allowlist entries (comma-separated
    * `P2P_HUB_ALLOWED_HOSTS`), for reaching the bridge via a hostname the bind
-   * address or interface enumeration cannot discover.
+   * address or interface enumeration cannot discover. Unlike the discovered
+   * set, these apply on every configuration (loopback-only included) — an
+   * explicit operator trust decision, so only list hostnames the operator
+   * controls.
    */
   allowedHosts: string[];
   /** HTTP/WS bridge port. */

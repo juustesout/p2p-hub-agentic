@@ -61,8 +61,12 @@ export interface HostGateOptions {
   exposed: boolean;
   /**
    * Explicit extra hostnames to accept on top of the loopback set and (when
-   * exposed) the machine's addresses. Operator/test override for reaching the
-   * bridge via a hostname that interface enumeration cannot discover.
+   * exposed) the machine's addresses. Unlike the discovered set, these are NOT
+   * gated on `exposed`: they apply on every configuration, loopback-only
+   * included (reverse proxy in front of a loopback-bound bridge, the shell
+   * reaching it by hostname). This is an explicit operator trust decision — a
+   * listed hostname is a manual exception to the default-deny rule, so only
+   * list hostnames the operator controls.
    */
   extraHosts?: readonly string[];
 }
@@ -72,11 +76,13 @@ export interface HostGateOptions {
  * (`os.networkInterfaces()` is not free), then consulted per request.
  *
  * Loopback addressing is always allowed: `localhost`, `127.0.0.0/8`, `::1`,
- * `::ffff:127.0.0.1`. A non-loopback Host is accepted only when the bridge is
- * explicitly exposed AND the hostname is either the configured bind address or
- * one of this machine's own interface addresses — which is the set a real
- * LAN/exposed client would legitimately use. Anything else (an attacker's
- * rebinding domain, or any arbitrary hostname) is denied.
+ * `::ffff:127.0.0.1`. A non-loopback Host is accepted only when (a) the bridge
+ * is explicitly exposed AND the hostname is the configured bind address or one
+ * of this machine's own interface addresses — the set a real LAN/exposed
+ * client would legitimately use — or (b) the hostname is on the operator's
+ * explicit `extraHosts` allowlist, which applies on every configuration
+ * (loopback-only included) as a deliberate operator trust decision. Anything
+ * else (an attacker's rebinding domain, or any arbitrary hostname) is denied.
  */
 export class HostGate {
   private readonly exposedHosts: ReadonlySet<string>;

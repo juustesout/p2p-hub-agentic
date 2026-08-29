@@ -217,6 +217,10 @@ test("the WebSocket bus applies the same Host gate as HTTP", async () => {
 });
 
 test("explicit allowedHosts extend the allowlist through the full HTTP path", async () => {
+  // Loopback-only fixture (makeFixture binds 127.0.0.1, exposed=false):
+  // operator allowlist entries are a deliberate, unconditional trust exception
+  // (reverse-proxy/Tauri-hostname case), so a listed hostname is served while
+  // any non-listed non-loopback hostname stays denied.
   const { server, port } = await makeFixture({
     allowedHosts: ["desktop-shell.local"],
   });

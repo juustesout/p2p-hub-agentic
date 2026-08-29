@@ -272,12 +272,22 @@ hostname is refused with a generic 403 before any route runs. The allowlist:
 - Loopback names/IPs (`localhost`, `127.0.0.0/8`, `::1`,
   `::ffff:127.0.0.1`) are always accepted — that is how the shell/Vite/plain
   browser reach the bridge.
-- Non-loopback Hosts are accepted **only** when the bridge is explicitly
-  exposed (`P2P_HUB_EXPOSE=1`) **and** the hostname is the configured bind
-  address or one of the machine's own interface addresses — never arbitrary
-  values, so exposed mode still refuses rebinding origins. `P2P_HUB_ALLOWED_HOSTS`
-  (comma-separated) adds explicit operator hostnames (e.g. behind a reverse
-  proxy).
+- Non-loopback Hosts from the *discovered* set (the configured bind address or
+  one of the machine's own interface addresses) are accepted **only** when the
+  bridge is explicitly exposed (`P2P_HUB_EXPOSE=1`) — never arbitrary values,
+  so exposed mode still refuses rebinding origins.
+- `P2P_HUB_ALLOWED_HOSTS` (comma-separated) is a **separate, explicit
+  operator-trust channel that applies on every configuration, loopback-only
+  included** (e.g. a reverse proxy in front of a loopback-bound bridge, or the
+  Tauri shell reaching it by hostname). It is deliberately *not* gated on
+  `P2P_HUB_EXPOSE`: gating it would force operators to widen the `bind` to all
+  interfaces, a strictly larger exposure than accepting one vouched hostname.
+  The security consequence is intentional and must be stated plainly: a listed
+  hostname is a manual exception to the default-deny rule, so a DNS-rebinding
+  page served from that exact hostname would be accepted — list only hostnames
+  the operator fully controls; no wildcards are supported. Covered by a test on
+  a loopback-only fixture (`rebinding.test.ts` "explicit allowedHosts extend
+  the allowlist").
 - A missing `Host` header is refused (fail-closed; HTTP/1.0 clients).
 
 This is an **additional layer**, not a replacement for the token: `/api/*` and

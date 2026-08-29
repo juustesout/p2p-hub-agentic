@@ -53,12 +53,19 @@ semantiek).
 ## Alternatieven overwogen
 
 - **Origin/Referer-verificatie op fetch-routes (Gemini-voorstel)** — bewust
-  niet toegevoegd. (a) SOP/CORS blokkeert cross-origin *reads* op deze
-  tokenloze routes al (geen `Access-Control-Allow-Origin`); de enige "actie" —
-  de uitgaande fetch — is al gecapt. (b) Een Origin-gate moet de Tauri-webview
-  (niet-loopback origin), de Vite-dev-origin en directe navigatie (geen
-  Origin-header) allemaal toestaan of breekt legitieme flows. (c) Niet-browser
-  clients kunnen Origin toch vrij invullen — het is geen echt vertrouwensgrens.
+  niet toegevoegd. (a) De Host-allowlist sluit het rebinding-pad zelf al af
+  (dat is het fix-mechanisme): een rebinding-pagina's `Host`-header is de
+  domeinnaam van de attacker en wordt vóór elke route geweigerd — een extra
+  Origin/Referer-gate voegt tegen *dezelfde* dreiging niets toe. Let op: de
+  eerdere aanname dat "SOP/CORS cross-origin *reads* al blokkeert" is onjuist
+  voor DNS-rebinding — het verzoek is juist *same-origin* vanuit de browser
+  (de pagina's origin én de `Host`-header zijn beide de domeinnaam van de
+  attacker), dus SOP/CORS grijpt daar helemaal niet in; de browser leest het
+  antwoord zonder enige cross-origin-check. (b) Een Origin-gate moet de
+  Tauri-webview (niet-loopback origin), de Vite-dev-origin en directe
+  navigatie (geen Origin-header) allemaal toestaan of breekt legitieme flows.
+  (c) Niet-browser clients kunnen Origin toch vrij invullen — het is geen echt
+  vertrouwensgrens.
 - **Scoped credential op `/site`/`/ui`/`/remote-site`** — de GitHub Agent stelde
   dit voor, maar het breekt PeerSite's kernfunctie (gewoon browsen) en een token
   in de URL van een sandboxed iframe is principieel verboden (principe #10).
@@ -73,6 +80,16 @@ semantiek).
 - Exposed-modus accepteert nu de eigen interface-adressen; een LAN-client op
   een machine-hostname die interface-enumeratie niet kent moet `P2P_HUB_ALLOWED_HOSTS`
   zetten.
+- `P2P_HUB_ALLOWED_HOSTS` geldt **op elke configuratie, ook loopback-only**
+  (niet gated op `P2P_HUB_EXPOSE`): dat is bewust, want een reverse proxy vóór
+  een loopback-gebonden bridge stuurt een publieke `Host`-header door — gaten
+  op EXPOSE zou de operator dwingen de *bind* naar alle interfaces te
+  verruimen (grotere exposure dan één gewaarborgde hostname). Gevolg is expliciet
+  en blijft dus operator-trust: een geliste hostname is een handmatige
+  uitzondering op de default-deny-regel — een rebinding-pagina vanaf *die*
+  hostname wordt geaccepteerd. Alleen hostnames die de operator controleert
+  lijsten; wildcards zijn niet ondersteund. Geverifieerd in
+  `rebinding.test.ts` op een loopback-fixture (exposed=false).
 - Bewuste niet-doelen: Origin-gating (zie boven), hostname-toegang zonder
   expliciete config, en per-peer i.p.v. globaal fetch-budget.
 
