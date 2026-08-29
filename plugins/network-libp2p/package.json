@@ -5,6 +5,9 @@
   "description": "WAN transport over libp2p (TCP + circuit relay + hole punching) reusing the p2p-hub wire contract as a pure bytepipe",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
   "files": [
     "dist"
   ],
@@ -13,7 +16,8 @@
     "test": "node ../../scripts/run-tests.js"
   },
   "devDependencies": {
-    "@p2p-hub/core": "0.1.0"
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/tasks": "0.1.0"
   },
   "dependencies": {
     "@p2p-hub/sdk": "0.1.0",

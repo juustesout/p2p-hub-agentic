@@ -12,6 +12,7 @@
   "references": [
     { "path": "../../sdk" },
     { "path": "../../core" },
-    { "path": "../network-light" }
+    { "path": "../network-light" },
+    { "path": "../tasks" }
   ]
 }

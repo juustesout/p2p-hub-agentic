@@ -31,15 +31,29 @@ function deadPid(): Promise<number> {
   });
 }
 
-test("acquire creates a 0600 pid file holding our PID", async () => {
+// POSIX permission bits are not meaningful on Windows (the mode maps to NTFS
+// ACLs / a readonly attribute, so fs.statSync().mode & 0o777 comes back as
+// 0o666 for a fresh write). The PID content and path assertions still run on
+// every platform; only the 0600 bit check is gated.
+const WIN_MODE_SKIP =
+  process.platform === "win32" &&
+  "POSIX 0600 mode bits are not meaningful on Windows (NTFS ACLs); PID/path content is still asserted";
+
+test("acquire creates a 0600 pid file holding our PID", async (t) => {
   const dataDir = await tmpDataDir("instance-guard-");
   const lock = acquireInstanceLock(dataDir);
   try {
     const file = path.join(dataDir, INSTANCE_LOCK_FILE);
     assert.equal(lock.file, file);
     assert.equal(fs.readFileSync(file, "utf8").trim(), String(process.pid));
-    const mode = fs.statSync(file).mode & 0o777;
-    assert.equal(mode, 0o600, "lock file must be owner-only");
+    await t.test(
+      "lock file is owner-only (POSIX 0600)",
+      { skip: WIN_MODE_SKIP },
+      () => {
+        const mode = fs.statSync(file).mode & 0o777;
+        assert.equal(mode, 0o600, "lock file must be owner-only");
+      },
+    );
   } finally {
     lock.release();
   }

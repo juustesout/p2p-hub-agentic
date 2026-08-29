@@ -31,6 +31,7 @@ import { startWanProvider } from "./wan-provider";
 import type { WanProviderHandle } from "./wan-provider";
 import { WsActivityBus, wireEventBridge } from "./ws-bus";
 import { HostGate, hostFromHeader } from "./host-validation";
+import { logger } from "./logger";
 import { FixedWindowLimiter } from "./fixed-window";
 import { decideSiteExposure } from "./site-exposure";
 import { loadSettings, saveSettings } from "./settings";
@@ -275,7 +276,7 @@ export class CoreServer {
       // Fail loudly on a corrupt vault at boot (CLAUDE.md principle #9) — the
       // lock gate defers plugin loading, but corruption is never "locked".
       await vault.assertLoadable();
-      console.warn(
+      logger.warn(
         "[core-server] existing vault detected: starting LOCKED. P2P transports " +
           "and plugin storage stay disabled until the master key is provided " +
           "via POST /api/vault/unlock.",
@@ -333,7 +334,7 @@ export class CoreServer {
   /** Start the LAN provider and (opt-in) WAN transport. */
   private async startP2P(): Promise<void> {
     if (this.options.networking === false) {
-      console.warn(
+      logger.warn(
         "[core-server] networking disabled: no LAN discovery, no inbound P2P " +
           "calls, no peer identity is created. Local-only mode.",
       );
@@ -579,7 +580,7 @@ export class CoreServer {
     // the auth paths. Missing/mismatched Host → generic 403, logged server-side
     // (CLAUDE.md principle: no details that help an attacker refine).
     if (!this.hostGate.isAllowed(req.headers.host)) {
-      console.warn(
+      logger.warn(
         `[core-server] rejecting request with disallowed Host header from ` +
           `${req.socket.remoteAddress ?? "unknown"} (host ` +
           `"${hostFromHeader(req.headers.host) ?? "(missing)"}")`,
@@ -622,7 +623,7 @@ export class CoreServer {
         sendJson(res, 400, { error: "invalid request body" });
         return;
       }
-      console.error("[core-server] request failed:", err);
+      logger.error(err, "[core-server] request failed");
       sendJson(res, 500, { error: "internal error" });
     }
   }

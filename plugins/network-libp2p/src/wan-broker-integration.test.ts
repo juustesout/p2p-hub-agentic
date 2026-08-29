@@ -29,6 +29,13 @@ import { noise } from "@chainsafe/libp2p-noise";
 import { yamux } from "@chainsafe/libp2p-yamux";
 import { NetworkLibp2pProvider } from "./network-libp2p-provider.js";
 
+// The pinned libp2p v3 slice (it-queue/mortice use Promise.withResolvers, a
+// Node >= 22 API) cannot even start on older Nodes. Skip the suite there with
+// a visible reason — the LAN (network-light) tests still run on every Node.
+const WAN_SKIP =
+  Number(process.versions.node.split(".")[0]) < 22 &&
+  "the pinned libp2p v3 stack requires Node >= 22 (it uses Promise.withResolvers via it-queue/mortice); the LAN (network-light) tests still run";
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -187,7 +194,7 @@ function delegationStatus(doc: PBXDocument, taskId: string): string | undefined 
 // Full-stack: WAN relay → TaskBroker gate → tasks plugin skill
 // ---------------------------------------------------------------------------
 
-test("a verified member accepts a delegation over a WAN relay — the transport peerId wins over a forged payload senderPeerId", async () => {
+test("a verified member accepts a delegation over a WAN relay — the transport peerId wins over a forged payload senderPeerId", { skip: WAN_SKIP }, async () => {
   const relay = await startLocalRelay();
   try {
     const client = await bootClientNode();
@@ -243,7 +250,7 @@ test("a verified member accepts a delegation over a WAN relay — the transport 
   }
 });
 
-test("a stranger (not a verified contact) is denied by the verified-contact gate before the handler runs", async () => {
+test("a stranger (not a verified contact) is denied by the verified-contact gate before the handler runs", { skip: WAN_SKIP }, async () => {
   const relay = await startLocalRelay();
   try {
     const stranger = await bootClientNode();

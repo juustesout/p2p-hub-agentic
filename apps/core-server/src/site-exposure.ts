@@ -1,6 +1,7 @@
 import { isLoopbackHost } from "./host";
 import { evaluateSettingsRisk } from "@p2p-hub/sdk";
 import type { EffectiveSettings } from "@p2p-hub/sdk";
+import { logger } from "./logger";
 
 /**
  * Decide the LAN exposure posture for the static site, `/ui`, `/remote-site`
@@ -22,7 +23,7 @@ export async function decideSiteExposure(
   }
   const settings = await load();
   if (!settings.peersiteEnabled || !settings.peersiteLanExposed) {
-    console.warn(
+    logger.warn(
       "[core-server] PeerSite: the bridge is not bound to loopback and " +
         "peersiteEnabled/peersiteLanExposed are not both enabled; static + " +
         "/peersite serving is refused (loopback-only).",
@@ -30,7 +31,7 @@ export async function decideSiteExposure(
     return false;
   }
   const risk = evaluateSettingsRisk(settings).aggregate;
-  console.warn(
+  logger.warn(
     `[core-server] PeerSite: EXPOSING the static site and /peersite API on ` +
       `non-loopback "${bindHost}". Anyone who can reach this port can read the ` +
       `published site and call the scoped peersite API. Active risk level: ` +

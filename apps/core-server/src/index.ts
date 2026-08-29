@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { logger } from "./logger";
 import { CoreServer } from "./app";
 import { loadConfig } from "./config";
 import {
@@ -45,7 +46,7 @@ function resolveDataDir(): string {
 async function main(): Promise<void> {
   const loaded = loadConfig(process.env);
   if ("error" in loaded) {
-    console.error(`[core-server] ${loaded.error}`);
+    logger.error(`[core-server] ${loaded.error}`);
     process.exit(1);
   }
   const {
@@ -61,7 +62,7 @@ async function main(): Promise<void> {
     wanListenAddrs,
   } = loaded.config;
   if (exposed) {
-    console.warn(
+    logger.warn(
       `[core-server] WARNING: binding the HTTP/WS bridge to non-loopback ` +
         `"${host}". Any host able to reach this port can now talk to ` +
         `the bridge, which is guarded by the per-boot token (for /api and /ws) ` +
@@ -80,7 +81,7 @@ async function main(): Promise<void> {
     // Standalone/SEA boot with no monorepo and no bundled plugins: create an
     // empty dir so the plugin host scans an empty set instead of failing.
     fs.mkdirSync(pluginsDir, { recursive: true });
-    console.warn(
+    logger.warn(
       `[core-server] no plugins found; created empty plugins dir "${pluginsDir}"`,
     );
   }
@@ -101,7 +102,7 @@ async function main(): Promise<void> {
   });
 
   await server.start();
-  console.log(`[core-server] p2p-hub-core v${coreVersion}`);
+  logger.info(`[core-server] p2p-hub-core v${coreVersion}`);
   // The port reported in the log (and, when gated, the ready handshake) is the
   // *bound* one — with `P2P_HUB_PORT=0` the OS-assigned port is only known
   // after `listen()`.
@@ -109,7 +110,7 @@ async function main(): Promise<void> {
   const boundPort = bound?.port ?? port;
   const boundHost = bound?.host ?? host;
 
-  console.log(
+  logger.info(
     `[core-server] listening on http://${boundHost}:${boundPort}` +
       (networking ? "" : " (networking disabled: local-only)") +
       (wanEnabled ? " (WAN transport enabled)" : ""),
@@ -144,6 +145,6 @@ async function main(): Promise<void> {
 }
 
 void main().catch((err) => {
-  console.error("[core-server] failed to start:", err);
+  logger.error(err, "[core-server] failed to start");
   process.exit(1);
 });

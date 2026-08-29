@@ -74,6 +74,28 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop-shell/src-tauri
+      # `cargo check` runs tauri-build, which validates `bundle.externalBin`
+      # (`bin/p2p-hub-core`). That SEA sidecar is gitignored and must be built
+      # before cargo can resolve it — otherwise the build script fails with
+      # "resource path `bin/p2p-hub-core-<triple>` doesn't exist".
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        working-directory: .
+        run: npm ci
+      # build:sea bundles core-server with esbuild, which resolves the
+      # @p2p-hub/core and @p2p-hub/sdk workspace packages through their
+      # package.json `main` (dist/index.js). tsc -b must run first so those
+      # dist outputs exist — otherwise esbuild fails with "Could not resolve
+      # @p2p-hub/core" and the cargo step never runs.
+      - name: Build workspace packages (tsc -b)
+        working-directory: .
+        run: npm run build
+      - name: Build core-server SEA sidecar (Tauri externalBin)
+        working-directory: .
+        run: npm run build:sea -w @p2p-hub/core-server
       - name: cargo check
         run: cargo check
       - name: cargo test (serde wire-contract round-trips)

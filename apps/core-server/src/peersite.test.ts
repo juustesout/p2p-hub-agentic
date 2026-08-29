@@ -6,6 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { WebSocket } from "ws";
 import { CoreServer } from "./app";
+import { logger } from "./logger";
 import { canCreateSymlinksSync, type TrustConfirmation } from "@p2p-hub/core";
 
 const TOKEN = "peersite-test-token";
@@ -463,10 +464,10 @@ test("non-loopback binding refuses the site unless peersite flags are set", asyn
 
 test("non-loopback binding serves the site when peersite flags are enabled", async () => {
   const warnings: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = ((...args: unknown[]) => {
+  const originalWarn = logger.warn;
+  logger.warn = ((...args: unknown[]) => {
     warnings.push(args.map(String).join(" "));
-  }) as typeof console.warn;
+  }) as typeof logger.warn;
   try {
     const siteDir = await makeSiteRoot();
     await fs.writeFile(path.join(siteDir, "index.html"), "<h1>lan</h1>");
@@ -487,6 +488,6 @@ test("non-loopback binding serves the site when peersite flags are enabled", asy
       "expected a loud exposure warning on LAN opt-in",
     );
   } finally {
-    console.warn = originalWarn;
+    logger.warn = originalWarn;
   }
 });
