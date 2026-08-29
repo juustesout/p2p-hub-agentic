@@ -205,8 +205,14 @@ function readEnvelopes(chunks: Buffer[]): Array<Record<string, unknown>> {
 }
 
 test("two local instances discover each other and exchange a task", { skip: MDNS_SKIP }, async () => {
+  const bobKey = makeIdentity();
   const alice = makeProvider({ port: 0, skills: ["echo"] });
-  const bob = makeProvider({ port: 0, skills: ["echo"] });
+  const bob = new NetworkLightProvider({
+    port: 0,
+    skills: ["echo"],
+    identity: bobKey.identity,
+    identitySigner: bobKey.signer,
+  });
 
   bob.onTask(async (task) => ({
     taskId: task.id,
@@ -221,23 +227,22 @@ test("two local instances discover each other and exchange a task", { skip: MDNS
     assert.equal(alice.isReady(), true);
     assert.equal(bob.isReady(), true);
 
-    const peers = await waitFor<NetworkPeer[]>(async () => {
-      const found = await alice.discover("echo");
-      return found.length > 0 ? found : null;
-    });
-
-    assert.equal(peers.length, 1);
+    // Target bob by its peerId instead of asserting a global discovery count
+    // of exactly one: on shared CI hosts a concurrent p2p-hub test suite can
+    // legitimately announce the same "echo" skill over mDNS, so `discover()`
+    // may return more than one peer. Bob is the peer we control.
+    const bobPeer = await waitForPeerWithId(alice, bobKey.identity.peerId);
     // Fase 0C: mDNS must not leak skill names. Fase 1A: the authenticated
     // handshake reveals what the peer offers, so the peer's skills are now
     // known and populated — but they arrived over the TLS connection, never
     // via the mDNS advertisement.
     assert.deepEqual(
-      peers[0].skills,
+      bobPeer.skills,
       ["echo"],
       "skills are learned via the authenticated handshake, not mDNS",
     );
 
-    const result = await alice.sendTask(peers[0], {
+    const result = await alice.sendTask(bobPeer, {
       id: "task-1",
       skill: "echo",
       payload: "hello",

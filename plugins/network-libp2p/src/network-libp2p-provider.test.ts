@@ -17,6 +17,13 @@ import {
 } from "@p2p-hub/network-light/dist/wire-contract.js";
 import { NetworkLibp2pProvider } from "./network-libp2p-provider.js";
 
+// The pinned libp2p v3 slice (it-queue/mortice use Promise.withResolvers, a
+// Node >= 22 API) cannot even start on older Nodes. Skip the suite there with
+// a visible reason — the LAN (network-light) tests still run on every Node.
+const WAN_SKIP =
+  Number(process.versions.node.split(".")[0]) < 22 &&
+  "the pinned libp2p v3 stack requires Node >= 22 (it uses Promise.withResolvers via it-queue/mortice); the LAN (network-light) tests still run";
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -106,7 +113,7 @@ function directAddress(provider: NetworkLibp2pProvider): string {
 // Start gates (Deel 2 is code-gated on Deel 1)
 // ---------------------------------------------------------------------------
 
-test("start refuses when the broker does not report per-peer rate limiting", async () => {
+test("start refuses when the broker does not report per-peer rate limiting", { skip: WAN_SKIP }, async () => {
   const keys = makeIdentity();
   const provider = new NetworkLibp2pProvider({
     identity: keys.identity,
@@ -118,7 +125,7 @@ test("start refuses when the broker does not report per-peer rate limiting", asy
   assert.equal(provider.isReady(), false);
 });
 
-test("start refuses when no rate-limiting gate is wired at all (fail-closed)", async () => {
+test("start refuses when no rate-limiting gate is wired at all (fail-closed)", { skip: WAN_SKIP }, async () => {
   const keys = makeIdentity();
   const provider = new NetworkLibp2pProvider({
     identity: keys.identity,
@@ -128,12 +135,12 @@ test("start refuses when no rate-limiting gate is wired at all (fail-closed)", a
   await assert.rejects(() => provider.start(), /per-peer rate limiting/);
 });
 
-test("start refuses without identity and identitySigner", async () => {
+test("start refuses without identity and identitySigner", { skip: WAN_SKIP }, async () => {
   const provider = new NetworkLibp2pProvider({ hasBrokerRateLimiting: () => true });
   await assert.rejects(() => provider.start(), /identity and identitySigner/);
 });
 
-test("start succeeds with the rate-limiting gate and identity in place", async () => {
+test("start succeeds with the rate-limiting gate and identity in place", { skip: WAN_SKIP }, async () => {
   const provider = makeProvider();
   try {
     await provider.start();
@@ -144,7 +151,7 @@ test("start succeeds with the rate-limiting gate and identity in place", async (
   }
 });
 
-test("Optie B: a privateKeyRaw node reports the same transport public key as the p2p-hub identity", async () => {
+test("Optie B: a privateKeyRaw node reports the same transport public key as the p2p-hub identity", { skip: WAN_SKIP }, async () => {
   // Build the exact `seed ‖ publicKey` 64-byte buffer `IdentityManager` hands
   // to a WAN provider. The transport key must then be THIS key, not a random
   // libp2p one.
@@ -176,7 +183,7 @@ test("Optie B: a privateKeyRaw node reports the same transport public key as the
   }
 });
 
-test("Optie A: without privateKeyRaw the transport key is random, not the p2p-hub identity", async () => {
+test("Optie A: without privateKeyRaw the transport key is random, not the p2p-hub identity", { skip: WAN_SKIP }, async () => {
   const keys = makeIdentity();
   const provider = new NetworkLibp2pProvider({
     listenAddresses: ["/ip4/127.0.0.1/tcp/0"],
@@ -199,7 +206,7 @@ test("Optie A: without privateKeyRaw the transport key is random, not the p2p-hu
 // Happy path: full wire-contract roundtrip through a local relay (NAT sim)
 // ---------------------------------------------------------------------------
 
-test("a task roundtrips through a local relay using the same wire contract", async () => {
+test("a task roundtrips through a local relay using the same wire contract", { skip: WAN_SKIP }, async () => {
   const relay = await startLocalRelay();
   try {
     const serverKeys = makeIdentity();
@@ -240,7 +247,7 @@ test("a task roundtrips through a local relay using the same wire contract", asy
   }
 });
 
-test("the handler receives the transport-verified p2p-hub peerId, never a wire echo", async () => {
+test("the handler receives the transport-verified p2p-hub peerId, never a wire echo", { skip: WAN_SKIP }, async () => {
   const relay = await startLocalRelay();
   try {
     const serverKeys = makeIdentity();
@@ -392,7 +399,7 @@ async function startRejectionServer(
   return { provider: server, address: directAddress(server) };
 }
 
-test("server refuses a task from a client with an invalid identity signature", async () => {
+test("server refuses a task from a client with an invalid identity signature", { skip: WAN_SKIP }, async () => {
   let dispatched = 0;
   const { provider, address } = await startRejectionServer(async (task) => {
     dispatched += 1;
@@ -446,7 +453,7 @@ test("server refuses a task from a client with an invalid identity signature", a
   }
 });
 
-test("server refuses a task sent without an auth (no anonymous traffic)", async () => {
+test("server refuses a task sent without an auth (no anonymous traffic)", { skip: WAN_SKIP }, async () => {
   let dispatched = 0;
   const { provider, address } = await startRejectionServer(async (task) => {
     dispatched += 1;
@@ -481,7 +488,7 @@ test("server refuses a task sent without an auth (no anonymous traffic)", async 
   }
 });
 
-test("server closes a stream whose first message is not hello", async () => {
+test("server closes a stream whose first message is not hello", { skip: WAN_SKIP }, async () => {
   let dispatched = 0;
   const { provider, address } = await startRejectionServer(async (task) => {
     dispatched += 1;
@@ -513,7 +520,7 @@ test("server closes a stream whose first message is not hello", async () => {
 // Provider surface
 // ---------------------------------------------------------------------------
 
-test("discover returns nothing and listPeers is empty (no WAN discovery)", async () => {
+test("discover returns nothing and listPeers is empty (no WAN discovery)", { skip: WAN_SKIP }, async () => {
   const provider = makeProvider();
   await provider.start();
   try {
@@ -524,7 +531,7 @@ test("discover returns nothing and listPeers is empty (no WAN discovery)", async
   }
 });
 
-test("sendTask reports an error when the transport is stopped", async () => {
+test("sendTask reports an error when the transport is stopped", { skip: WAN_SKIP }, async () => {
   const provider = makeProvider();
   const result = await provider.sendTask(
     { id: "p", address: "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz1234567890abc", skills: [] },
@@ -534,7 +541,7 @@ test("sendTask reports an error when the transport is stopped", async () => {
   assert.match(result.error ?? "", /not started/);
 });
 
-test("sendTask rejects a peer address without a /p2p/ peer id", async () => {
+test("sendTask rejects a peer address without a /p2p/ peer id", { skip: WAN_SKIP }, async () => {
   const provider = makeProvider();
   await provider.start();
   try {
@@ -549,7 +556,7 @@ test("sendTask rejects a peer address without a /p2p/ peer id", async () => {
   }
 });
 
-test("priority is low so the registry never auto-promotes this transport", () => {
+test("priority is low so the registry never auto-promotes this transport", { skip: WAN_SKIP }, () => {
   const provider = makeProvider();
   assert.ok(provider.priority < 10, "must stay below network-light's priority 10");
   assert.equal(provider.id, "network-libp2p");

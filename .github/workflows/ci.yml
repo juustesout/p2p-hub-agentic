@@ -74,6 +74,14 @@ jobs:
       - name: Install dependencies
         working-directory: .
         run: npm ci
+      # build:sea bundles core-server with esbuild, which resolves the
+      # @p2p-hub/core and @p2p-hub/sdk workspace packages through their
+      # package.json `main` (dist/index.js). tsc -b must run first so those
+      # dist outputs exist — otherwise esbuild fails with "Could not resolve
+      # @p2p-hub/core" and the cargo step never runs.
+      - name: Build workspace packages (tsc -b)
+        working-directory: .
+        run: npm run build
       - name: Build core-server SEA sidecar (Tauri externalBin)
         working-directory: .
         run: npm run build:sea -w @p2p-hub/core-server

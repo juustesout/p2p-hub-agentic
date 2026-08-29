@@ -6,6 +6,14 @@ import { CoreServer } from "./app";
 import { PluginHost } from "@p2p-hub/core";
 import type { WanProviderHandle } from "./wan-provider";
 
+// The pinned libp2p v3 stack (it-queue/mortice use Promise.withResolvers, a
+// Node >= 22 API) cannot start on older Nodes. The opt-in WAN test below skips
+// there with a visible reason; the "stays off by default" test runs everywhere
+// because it never constructs a libp2p node.
+const WAN_SKIP =
+  Number(process.versions.node.split(".")[0]) < 22 &&
+  "the pinned libp2p v3 stack requires Node >= 22 (it uses Promise.withResolvers via it-queue/mortice)";
+
 const BOOT_TOKEN = "wan-glue-token";
 
 /**
@@ -69,7 +77,7 @@ function wanProviderOf(server: CoreServer): WanProviderHandle | null {
   return (server as unknown as { wanProvider: WanProviderHandle | null }).wanProvider;
 }
 
-test("WAN transport: opt-in via wanEnabled, transport PeerId equals the p2p-hub identity", async () => {
+test("WAN transport: opt-in via wanEnabled, transport PeerId equals the p2p-hub identity", { skip: WAN_SKIP }, async () => {
   const { server, host } = await bootWanServer(true);
   try {
     // The WAN transport comes up alongside the LAN transport, sharing the
