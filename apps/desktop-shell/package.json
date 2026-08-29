@@ -12,7 +12,7 @@
     "build": "vite build",
     "build:tests": "node test/build-tests.cjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
-    "test": "node test/build-tests.cjs && node --test --test-timeout=30000 dist-tests/*.test.js",
+    "test": "node test/build-tests.cjs && node test/run-tests.cjs",
     "preview": "vite preview"
   },
   "dependencies": {
