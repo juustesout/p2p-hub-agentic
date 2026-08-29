@@ -41,6 +41,17 @@ export const PEERSITE_MESSAGE_MAX_LENGTH = 10_000;
 export const MESSAGE_RATE_LIMIT = 30;
 export const MESSAGE_RATE_WINDOW_MS = 60_000;
 
+/**
+ * Per-minute cap on the number of *cache-miss* outbound peer fetches that
+ * `/remote-site/*` may trigger. A miss is an authenticated fetch the node
+ * performs on behalf of whoever requested the URL — an action, not just a
+ * read — so even a legitimate-but-abused caller must not be able to use the
+ * node's trusted peer relationships as an unbounded proxy. Mirrored assets are
+ * served from disk after the first fetch, so normal browsing is unaffected.
+ */
+export const REMOTE_SITE_FETCH_RATE_LIMIT = 30;
+export const REMOTE_SITE_FETCH_RATE_WINDOW_MS = 60_000;
+
 /** Security headers applied to every served static asset. */
 export const SITE_SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",

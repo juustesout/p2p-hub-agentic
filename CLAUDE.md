@@ -108,8 +108,9 @@ miss, not boilerplate to skim.
     why the plugin bridge relies on an origin-pinned `postMessage` allowlist
     instead of the shell sharing its token. When a surface has to be
     reachable by code that must not hold the boot token, give it a *scoped*
-    credential (site token) or no credential plus loopback + containment +
-    CSP — never the boot token. The same reasoning applies in reverse: the
+    credential (site token) or no credential plus loopback + Host-header
+    allowlist (DNS rebinding) + containment + CSP — never the boot token. The
+    same reasoning applies in reverse: the
     `/ws` `?token=` in the query string is an accepted risk precisely because
     no third-party code observes it.
 
@@ -251,6 +252,48 @@ header the browser cannot set. The mitigation is operational: keep the bridge
 bound to loopback (default), keep the token short-lived (regenerated each
 boot), and avoid logging `?token=` in front of the bridge.
 
+### Host-header allowlist: DNS rebinding on the *tokenless* surfaces
+
+The boot token covers `/api/*` and `/ws`, but `/site/*`, `/peersite/status`,
+`/ui/*` and `/remote-site/*` are deliberately tokenless (PeerSite's purpose is
+plain browsing, and `/ui`/`/remote-site` must never hand the boot token to
+untrusted iframe content — principle #10). Tokenless is safe **only** if the
+server can tell a real local request from a DNS-rebinding one. Loopback
+*binding* does not do that: after `evil.com` resolves to `127.0.0.1`, the
+victim's browser sends same-origin requests it can read the responses to.
+
+The closing control is the **Host-header allowlist** (`HostGate` in
+`apps/core-server/src/host-validation.ts`, applied uniformly in
+`handleHttp` *before* the token gate, and in the `/ws` upgrade path in
+`ws-bus.ts`): a rebinding page's requests still carry the attacker's domain in
+`Host` (the browser derives it from the URL, never the resolved IP), and that
+hostname is refused with a generic 403 before any route runs. The allowlist:
+
+- Loopback names/IPs (`localhost`, `127.0.0.0/8`, `::1`,
+  `::ffff:127.0.0.1`) are always accepted — that is how the shell/Vite/plain
+  browser reach the bridge.
+- Non-loopback Hosts are accepted **only** when the bridge is explicitly
+  exposed (`P2P_HUB_EXPOSE=1`) **and** the hostname is the configured bind
+  address or one of the machine's own interface addresses — never arbitrary
+  values, so exposed mode still refuses rebinding origins. `P2P_HUB_ALLOWED_HOSTS`
+  (comma-separated) adds explicit operator hostnames (e.g. behind a reverse
+  proxy).
+- A missing `Host` header is refused (fail-closed; HTTP/1.0 clients).
+
+This is an **additional layer**, not a replacement for the token: `/api/*` and
+`/ws` still require the boot token even with an allowed Host.
+
+### `/remote-site/*` fetch budget (confused-deputy proxy cap)
+
+`/remote-site/<peerId>/*` serves a mirrored peer site, but a cache **miss**
+triggers an *outbound, authenticated peer fetch* on the node's behalf — an
+action, not a read. Even with the Host gate in place, the route is rate-capped
+(`FixedWindowLimiter`, 30/min, `REMOTE_SITE_FETCH_RATE_LIMIT` in
+`routes/helpers.ts`, consulted before every miss via `allowRemoteFetch` in
+`SitesContext`) so the node's trusted peer relationships can never be used as
+an unbounded fetch proxy. Over the cap a miss is answered 429 without dialing
+any peer; mirror *hits* are disk reads and never consult the budget.
+
 ## Review process for anything touching the above
 
 When asked to review or verify security-relevant work in this repo:
@@ -274,6 +317,14 @@ When asked to review or verify security-relevant work in this repo:
 
 ## Known open follow-ups (check if still open before starting new work)
 
+- ~~DNS rebinding on the tokenless surfaces (`/site`, `/ui`, `/remote-site`,
+  `/peersite/status`)~~ — **resolved**: a uniform Host-header allowlist
+  (`HostGate`, `apps/core-server/src/host-validation.ts`) runs before every
+  route and the `/ws` upgrade, refusing rebinding origins with a generic 403;
+  `/remote-site/*` cache-miss outbound fetches are additionally rate-capped
+  (`FixedWindowLimiter`, 30/min) so the node's trusted peer relationships
+  cannot be used as an unbounded fetch proxy (see "Host-header allowlist" and
+  "`/remote-site/*` fetch budget" above).
 - ~~HTTP bridge authentication~~ — resolved: the per-boot shared token now
   guards `/api/*` and `/ws` (see "Core-server boot token" above).
 - ~~`P2P_HUB_HOST=0.0.0.0` widens the HTTP bridge beyond localhost with no

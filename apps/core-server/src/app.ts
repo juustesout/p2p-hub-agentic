@@ -30,6 +30,8 @@ import { createPeerPoller, startNetworking } from "./network";
 import { startWanProvider } from "./wan-provider";
 import type { WanProviderHandle } from "./wan-provider";
 import { WsActivityBus, wireEventBridge } from "./ws-bus";
+import { HostGate, hostFromHeader } from "./host-validation";
+import { FixedWindowLimiter } from "./fixed-window";
 import { decideSiteExposure } from "./site-exposure";
 import { loadSettings, saveSettings } from "./settings";
 import { registerGovernanceSkills, serveGovernance } from "./routes/governance";
@@ -40,7 +42,7 @@ import { servePeersite, serveRemoteSite, serveSite } from "./routes/sites";
 import type { SitesContext } from "./routes/sites";
 import { executeRemote, serveOperator } from "./routes/operator";
 import type { OperatorContext } from "./routes/operator";
-import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
+import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, REMOTE_SITE_FETCH_RATE_LIMIT, REMOTE_SITE_FETCH_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
 import type { CoreServerOptions } from "./options";
 import {
   acquireInstanceLock,
@@ -89,7 +91,9 @@ export class CoreServer {
   private lanSiteAllowed = true;
   private siteToken = "";
   private peerId = "";
-  private readonly messageTimestamps = new Map<string, number[]>();
+  private readonly messageLimiters = new Map<string, FixedWindowLimiter>();
+  private readonly remoteFetchLimiter: { allow(): boolean };
+  private readonly hostGate: HostGate;
 
   /** Vault lock-gate state: transports + plugin storage gated until unlocked. */
   private vaultUnlocked = false;
@@ -127,6 +131,20 @@ export class CoreServer {
     });
     this.broker = this.host.taskBroker();
     this.trustGate = new TrustTierGate(options.trustConfirmation);
+    // The Host allowlist gate and the /remote-site fetch budget are fixed for
+    // the server's lifetime and must exist before the route contexts (which
+    // close over them) are built.
+    this.hostGate = new HostGate({
+      bindHost: options.host ?? "127.0.0.1",
+      exposed: options.exposed ?? false,
+      extraHosts: options.allowedHosts,
+    });
+    this.remoteFetchLimiter =
+      options.remoteFetchLimiter ??
+      new FixedWindowLimiter(
+        REMOTE_SITE_FETCH_RATE_LIMIT,
+        REMOTE_SITE_FETCH_RATE_WINDOW_MS,
+      );
     this.peerPoller = createPeerPoller({
       provider: () => this.provider,
       probeSkill: () => this.broker.listSkills().find((s) => !s.localOnly)?.skill,
@@ -156,6 +174,7 @@ export class CoreServer {
         effectiveSiteRoot: () => this.effectiveSiteRoot(),
         siteAuthorized: (req) => this.isSiteAuthorized(req),
         allowMessage: (remote) => this.allowMessage(remote),
+        allowRemoteFetch: () => this.remoteFetchLimiter.allow(),
         broadcast: (event, payload) => this.broadcast(event, payload),
         executeRemote: (peerId, skill, id, args) =>
           executeRemote(this.routes.operator, peerId, skill, id, args),
@@ -239,6 +258,7 @@ export class CoreServer {
       path: "/ws",
       maxPayload: MAX_PAYLOAD_BYTES,
       isAuthorized: (req) => this.isAuthorizedWs(req),
+      isAllowedHost: (hostHeader) => this.hostGate.isAllowed(hostHeader),
     });
 
     const port = this.options.port ?? DEFAULT_HTTP_PORT;
@@ -538,10 +558,13 @@ export class CoreServer {
   // ---------------------------------------------------------------------
 
   /**
-   * Dispatch one HTTP request. The global `/api/*` boot-token gate runs first
-   * (header-only — see {@link isAuthorized}); route modules then run in a
-   * fixed order (site → peersite → ui → remote-site → governance → operator).
-   * The exact gating/exception semantics were moved verbatim, not rewritten.
+   * Dispatch one HTTP request. The Host-header allowlist gate runs first, on
+   * every path (route-agnostic, so `/api/*`, `/site`, `/peersite`, `/ui` and
+   * `/remote-site` all share the same DNS-rebinding protection); the global
+   * `/api/*` boot-token gate runs second (header-only — see {@link isAuthorized}).
+   * Route modules then run in a fixed order (site → peersite → ui →
+   * remote-site → governance → operator). The exact gating/exception
+   * semantics were moved verbatim, not rewritten.
    */
   private async handleHttp(
     req: http.IncomingMessage,
@@ -549,6 +572,21 @@ export class CoreServer {
   ): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
+
+    // Deny-by-default host gate (DNS rebinding): the tokenless surfaces can
+    // only be read through a Host header the browser cannot fake. This runs
+    // before the token gate on purpose — a rebinding page must not even reach
+    // the auth paths. Missing/mismatched Host → generic 403, logged server-side
+    // (CLAUDE.md principle: no details that help an attacker refine).
+    if (!this.hostGate.isAllowed(req.headers.host)) {
+      console.warn(
+        `[core-server] rejecting request with disallowed Host header from ` +
+          `${req.socket.remoteAddress ?? "unknown"} (host ` +
+          `"${hostFromHeader(req.headers.host) ?? "(missing)"}")`,
+      );
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
 
     if (path.startsWith("/api/") && !this.isAuthorized(req)) {
       sendJson(res, 401, { error: "unauthorized" });
@@ -655,16 +693,12 @@ export class CoreServer {
 
   /** Fixed-window rate limit for `/peersite/message`, keyed by source IP. */
   private allowMessage(remoteAddress: string): boolean {
-    const now = Date.now();
-    const recent = (this.messageTimestamps.get(remoteAddress) ?? []).filter(
-      (t) => now - t < MESSAGE_RATE_WINDOW_MS,
-    );
-    if (recent.length >= MESSAGE_RATE_LIMIT) {
-      return false;
+    let limiter = this.messageLimiters.get(remoteAddress);
+    if (!limiter) {
+      limiter = new FixedWindowLimiter(MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS);
+      this.messageLimiters.set(remoteAddress, limiter);
     }
-    recent.push(now);
-    this.messageTimestamps.set(remoteAddress, recent);
-    return true;
+    return limiter.allow();
   }
 
   /**

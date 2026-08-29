@@ -10,6 +10,8 @@ export interface WsActivityBusOptions {
   path: string;
   maxPayload: number;
   isAuthorized(request: http.IncomingMessage): boolean;
+  /** Host-header allowlist gate (shared with the HTTP dispatcher). */
+  isAllowedHost(hostHeader: string | undefined): boolean;
 }
 
 /**
@@ -29,16 +31,25 @@ export class WsActivityBus {
       maxPayload: options.maxPayload,
     });
     this.wss.on("connection", (socket, request) =>
-      this.handleSocket(socket, request, options.isAuthorized),
+      this.handleSocket(socket, request, options),
     );
   }
 
   private handleSocket(
     socket: WebSocket,
     request: http.IncomingMessage,
-    isAuthorized: (request: http.IncomingMessage) => boolean,
+    options: WsActivityBusOptions,
   ): void {
-    if (!isAuthorized(request)) {
+    // Same deny-by-default host gate as the HTTP dispatcher: a DNS-rebinding
+    // page that upgraded to `/ws` must not be able to reach the bus either
+    // (even though the query-string token is already a rebinding blocker for
+    // browsers, this closes the non-browser path and keeps the boundary
+    // uniform).
+    if (!options.isAllowedHost(request.headers.host)) {
+      socket.close(1008, "forbidden");
+      return;
+    }
+    if (!options.isAuthorized(request)) {
       socket.close(1008, "unauthorized");
       return;
     }

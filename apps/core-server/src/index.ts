@@ -51,6 +51,7 @@ async function main(): Promise<void> {
   const {
     host,
     exposed,
+    allowedHosts,
     port,
     p2pPort,
     p2pBindHost,
@@ -63,8 +64,10 @@ async function main(): Promise<void> {
     console.warn(
       `[core-server] WARNING: binding the HTTP/WS bridge to non-loopback ` +
         `"${host}". Any host able to reach this port can now talk to ` +
-        `the bridge, which is guarded only by the per-boot token. Keep the ` +
-        `token secret and treat the surrounding network as untrusted.`,
+        `the bridge, which is guarded by the per-boot token (for /api and /ws) ` +
+        `and by the Host-header allowlist (for the tokenless /site, /ui, ` +
+        `/remote-site and /peersite surfaces). Keep the token secret and treat ` +
+        `the surrounding network as untrusted.`,
     );
   }
   const pluginsDir = resolvePluginsDir();
@@ -85,6 +88,8 @@ async function main(): Promise<void> {
     pluginsDir,
     dataDir: resolveDataDir(),
     host,
+    exposed,
+    allowedHosts,
     port,
     p2pPort,
     p2pBindHost,

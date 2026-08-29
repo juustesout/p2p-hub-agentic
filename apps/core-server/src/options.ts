@@ -4,6 +4,20 @@ export interface CoreServerOptions {
   pluginsDir: string;
   dataDir: string;
   host?: string;
+  /**
+   * True when the HTTP/WS bridge is bound beyond loopback (`P2P_HUB_EXPOSE=1`).
+   * Widens the Host-header allowlist to the machine's own addresses so LAN
+   * clients can legitimately reach the tokenless surfaces; it never widens to
+   * arbitrary Host values (DNS-rebinding protection stays on).
+   */
+  exposed?: boolean;
+  /**
+   * Extra hostnames to accept in the Host-header allowlist on top of the
+   * loopback set and (when exposed) the machine's addresses. Operator/test
+   * override for reaching the bridge via a hostname (e.g. behind a reverse
+   * proxy) that interface enumeration cannot discover.
+   */
+  allowedHosts?: string[];
   port?: number;
   /**
    * Port for the network-light P2P transport (mDNS advertisement + TLS).
@@ -22,8 +36,16 @@ export interface CoreServerOptions {
   masterKey?: string;
   /** Explicit boot token; overrides env and auto-generation. */
   bootToken?: string;
-  /** Hook events to bridge to the WebSocket activity bus. */
+  /**
+   * Hook events to bridge to the WebSocket activity bus.
+   */
   bridgedEvents?: string[];
+  /**
+   * Gate for `/remote-site/*` cache-miss outbound fetches. Defaults to a
+   * `FixedWindowLimiter` (30/min); injectable so tests can observe the gate
+   * without triggering real peer fetches.
+   */
+  remoteFetchLimiter?: { allow(): boolean };
   /**
    * Native tier-2 confirmation capability injected by the host. Absent by
    * default, which makes every tier-2 settings change fail closed (denied).

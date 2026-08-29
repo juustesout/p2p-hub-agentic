@@ -39,6 +39,12 @@ export interface SitesContext {
   effectiveSiteRoot(): Promise<string | null>;
   siteAuthorized(req: http.IncomingMessage): boolean;
   allowMessage(remoteAddress: string): boolean;
+  /**
+   * Gate for cache-miss outbound peer fetches: `false` means the node must not
+   * act as a fetch proxy right now (rate-capped), so the route answers the
+   * miss as unavailable instead of dialing a trusted peer on a caller's behalf.
+   */
+  allowRemoteFetch(): boolean;
   broadcast(event: string, payload: unknown): void;
   executeRemote(
     peerId: string,
@@ -240,7 +246,8 @@ export async function servePeersite(
  *
  * Hardening mirrors `/ui` (CLAUDE.md principle #10): served WITHOUT the boot
  * token (the iframe is untrusted remote content and must never hold a token
- * in its URL), loopback-gated, GET/HEAD-only, strict per-request containment
+ * in its URL), loopback-gated plus the uniform Host-header allowlist
+ * (DNS-rebinding gate), GET/HEAD-only, strict per-request containment
  * (shared {@link mirrorDestination} on the write side, {@link resolveAndContainFile}
  * semantics on the serve side), and the hardened UI CSP with `connect-src
  * 'none'`. The peerId is validated as hex before it ever builds a path, so
@@ -319,7 +326,15 @@ export async function serveRemoteSite(
   try {
     contents = await fsp.readFile(destination);
   } catch {
-    // Miss: fetch the asset from the remote peer over P2P, then serve it.
+    // Miss: a cache miss triggers an *outbound authenticated peer fetch* on the
+    // node's behalf — an action, not a read. It is rate-capped so the node's
+    // trusted peer relationships cannot be used as an unbounded proxy (even by
+    // a legitimate-but-abused caller); over the cap the miss is refused as
+    // rate-limited without dialing any peer.
+    if (!ctx.allowRemoteFetch()) {
+      sendJson(res, 429, { error: "rate limit exceeded" });
+      return true;
+    }
     const stored = await mirrorFetchAndStore({
       fetcher: (pid, p) => fetchRemoteSiteAsset(ctx, pid, p),
       mirrorRoot,

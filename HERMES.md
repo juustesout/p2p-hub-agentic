@@ -118,6 +118,9 @@ node apps/core-server/dist/index.js
 - Listens on `127.0.0.1:8787` by default (`P2P_HUB_PORT` overrides; `0` lets the
   OS assign a port).
 - On boot it writes a per-boot token to `<data-dir>/boot-token`.
+- Every request must also present a *loopback* `Host` header (the DNS-rebinding
+  gate): `localhost`, `127.0.0.0/8` or `[::1]`, with an optional port.
+  `P2P_HUB_ALLOWED_HOSTS` (comma-separated) adds operator hostnames.
 - Default data dir is `~/.p2p-hub` (`P2P_HUB_DATA_DIR` overrides).
 - It auto-resolves the plugins dir from the monorepo (`plugins/`), so plugins
   are picked up from the compiled `dist/` of each plugin.

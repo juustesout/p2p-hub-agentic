@@ -8,6 +8,7 @@ import { decideBindHost } from "./host";
  * | Variable | Chain | Default |
  * | --- | --- | --- |
  * | HTTP/WS bridge port | `P2P_HUB_PORT` → `PORT` | `8788` |
+ * | Extra Host allowlist | `P2P_HUB_ALLOWED_HOSTS` (comma-separated) | *(none)* |
  * | P2P transport port | `P2P_HUB_P2P_PORT` → `P2P_PORT` | `32837` |
  * | P2P transport bind host | `P2P_BIND_HOST` | `0.0.0.0` |
  * | Networking enabled | `P2P_ENABLE_NETWORKING` → `P2P_HUB_NETWORKING` | `true` |
@@ -33,6 +34,12 @@ export interface ServerConfig {
   host: string;
   /** True when the bridge host is non-loopback (caller must warn loudly). */
   exposed: boolean;
+  /**
+   * Explicit extra Host-header allowlist entries (comma-separated
+   * `P2P_HUB_ALLOWED_HOSTS`), for reaching the bridge via a hostname the bind
+   * address or interface enumeration cannot discover.
+   */
+  allowedHosts: string[];
   /** HTTP/WS bridge port. */
   port: number;
   /** P2P transport (network-light) port. */
@@ -117,6 +124,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoadConfigResult {
     DEFAULT_P2P_PORT,
   );
   const p2pBindHost = (env.P2P_BIND_HOST ?? "").trim() || DEFAULT_P2P_BIND_HOST;
+  const allowedHosts = (env.P2P_HUB_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
   const networking = parseBoolEnv(
     env.P2P_ENABLE_NETWORKING ?? env.P2P_HUB_NETWORKING,
     true,
@@ -137,6 +148,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): LoadConfigResult {
     config: {
       host: bindDecision.host,
       exposed: bindDecision.exposed,
+      allowedHosts,
       port,
       p2pPort,
       p2pBindHost,

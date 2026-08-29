@@ -28,10 +28,11 @@ export interface UiContext {
  * code can read `location.search` — giving a sandboxed plugin the full
  * `/api/*` token would let it invoke *any* skill directly, defeating the
  * shell bridge's allowlist entirely. `/ui` instead relies on the same
- * controls as `/site`: loopback-only default bind, strict per-request
- * containment, and a hardened CSP. It serves only the plugin's own public
- * UI assets (already on the user's disk), and every capability request must
- * still present the boot token elsewhere.
+ * controls as `/site`: loopback-only default bind, the uniform Host-header
+ * allowlist (DNS-rebinding gate, see `host-validation.ts`), strict
+ * per-request containment, and a hardened CSP. It serves only the plugin's
+ * own public UI assets (already on the user's disk), and every capability
+ * request must still present the boot token elsewhere.
  */
 export async function serveUi(
   ctx: UiContext,
