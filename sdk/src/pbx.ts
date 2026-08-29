@@ -71,6 +71,44 @@ export class PBXRecursionDepthExceededError extends PBXError {
 }
 
 /**
+ * Maximum number of consecutive `$ref` links {@link resolveRefChain} will
+ * follow before aborting. A malicious document can encode an arbitrarily long
+ * proxy chain; 16 links is far beyond any legitimate OLE embedding depth while
+ * keeping resolution cost constant and recursion stack depth trivially small.
+ */
+export const MAX_REF_DEPTH = 16;
+
+/**
+ * Raised when {@link resolveRefChain} detects that the `$ref` graph is cyclic
+ * (a `$ref` chain re-enters an object that is already being resolved). Cycle
+ * detection uses a visited set of object `$id`s, so a cycle terminates with a
+ * typed error instead of an infinite loop or a stack overflow.
+ */
+export class PBXCycleDetectedError extends PBXError {
+  /** The `$id` whose re-resolution closed the cycle. */
+  readonly objectId: string;
+
+  constructor(objectId: string) {
+    super(`PBX $ref cycle detected: object "${objectId}" is already being resolved`);
+    this.objectId = objectId;
+  }
+}
+
+/**
+ * Raised when {@link resolveRefChain} exceeds the configured resolution depth
+ * ({@link MAX_REF_DEPTH} by default). A deep-but-acyclic `$ref` chain must be
+ * rejected with a typed error rather than overflowing the call stack.
+ */
+export class PBXMaxDepthExceededError extends PBXError {
+  readonly maxDepth: number;
+
+  constructor(maxDepth: number) {
+    super(`PBX $ref resolution exceeded the maximum depth of ${maxDepth}`);
+    this.maxDepth = maxDepth;
+  }
+}
+
+/**
  * Callback invoked when a `$ref` points at a missing or malformed object.
  * Consumers wire this to a global activity/hook bus (e.g. `pbx:brokenRef`); by
  * default it is a no-op so the SDK stays dependency-free and silent in tests.
@@ -235,12 +273,94 @@ function resolveRefInternal(
  * dangling reference rather than throwing, so a caller can never hit a
  * `TypeError: Cannot read property of null`. A dangling `$ref` is reported via
  * {@link setBrokenRefReporter} (default: no-op).
+ *
+ * This is a **single-hop** resolution: it returns the object stored under
+ * `ref.$ref` in `$objects`, which is inherently cycle-safe (one map lookup, no
+ * recursion). To follow a chain of consecutive `$ref` proxies — the case a
+ * hostile peer can abuse to loop or overflow a naive recursive resolver — use
+ * {@link resolveRefChain}, which enforces {@link MAX_REF_DEPTH} and throws
+ * {@link PBXCycleDetectedError}/{@link PBXMaxDepthExceededError}.
  */
 export function resolveRef(
   doc: PBXDocument,
   ref: PBXReference | null | undefined,
 ): PBXObject | null {
   return resolveRefInternal(doc, ref, brokenRefReporter);
+}
+
+export interface ResolveRefChainOptions {
+  /** Override {@link MAX_REF_DEPTH}. Defaults to `MAX_REF_DEPTH`. */
+  maxDepth?: number;
+}
+
+function resolveRefChainInternal(
+  doc: PBXDocument,
+  ref: PBXReference | null | undefined,
+  report: BrokenRefReporter | null,
+  maxDepth: number,
+  visited: Set<string>,
+  depth: number,
+): PBXObject | null {
+  if (!isPBXReference(ref)) {
+    return null;
+  }
+  const target = resolveRefInternal(doc, ref, report);
+  if (!target) {
+    return null;
+  }
+  if (visited.has(target.$id)) {
+    throw new PBXCycleDetectedError(target.$id);
+  }
+  if (depth > maxDepth) {
+    throw new PBXMaxDepthExceededError(maxDepth);
+  }
+  visited.add(target.$id);
+  // A proxy object carries a `$ref` property on top of `$id`/`$class`; follow
+  // it (bounded by `maxDepth` and the visited set) instead of returning it.
+  if (isPBXReference(target)) {
+    return resolveRefChainInternal(
+      doc,
+      target,
+      report,
+      maxDepth,
+      visited,
+      depth + 1,
+    );
+  }
+  return target;
+}
+
+/**
+ * Resolve an OLE pointer and follow any chain of consecutive `$ref` proxies
+ * (objects that themselves carry a `$ref` property) to the final object.
+ *
+ * This is the hardened, recursion-bounded resolver for untrusted documents:
+ * - **Cycle detection** — every resolved object `$id` is recorded in a
+ *   `visited: Set<string>`; re-entering an object already being resolved throws
+ *   {@link PBXCycleDetectedError} instead of looping forever.
+ * - **Depth limit** — a `$ref` chain longer than `options.maxDepth`
+ *   ({@link MAX_REF_DEPTH} = 16 by default) throws
+ *   {@link PBXMaxDepthExceededError} instead of overflowing the call stack.
+ *
+ * Both errors are plain {@link PBXError}s, so any caller boundary (e.g. the
+ * TaskBroker handler wrapper, which catches every handler throw and returns a
+ * `status: "error"` result) handles them like any other error. Dangling refs
+ * still return `null` via {@link setBrokenRefReporter}, never throw.
+ */
+export function resolveRefChain(
+  doc: PBXDocument,
+  ref: PBXReference | null | undefined,
+  options: ResolveRefChainOptions = {},
+): PBXObject | null {
+  const maxDepth = options.maxDepth ?? MAX_REF_DEPTH;
+  return resolveRefChainInternal(
+    doc,
+    ref,
+    brokenRefReporter,
+    maxDepth,
+    new Set(),
+    0,
+  );
 }
 
 /** Resolve the root object of a document (never null for a valid document). */
@@ -364,6 +484,14 @@ export class PBXBuilder {
     ref: PBXReference | null | undefined,
   ): PBXObject | null {
     return resolveRef(doc, ref);
+  }
+
+  resolveRefChain(
+    doc: PBXDocument,
+    ref: PBXReference | null | undefined,
+    options: ResolveRefChainOptions = {},
+  ): PBXObject | null {
+    return resolveRefChain(doc, ref, options);
   }
 
   serialize(doc: PBXDocument): string {
