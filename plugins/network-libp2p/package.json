@@ -13,7 +13,8 @@
     "test": "node ../../scripts/run-tests.js"
   },
   "devDependencies": {
-    "@p2p-hub/core": "0.1.0"
+    "@p2p-hub/core": "0.1.0",
+    "@p2p-hub/tasks": "0.1.0"
   },
   "dependencies": {
     "@p2p-hub/sdk": "0.1.0",
