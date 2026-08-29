@@ -63,6 +63,20 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop-shell/src-tauri
+      # `cargo check` runs tauri-build, which validates `bundle.externalBin`
+      # (`bin/p2p-hub-core`). That SEA sidecar is gitignored and must be built
+      # before cargo can resolve it — otherwise the build script fails with
+      # "resource path `bin/p2p-hub-core-<triple>` doesn't exist".
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        working-directory: .
+        run: npm ci
+      - name: Build core-server SEA sidecar (Tauri externalBin)
+        working-directory: .
+        run: npm run build:sea -w @p2p-hub/core-server
       - name: cargo check
         run: cargo check
       - name: cargo test (serde wire-contract round-trips)
