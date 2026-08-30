@@ -13,6 +13,7 @@ import { TaskBroker } from "../task-broker/task-broker";
 import type { RemoteAccessPolicy } from "../task-broker/remote-access";
 import { AccessPassManager } from "../task-broker/access-pass-manager";
 import { CoreAIProvider } from "../ai/core-ai-provider";
+import type { AIBudgetGate } from "../ai/ai-budget";
 import { VaultManager } from "../storage/vault-manager";
 import { IdentityManager } from "../identity/identity-manager";
 import { NetworkRegistry } from "../network-registry";
@@ -257,6 +258,7 @@ export async function loadPlugin(
   resolveTrustLookup: (() => ContactLookup | null) | null = null,
   accessManager: AccessPassManager = new AccessPassManager(),
   resolveEventLayer: EventLayerResolver = async () => null,
+  aiBudgetGate: AIBudgetGate | null = null,
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   if (manifest.signature !== undefined) {
@@ -273,7 +275,13 @@ export async function loadPlugin(
     }
   }
   const own = storageManager.getOrCreate(manifest.id);
-  const aiProvider = new CoreAIProvider({ vault: vaultManager });
+  const aiProvider = new CoreAIProvider({
+    vault: vaultManager,
+    // Anti-financial-DoS: the host's quota gate (when one is wired) guards the
+    // plugin's ctx.ai calls too, so a network/HTTP-exposed plugin skill cannot
+    // spend the node's AI budget beyond the configured cap.
+    aiBudgetGate: aiBudgetGate ?? undefined,
+  });
 
   // Fase 2B: a plugin gets its own data subfolder, never the host data
   // directory. `isPathInsideDataDir` still checks against the real host data

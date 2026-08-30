@@ -5,11 +5,21 @@ import type {
 } from "@p2p-hub/sdk";
 import { sanitizeAIOutput } from "@p2p-hub/sdk";
 import { VaultManager } from "../storage/vault-manager";
+import type { AIBudgetGate, AIInvocationContext } from "./ai-budget";
 
 export interface CoreAIProviderOptions {
   vault: VaultManager;
   /** Injectable for tests; defaults to global fetch. */
   fetchFn?: typeof fetch;
+  /**
+   * Anti-financial-DoS quota gate consulted at the top of every LLM call,
+   * before the key is resolved and before any request leaves the process. The
+   * gate throws {@link AIQuotaExceededError} to refuse a call. Injectable so
+   * the operator's {@link AIBudgetManager} (core-server) enforces the quota
+   * at this single choke point without the provider depending on it directly.
+   * Absent ⇒ no quota is enforced (the default for tests and bare hosts).
+   */
+  aiBudgetGate?: AIBudgetGate;
 }
 
 interface ResolvedAI {
@@ -55,7 +65,16 @@ export class CoreAIProvider {
     return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   }
 
-  async generateText(options: AIGenerateTextOptions): Promise<string> {
+  async generateText(
+    options: AIGenerateTextOptions,
+    context?: AIInvocationContext,
+  ): Promise<string> {
+    // Mandatory anti-financial-DoS gate at the very top: a call that is over
+    // quota is refused here, before the vault key is resolved and before the
+    // LLM endpoint is reached. The gate throws AIQuotaExceededError, which the
+    // TaskBroker surfaces as a typed error result (HTTP 429 on the bridge).
+    this.options.aiBudgetGate?.consume(context);
+
     const { apiKey, baseUrl, model } = await this.resolve();
     const resolvedBase = baseUrl ?? DEFAULT_BASE_URL;
     this.requireKey(apiKey, resolvedBase);
@@ -100,7 +119,12 @@ export class CoreAIProvider {
 
   async generateImage(
     options: AIGenerateImageOptions,
+    context?: AIInvocationContext,
   ): Promise<AIGenerateImageResult> {
+    // Same mandatory quota gate as generateText: image generation is a billed
+    // capability too, so a caller cannot route cost around the text path.
+    this.options.aiBudgetGate?.consume(context);
+
     const { apiKey, baseUrl } = await this.resolve();
     const resolvedBase = baseUrl ?? DEFAULT_BASE_URL;
     this.requireKey(apiKey, resolvedBase);

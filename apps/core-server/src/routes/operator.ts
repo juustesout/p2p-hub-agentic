@@ -1,6 +1,6 @@
 import * as http from "node:http";
 import { randomUUID } from "node:crypto";
-import { TrustConfirmationDeniedError, TrustTierGate, isValidAgentLabel } from "@p2p-hub/core";
+import { TrustConfirmationDeniedError, TrustTierGate, isValidAgentLabel, AI_QUOTA_EXCEEDED_ERROR_CODE } from "@p2p-hub/core";
 import type { PluginHost, TaskBroker } from "@p2p-hub/core";
 import type { NetworkLightProvider } from "@p2p-hub/network-light";
 import {
@@ -83,7 +83,13 @@ export async function serveOperator(
   }
   if (req.method === "POST" && pathname === "/api/execute") {
     const body = (await readJsonBody(req)) as ExecuteBody;
-    sendJson(res, 200, await execute(ctx, body));
+    const result = await execute(ctx, body);
+    // Anti-financial-DoS: an AI call refused by the quota gate is a controlled
+    // 429 (Too Many Requests), never a generic 200-with-error and never a
+    // retried LLM call. All other results keep their normal 200 envelope.
+    const status =
+      result.code === AI_QUOTA_EXCEEDED_ERROR_CODE ? 429 : 200;
+    sendJson(res, status, result);
     return true;
   }
   if (req.method === "POST" && pathname === "/api/vault/unlock") {

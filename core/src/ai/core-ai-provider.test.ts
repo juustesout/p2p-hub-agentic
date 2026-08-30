@@ -4,6 +4,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CoreAIProvider } from "./core-ai-provider";
+import {
+  AIQuotaExceededError,
+  AI_QUOTA_EXCEEDED_ERROR_CODE,
+  type AIBudgetGate,
+} from "./ai-budget";
 import { VaultManager } from "../storage/vault-manager";
 
 async function makeVault(): Promise<VaultManager> {
@@ -71,4 +76,129 @@ test("a local endpoint works without an API key", async () => {
   const result = await provider.generateText({ prompt: "hi" });
 
   assert.equal(result, "local reply");
+});
+
+test("generateText consults the budget gate before resolving the key or fetching", async () => {
+  const vault = await makeVault();
+  await vault.setSecret("ai.baseUrl", "http://localhost:11434/v1");
+
+  const seen: unknown[] = [];
+  const gate: AIBudgetGate = {
+    consume: (context) => {
+      seen.push(context);
+    },
+  };
+  let fetched = false;
+  const fetchFn = async () => {
+    fetched = true;
+    return jsonResponse(200, {
+      choices: [{ message: { content: "never reached" } }],
+    });
+  };
+
+  const provider = new CoreAIProvider({
+    vault,
+    fetchFn: fetchFn as typeof fetch,
+    aiBudgetGate: gate,
+  });
+  await provider.generateText({ prompt: "hi" }, { peerId: "peer-1" });
+
+  assert.deepEqual(seen, [{ peerId: "peer-1" }]);
+  assert.equal(fetched, true, "an in-budget call still reaches the LLM");
+});
+
+test("a quota-refused generateText throws AIQuotaExceededError without fetching", async () => {
+  const vault = await makeVault();
+  await vault.setSecret("ai.baseUrl", "http://localhost:11434/v1");
+
+  let fetched = false;
+  const fetchFn = async () => {
+    fetched = true;
+    return jsonResponse(200, {
+      choices: [{ message: { content: "never reached" } }],
+    });
+  };
+  const gate: AIBudgetGate = {
+    consume: () => {
+      throw new AIQuotaExceededError("AI quota exceeded for peer \"peer-1\"");
+    },
+  };
+
+  const provider = new CoreAIProvider({
+    vault,
+    fetchFn: fetchFn as typeof fetch,
+    aiBudgetGate: gate,
+  });
+
+  await assert.rejects(
+    () => provider.generateText({ prompt: "hi" }, { peerId: "peer-1" }),
+    (err: unknown) => {
+      assert.ok(err instanceof AIQuotaExceededError);
+      assert.equal((err as AIQuotaExceededError).code, AI_QUOTA_EXCEEDED_ERROR_CODE);
+      return true;
+    },
+  );
+  assert.equal(fetched, false, "the LLM must never be reached when over quota");
+});
+
+test("generateText with no caller context still passes through the gate", async () => {
+  const vault = await makeVault();
+  await vault.setSecret("ai.baseUrl", "http://localhost:11434/v1");
+
+  const seen: unknown[] = [];
+  const gate: AIBudgetGate = {
+    consume: (context) => {
+      seen.push(context);
+    },
+  };
+  const fetchFn = async () =>
+    jsonResponse(200, {
+      choices: [{ message: { content: "ok" } }],
+    });
+  const provider = new CoreAIProvider({
+    vault,
+    fetchFn: fetchFn as typeof fetch,
+    aiBudgetGate: gate,
+  });
+
+  await provider.generateText({ prompt: "hi" });
+  assert.deepEqual(seen, [undefined], "local calls are attributed by the gate");
+});
+
+test("generateImage consults the budget gate too", async () => {
+  const vault = await makeVault();
+  await vault.setSecret("ai.baseUrl", "http://localhost:11434/v1");
+
+  let gateCalls = 0;
+  const gate: AIBudgetGate = {
+    consume: () => {
+      gateCalls += 1;
+      throw new AIQuotaExceededError("over budget");
+    },
+  };
+  const provider = new CoreAIProvider({
+    vault,
+    aiBudgetGate: gate,
+    fetchFn: (async () =>
+      jsonResponse(200, {
+        data: [{ url: "https://example.test/img.png" }],
+      })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => provider.generateImage({ prompt: "draw a cat" }, { peerId: "peer-1" }),
+    AIQuotaExceededError,
+  );
+  assert.equal(gateCalls, 1);
+});
+
+test("without a gate, generateText behaves exactly as before", async () => {
+  const vault = await makeVault();
+  await vault.setSecret("ai.baseUrl", "http://localhost:11434/v1");
+  const fetchFn = async () =>
+    jsonResponse(200, {
+      choices: [{ message: { content: "ungated reply" } }],
+    });
+  const provider = new CoreAIProvider({ vault, fetchFn: fetchFn as typeof fetch });
+  assert.equal(await provider.generateText({ prompt: "hi" }), "ungated reply");
 });

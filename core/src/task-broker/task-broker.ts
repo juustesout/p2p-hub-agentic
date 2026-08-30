@@ -501,10 +501,20 @@ export class TaskBroker {
       const result = await record.handler(task.payload, context);
       return { taskId: task.id, status: "ok", result };
     } catch (err) {
+      // Propagate a machine-readable `code` when a handler throws a typed
+      // error that carries one (e.g. AIQuotaExceededError → "ai-quota-exceeded"),
+      // so the HTTP bridge can map it to a specific status (429) instead of a
+      // generic 200-with-error. Absent a code, the result stays untyped.
+      const code =
+        err instanceof Error &&
+        typeof (err as { code?: unknown }).code === "string"
+          ? ((err as unknown as { code: string }).code as string)
+          : undefined;
       return {
         taskId: task.id,
         status: "error",
         error: err instanceof Error ? err.message : String(err),
+        ...(code !== undefined ? { code } : {}),
       };
     } finally {
       this.activeTasks -= 1;
