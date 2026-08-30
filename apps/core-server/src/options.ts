@@ -1,4 +1,5 @@
 import type { TaskApprovalGate, TrustConfirmation } from "@p2p-hub/core";
+import type { AIBudgetConfig } from "./ai/ai-budget-manager";
 
 export interface CoreServerOptions {
   pluginsDir: string;
@@ -91,4 +92,12 @@ export interface CoreServerOptions {
    * `["/ip4/0.0.0.0/tcp/4277"]`.
    */
   wanListenAddrs?: string[];
+  /**
+   * Anti-financial-DoS AI quota. When set, an `AIBudgetManager` is constructed
+   * with this config and wired into every AI call path (the `core.ai.*` skills
+   * and each plugin's `ctx.ai`). Over-budget calls are refused before the LLM
+   * is reached (typed `ai-quota-exceeded` error; HTTP 429 on the bridge).
+   * Absent ⇒ the fail-closed defaults apply (10 req/peer/hour + 30 req/node/minute).
+   */
+  aiBudget?: AIBudgetConfig;
 }

@@ -11,6 +11,7 @@ export * from "./storage/atomic-write";
 export * from "./storage/queue";
 export * from "./hooks/hook-registry";
 export * from "./ai/core-ai-provider";
+export * from "./ai/ai-budget";
 export * from "./plugin-loader/plugin-context";
 export * from "./plugin-loader/plugin-loader";
 export * from "./plugin-host/plugin-host";

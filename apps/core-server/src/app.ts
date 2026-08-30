@@ -20,7 +20,9 @@ import {
   TrustTierGate,
 } from "@p2p-hub/core";
 import type { TaskBroker } from "@p2p-hub/core";
-import type { NetworkLightProvider } from "@p2p-hub/network-light";import { registerCoreSkills } from "./core-skills";
+import type { NetworkLightProvider } from "@p2p-hub/network-light";
+import { registerCoreSkills } from "./core-skills";
+import { AIBudgetManager } from "./ai/ai-budget-manager";
 import { registerMediaSkill } from "./media";
 import {
   wireMediaAccessConfirmations,
@@ -95,6 +97,8 @@ export class CoreServer {
   private readonly messageLimiters = new Map<string, FixedWindowLimiter>();
   private readonly remoteFetchLimiter: { allow(): boolean };
   private readonly hostGate: HostGate;
+  /** Anti-financial-DoS AI quota gate wired into every AI call path. */
+  private readonly aiBudget: AIBudgetManager;
 
   /** Vault lock-gate state: transports + plugin storage gated until unlocked. */
   private vaultUnlocked = false;
@@ -117,11 +121,15 @@ export class CoreServer {
 
   constructor(options: CoreServerOptions) {
     this.options = options;
+    // The AI quota gate must exist before the PluginHost (whose per-plugin
+    // ctx.ai providers close over it) and before registerCoreSkills.
+    this.aiBudget = new AIBudgetManager(options.aiBudget);
     this.host = new PluginHost({
       pluginsDir: options.pluginsDir,
       dataDir: options.dataDir,
       masterKey: options.masterKey,
       taskApprovalGate: options.taskApprovalGate,
+      aiBudgetGate: this.aiBudget,
       // Stap 6: the event layer's outbound emit gate consults the governance
       // matrix for a per-peer rate override at emit time. `this.governance` is
       // null until initGovernance() runs — the resolver then yields undefined
@@ -308,7 +316,7 @@ export class CoreServer {
   async finishBoot(): Promise<void> {
     if (!this.booted) {
       await this.host.boot();
-      registerCoreSkills(this.broker, this.host.vaultManager());
+      registerCoreSkills(this.broker, this.host.vaultManager(), this.aiBudget);
       registerMediaSkill(this.broker, this.trustGate);
       wireEventBridge(
         this.host,

@@ -35,6 +35,7 @@ import {
   type EventNetwork,
 } from "../events/event-network";
 import type { EventMessageHandler } from "../events/types";
+import type { AIBudgetGate } from "../ai/ai-budget";
 
 /** Strict ceiling for a single plugin's `activate()` during boot. */
 export const DEFAULT_ACTIVATION_TIMEOUT_MS = 5000;
@@ -131,6 +132,13 @@ export interface PluginHostOptions {
   eventsOptions?: {
     peerRateLimit?: (peerId: string) => number | undefined;
   };
+  /**
+   * Anti-financial-DoS quota gate forwarded to every plugin's `ctx.ai`. The
+   * gate (an `AIBudgetManager` wired by core-server) guards all in-process AI
+   * calls so a plugin skill that spends LLM tokens is still bounded by the
+   * node's budget. Absent ⇒ plugin AI calls are unbudgeted (bare-host default).
+   */
+  aiBudgetGate?: AIBudgetGate;
 }
 
 /** Input handed to a {@link NetworkProviderFactory}. */
@@ -331,6 +339,7 @@ export class PluginHost {
             () => asContactLookup(this.getActivated("contacts")),
             this.access,
             () => this.ensureEventLayer(),
+            this.options.aiBudgetGate ?? null,
           ),
           this.activationTimeoutMs,
           () =>
