@@ -1,6 +1,7 @@
 import type { PluginContext } from "@p2p-hub/core";
 import {
   addObject,
+  buildIsolatedPrompt,
   createDocument,
   linkObject,
   resolveRef,
@@ -483,8 +484,20 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     const refText = isErrorValue(refValue) || refValue === null ? REF_ERROR : refValue;
 
     try {
+      // The AI formula text and the referenced cell value are both
+      // peer-derived (shared sheets) — fence them as untrusted data.
+      const isolated = buildIsolatedPrompt({
+        instruction:
+          "Answer the AI formula request below using the referenced cell value. " +
+          "Respond with only the resulting value, no commentary.",
+        untrusted: [
+          { label: "AI formula request", content: prompt },
+          { label: "Referenced cell value", content: String(refText) },
+        ],
+      });
       cell.value = await ctx.ai.generateText({
-        prompt: `${prompt}: ${refText}`,
+        prompt: isolated.prompt,
+        system: isolated.system,
       });
     } catch {
       cell.value = AI_ERROR;
@@ -544,12 +557,20 @@ export default function activate(ctx: PluginContext): CalcPlugin {
     const values: Record<string, CellValue> = {};
 
     for (const c of emptyCoords) {
-      const prompt =
-        `${input.instruction}. Existing sequence: ${context.join(", ") || "(none)"}. ` +
-        `Return only the next value for the cell.`;
+      const isolated = buildIsolatedPrompt({
+        instruction:
+          "Continue the existing sequence below and return only the next value for the cell.",
+        untrusted: [
+          { label: "User instruction", content: input.instruction },
+          { label: "Existing sequence", content: context.join(", ") || "(none)" },
+        ],
+      });
       let result: CellValue;
       try {
-        result = (await ctx.ai.generateText({ prompt })).trim();
+        result = (await ctx.ai.generateText({
+          prompt: isolated.prompt,
+          system: isolated.system,
+        })).trim();
       } catch {
         result = AI_ERROR;
       }

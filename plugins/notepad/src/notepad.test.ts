@@ -156,8 +156,19 @@ test("aiTransformBlock rewrites a block through ctx.ai and emits noteUpdated", a
 
     assert.equal(transformed.text, "MEETING SUMMARY");
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].system, "raw block text");
-    assert.equal(calls[0].prompt, "Summarize this");
+    const system = calls[0]!.system ?? "";
+    const prompt = calls[0]!.prompt ?? "";
+    // The peer-editable note text must never reach the `system` role, where it
+    // could override the model's instructions — it travels fenced instead.
+    assert.ok(!system.includes("raw block text"));
+    assert.ok(system.includes("You rewrite note block content"));
+    assert.ok(system.includes("untrusted_user_content"));
+    assert.ok(prompt.includes("Summarize this"));
+    assert.ok(
+      prompt.includes(
+        "<untrusted_user_content>raw block text</untrusted_user_content>",
+      ),
+    );
 
     const stored = await notepad.getNote(root.$id);
     assert.equal(stored?.$objects[block.$id].text, "MEETING SUMMARY");

@@ -3,6 +3,7 @@ import type {
   AIGenerateImageResult,
   AIGenerateTextOptions,
 } from "@p2p-hub/sdk";
+import { sanitizeAIOutput } from "@p2p-hub/sdk";
 import { VaultManager } from "../storage/vault-manager";
 
 export interface CoreAIProviderOptions {
@@ -89,7 +90,12 @@ export class CoreAIProvider {
     const data = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return data.choices?.[0]?.message?.content ?? "";
+    const content = data.choices?.[0]?.message?.content ?? "";
+    // Mandatory output sanitization at the single AI choke point: every
+    // completion (structured JSON, PBX payloads, free text) is run through the
+    // SDK sanitizer before it can reach a plugin, the UI, or a Propose-Then-
+    // Confirm flow. A plugin cannot bypass this on the in-process path.
+    return sanitizeAIOutput(content);
   }
 
   async generateImage(
