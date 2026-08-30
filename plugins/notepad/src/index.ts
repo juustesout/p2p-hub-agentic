@@ -1,6 +1,7 @@
 import type { PluginContext } from "@p2p-hub/core";
 import {
   addObject,
+  buildIsolatedPrompt,
   createDocument,
   linkObject,
   rootObject,
@@ -130,10 +131,24 @@ export default function activate(ctx: PluginContext): NotepadPlugin {
       throw new Error(`aiTransformBlock: block "${blockId}" has no text`);
     }
 
-    // AI access goes exclusively through ctx.ai — never a raw vault key.
+    // AI access goes exclusively through ctx.ai — never a raw vault key. Both
+    // the rewrite instruction and the block text are untrusted (peer-editable)
+    // and are fenced as passive data; the block text must NEVER land in the
+    // `system` role, where it could override the model's instructions.
+    const isolated = buildIsolatedPrompt({
+      system:
+        "You rewrite note block content. Respond with only the rewritten " +
+        "text; no commentary, no markdown fences, no HTML.",
+      instruction:
+        "Rewrite the note block text below according to the given instruction.",
+      untrusted: [
+        { label: "User instruction", content: instruction },
+        { label: "Original note text", content: block.text },
+      ],
+    });
     const rewritten = await ctx.ai.generateText({
-      prompt: instruction,
-      system: block.text,
+      prompt: isolated.prompt,
+      system: isolated.system,
     });
 
     block.text = rewritten;

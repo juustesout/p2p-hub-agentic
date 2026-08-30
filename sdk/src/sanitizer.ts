@@ -303,3 +303,20 @@ export function sanitizeMarkdown(markdown: string): string {
   }
   return out;
 }
+
+/**
+ * Strip the control characters (excluding `\t`, `\n`, `\r`) that would survive
+ * {@link sanitizeMarkdown}. These can be smuggled into terminal logs, JSON
+ * payloads, or UI strings via an AI response.
+ */
+const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+/**
+ * End-to-end sanitizer for AI-generated text. Runs the output through
+ * {@link sanitizeMarkdown} (removing HTML/scripts and neutralizing dangerous
+ * link schemes) and then strips stray control characters. Every AI completion
+ * that can reach the UI or a Propose-Then-Confirm flow must pass through this.
+ */
+export function sanitizeAIOutput(text: string): string {
+  return sanitizeMarkdown(text).replace(CONTROL_CHARS_RE, "");
+}

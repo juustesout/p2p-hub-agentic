@@ -1,6 +1,8 @@
 import type { PluginContext } from "@p2p-hub/core";
 import {
+  SECURITY_WARNING_MESSAGE,
   addObject,
+  buildIsolatedPrompt,
   createDocument,
   isPBXDocument,
   linkObject,
@@ -230,6 +232,12 @@ export interface PlanProposal {
   goal?: string;
   summary: string;
   steps: PlanStep[];
+  /**
+   * Set when the source data (task names, goals, scope) matched a known
+   * prompt-injection pattern. The UI must present the proposal with a
+   * security warning, never as a normal action.
+   */
+  securityWarning?: string;
 }
 
 export interface PlanDayInput {
@@ -1702,16 +1710,26 @@ export default function activate(ctx: PluginContext): TasksPlugin {
       return { ok: false, error: `planDay: project "${projectId}" not found` };
     }
     const today = new Date().toISOString().slice(0, 10);
-    const prompt =
-      `Plan the work day for the project "${String(rootObject(doc)?.name ?? projectId)}".\n` +
-      `Today: ${today}.\n` +
-      (typeof goal === "string" && goal ? `Focus goal: ${goal}.\n` : "") +
-      `Current tasks:\n${describeTasks(doc)}\n` +
-      "Propose a concrete ordered list of next steps.";
+    const isolated = buildIsolatedPrompt({
+      system: PLANNER_SYSTEM_PROMPT,
+      instruction:
+        `Plan the work day for the project below. Today is ${today}. ` +
+        "Propose a concrete ordered list of next steps.",
+      untrusted: [
+        {
+          label: "Project name",
+          content: String(rootObject(doc)?.name ?? projectId),
+        },
+        ...(typeof goal === "string" && goal
+          ? [{ label: "Focus goal", content: goal }]
+          : []),
+        { label: "Current tasks", content: describeTasks(doc) },
+      ],
+    });
     try {
       const raw = await ctx.ai.generateText({
-        prompt,
-        system: PLANNER_SYSTEM_PROMPT,
+        prompt: isolated.prompt,
+        system: isolated.system,
         temperature: 0.2,
       });
       const { summary, steps } = parseProposal(raw);
@@ -1723,6 +1741,9 @@ export default function activate(ctx: PluginContext): TasksPlugin {
           ...(typeof goal === "string" && goal ? { goal } : {}),
           summary,
           steps,
+          ...(isolated.injectionDetected
+            ? { securityWarning: SECURITY_WARNING_MESSAGE }
+            : {}),
         },
       };
     } catch (err) {
@@ -1742,15 +1763,26 @@ export default function activate(ctx: PluginContext): TasksPlugin {
     if (!doc) {
       return { ok: false, error: `planProject: project "${projectId}" not found` };
     }
-    const prompt =
-      `Plan the next slice of work for the project "${String(rootObject(doc)?.name ?? projectId)}".\n` +
-      (typeof scope === "string" && scope ? `Scope: ${scope}.\n` : "") +
-      `Current tasks:\n${describeTasks(doc)}\n` +
-      "Propose the next concrete milestones and their steps.";
+    const isolated = buildIsolatedPrompt({
+      system: PLANNER_SYSTEM_PROMPT,
+      instruction:
+        "Plan the next slice of work for the project below. " +
+        "Propose the next concrete milestones and their steps.",
+      untrusted: [
+        {
+          label: "Project name",
+          content: String(rootObject(doc)?.name ?? projectId),
+        },
+        ...(typeof scope === "string" && scope
+          ? [{ label: "Scope", content: scope }]
+          : []),
+        { label: "Current tasks", content: describeTasks(doc) },
+      ],
+    });
     try {
       const raw = await ctx.ai.generateText({
-        prompt,
-        system: PLANNER_SYSTEM_PROMPT,
+        prompt: isolated.prompt,
+        system: isolated.system,
         temperature: 0.2,
       });
       const { summary, steps } = parseProposal(raw);
@@ -1762,6 +1794,9 @@ export default function activate(ctx: PluginContext): TasksPlugin {
           ...(typeof scope === "string" && scope ? { goal: scope } : {}),
           summary,
           steps,
+          ...(isolated.injectionDetected
+            ? { securityWarning: SECURITY_WARNING_MESSAGE }
+            : {}),
         },
       };
     } catch (err) {

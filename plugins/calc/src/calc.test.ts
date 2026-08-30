@@ -261,7 +261,10 @@ test("evaluateAIFormula routes =AI(...) through ctx.ai and updates the cell", as
     const cell = await calc.evaluateAIFormula({ sheetId, coord: "B1" });
     assert.equal(cell.value, "Hola mundo");
     assert.equal(cell.formula, '=AI("Translate to Spanish", A1)');
-    assert.ok(stub.prompts.some((p) => p.includes("Translate to Spanish: Hello world")));
+    // The formula prompt and the referenced cell value travel as separate
+    // fenced untrusted blocks, never concatenated into one instruction string.
+    assert.ok(stub.prompts.some((p) => p.includes("Translate to Spanish")));
+    assert.ok(stub.prompts.some((p) => p.includes("Hello world")));
     assert.equal(updated.length, 3); // two updateCell + one evaluateAIFormula
   } finally {
     stub.restore();
