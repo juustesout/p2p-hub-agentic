@@ -694,3 +694,13 @@ filling that gap, which silently widens scope.
 - Documents that need cross-plugin embedding use `@p2p-hub/sdk`'s
   `PBXBuilder` — don't invent ad-hoc JSON shapes for anything that might
   need an OLE `$ref` later.
+
+## Operational notes (tooling)
+
+- **GitHub PR/API operations: the `gh` CLI token (bot account) is expired.**
+  Do not start with `gh` — it will 401 and cost time. Use the git credential
+  helper first (`printf 'protocol=https\nhost=github.com\n' |
+  /app/agent/bin/agent git-credential-helper get`, take the `password=`
+  line) and drive the GitHub REST API with `curl` (or authenticate `gh` with
+  `--with-token`). Never print the token. Same helper as
+  `go-mod-credential-ix.md` / the global `github-credential-helper.md` rule.
