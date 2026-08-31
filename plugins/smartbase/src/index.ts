@@ -6,13 +6,17 @@ import {
   isPBXDocument,
   isPlainObject,
   linkObject,
+  matchesRecord,
   resolveRef,
   rootObject,
+  validateFilter,
   validateKeyCount,
   validateObjectDepth,
+  type FieldValue,
   type PBXDocument,
   type PBXObject,
   type PBXReference,
+  type QueryFilter,
 } from "@p2p-hub/sdk";
 
 /**
@@ -43,16 +47,6 @@ export interface SchemaField {
 export interface TableSchema {
   fields: SchemaField[];
 }
-
-export type FieldValue = string | number | boolean;
-
-export type FieldFilter =
-  | { op: "eq" | "neq"; value: string | number | boolean }
-  | { op: "gt" | "gte" | "lt" | "lte"; value: number }
-  | { op: "contains"; value: string };
-
-/** AND of all field filters: a record matches only if every filter holds. */
-export type QueryFilter = Record<string, FieldFilter>;
 
 export interface CreateDatabaseInput {
   title: string;
@@ -140,17 +134,6 @@ export const DEFAULT_QUERY_LIMIT = 100;
 export const MAX_QUERY_LIMIT = 500;
 
 const FIELD_TYPES: ReadonlySet<string> = new Set(["string", "number", "boolean", "date"]);
-const FILTER_OPS: ReadonlySet<string> = new Set([
-  "eq",
-  "neq",
-  "gt",
-  "gte",
-  "lt",
-  "lte",
-  "contains",
-]);
-
-type FilterOp = FieldFilter["op"];
 
 function dbKey(databaseId: string): string {
   return `${DB_KEY_PREFIX}${databaseId}`;
@@ -330,96 +313,11 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
     return out;
   }
 
-  function normalizeFieldFilter(field: string, ff: Record<string, unknown>): FieldFilter {
-    const rawOp = ff.op;
-    if (typeof rawOp !== "string" || !FILTER_OPS.has(rawOp)) {
-      throw new Error(`filter field "${field}" has invalid op ${JSON.stringify(rawOp)}`);
-    }
-    const op = rawOp as FilterOp;
-    const value = ff.value;
-    if (op === "eq" || op === "neq") {
-      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
-        throw new Error(
-          `filter field "${field}" op "${op}" requires a string, number or boolean value`,
-        );
-      }
-      return { op, value };
-    }
-    if (op === "contains") {
-      if (typeof value !== "string") {
-        throw new Error(`filter field "${field}" op "contains" requires a string value`);
-      }
-      return { op, value };
-    }
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      throw new Error(`filter field "${field}" op "${op}" requires a number value`);
-    }
-    return { op, value };
-  }
-
-  function validateFilter(filter: unknown): QueryFilter {
-    if (filter === undefined || filter === null) {
-      return {};
-    }
-    if (!isPlainObject(filter)) {
-      throw new Error("filter must be an object");
-    }
-    validateObjectDepth(filter);
-    validateKeyCount(filter);
-    const out: QueryFilter = {};
-    for (const [field, ff] of Object.entries(filter)) {
-      if (!isPlainObject(ff)) {
-        throw new Error(`filter field "${field}" must be an object`);
-      }
-      out[field] = normalizeFieldFilter(field, ff);
-    }
-    return out;
-  }
-
   function resolveLimit(limit: unknown): number {
     if (typeof limit === "number" && Number.isFinite(limit) && limit >= 1) {
       return Math.min(Math.floor(limit), MAX_QUERY_LIMIT);
     }
     return DEFAULT_QUERY_LIMIT;
-  }
-
-  /**
-   * Apply a single field filter as a pure data comparison. This is the whole
-   * query engine: a `switch` over the fixed op set, comparing typed values. No
-   * user-controlled string is ever parsed, interpolated or executed.
-   */
-  function matchesFieldFilter(recordValue: FieldValue, ff: FieldFilter): boolean {
-    switch (ff.op) {
-      case "eq":
-        return recordValue === ff.value;
-      case "neq":
-        return recordValue !== ff.value;
-      case "gt":
-        return typeof recordValue === "number" && recordValue > ff.value;
-      case "gte":
-        return typeof recordValue === "number" && recordValue >= ff.value;
-      case "lt":
-        return typeof recordValue === "number" && recordValue < ff.value;
-      case "lte":
-        return typeof recordValue === "number" && recordValue <= ff.value;
-      case "contains":
-        if (typeof recordValue !== "string") {
-          return false;
-        }
-        return recordValue.toLowerCase().includes(ff.value.toLowerCase());
-    }
-  }
-
-  function matchesRecord(fields: Record<string, FieldValue>, filter: QueryFilter): boolean {
-    for (const [field, ff] of Object.entries(filter)) {
-      if (!(field in fields)) {
-        return false;
-      }
-      if (!matchesFieldFilter(fields[field], ff)) {
-        return false;
-      }
-    }
-    return true;
   }
 
   function recordFields(rec: PBXObject): Record<string, FieldValue> {
