@@ -33,6 +33,7 @@ import { startWanProvider } from "./wan-provider";
 import type { WanProviderHandle } from "./wan-provider";
 import { WsActivityBus, wireEventBridge } from "./ws-bus";
 import { HostGate, hostFromHeader } from "./host-validation";
+import { corsPreflightHeaders, corsResponseHeaders } from "./cors";
 import { logger } from "./logger";
 import { FixedWindowLimiter } from "./fixed-window";
 import { decideSiteExposure } from "./site-exposure";
@@ -640,10 +641,11 @@ export class CoreServer {
    * Dispatch one HTTP request. The Host-header allowlist gate runs first, on
    * every path (route-agnostic, so `/api/*`, `/site`, `/peersite`, `/ui` and
    * `/remote-site` all share the same DNS-rebinding protection); the global
-   * `/api/*` boot-token gate runs second (header-only — see {@link isAuthorized}).
-   * Route modules then run in a fixed order (site → peersite → ui →
-   * remote-site → governance → operator). The exact gating/exception
-   * semantics were moved verbatim, not rewritten.
+   * `/api/*` boot-token gate runs second (header-only — see {@link isAuthorized}),
+   * after an `/api/*` CORS preflight has been answered (preflights never carry
+   * the token; see cors.ts). Route modules then run in a fixed order (site →
+   * peersite → ui → remote-site → governance → operator). The exact
+   * gating/exception semantics were moved verbatim, not rewritten.
    */
   private async handleHttp(
     req: http.IncomingMessage,
@@ -667,9 +669,35 @@ export class CoreServer {
       return;
     }
 
-    if (path.startsWith("/api/") && !this.isAuthorized(req)) {
-      sendJson(res, 401, { error: "unauthorized" });
-      return;
+    if (path.startsWith("/api/")) {
+      // CORS preflight (OPTIONS) — the Tauri webview origin is cross-origin to
+      // the loopback bridge, so the shell's /api fetches arrive as preflights
+      // that carry NO Authorization header (browsers never send it there). They
+      // must therefore be answered BEFORE the token gate. Deny-by-default: a
+      // disallowed origin gets a bare 204 with no CORS headers, which makes the
+      // browser block the actual request — the bridge never reaches the routes.
+      if (req.method === "OPTIONS") {
+        const headers = corsPreflightHeaders(req.headers.origin);
+        if (headers) {
+          res.writeHead(204, headers);
+        } else {
+          res.writeHead(204);
+        }
+        res.end();
+        return;
+      }
+      if (!this.isAuthorized(req)) {
+        sendJson(res, 401, { error: "unauthorized" });
+        return;
+      }
+      // Allow the shell's browser to read the response. Only allowlisted
+      // origins (loopback / localhost / tauri.localhost / tauri:) are echoed;
+      // everything else gets no CORS headers (see cors.ts).
+      const responseCors = corsResponseHeaders(req.headers.origin);
+      if (responseCors) {
+        res.setHeader("Access-Control-Allow-Origin", responseCors["Access-Control-Allow-Origin"]);
+        res.setHeader("Vary", "Origin");
+      }
     }
 
     try {
