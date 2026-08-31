@@ -46,6 +46,15 @@ export interface SchemaField {
 
 export interface TableSchema {
   fields: SchemaField[];
+  /**
+   * Opt-in (deny-by-default): when `true`, record mutations on this table emit
+   * local domain events (`<sanitizedTableName>:created|updated|deleted`) onto
+   * the host's local event bus. Default `false` — a table must explicitly
+   * claim "my mutation events may go on the bus", mirroring how a plugin
+   * declares `exposedEvents` for remote topics. A next plugin that subscribes
+   * to the bus never silently inherits access to this table's data.
+   */
+  emitEvents?: boolean;
 }
 
 export interface CreateDatabaseInput {
@@ -240,7 +249,11 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
       }
       out.push({ name, type: type as FieldType });
     }
-    return { fields: out };
+    const emitEvents = (schema as { emitEvents?: unknown }).emitEvents;
+    if (emitEvents !== undefined && typeof emitEvents !== "boolean") {
+      throw new Error("schema.emitEvents must be a boolean when present");
+    }
+    return { fields: out, ...(emitEvents === true ? { emitEvents: true } : {}) };
   }
 
   /** Read a stored table's schema back, re-validating defensively. */
@@ -260,7 +273,10 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
         out.push({ name: f.name, type: f.type as FieldType });
       }
     }
-    return { fields: out };
+    return {
+      fields: out,
+      ...(raw.emitEvents === true ? { emitEvents: true } : {}),
+    };
   }
 
   function checkValue(name: string, type: FieldType, value: unknown): FieldValue {
@@ -416,7 +432,9 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
   }
 
   /**
-   * Emit a local domain event after a successful record mutation: the topic is
+   * Emit a local domain event after a successful record mutation — but only
+   * for a table that explicitly opted in via `schema.emitEvents` (deny-by-
+   * default, like `exposedEvents`). The topic is
    * `<sanitizedTableName>:<event>` (`invoice:created`, `invoice:updated`,
    * `invoice:deleted`) — the canonical `:`-delimited form the local bus and the
    * PAL engine subscribe to. The payload mirrors the returned view and carries
@@ -431,6 +449,9 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
     event: "created" | "updated" | "deleted",
     payload: Record<string, unknown>,
   ): Promise<void> {
+    if (!schemaOf(table).emitEvents) {
+      return;
+    }
     const segment = tableEventSegment(table);
     if (!segment) {
       return;
