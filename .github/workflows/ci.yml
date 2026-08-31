@@ -78,7 +78,7 @@ jobs:
       # (`bin/p2p-hub-core`). That SEA sidecar is gitignored and must be built
       # before cargo can resolve it — otherwise the build script fails with
       # "resource path `bin/p2p-hub-core-<triple>` doesn't exist".
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
