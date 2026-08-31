@@ -324,3 +324,113 @@ test("skills are registered in the smartbase namespace and local-only", async ()
     assert.equal(entry.httpExposed, false);
   }
 });
+
+test("record mutations emit sanitized local domain events (invoice:created/updated/deleted)", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "smartbase-events-"));
+  const manager = new StorageManager(dataDir);
+  const hooks = new HookRegistry();
+  const broker = new TaskBroker();
+  const events: Array<{ topic: string; payload: unknown }> = [];
+  const smartbase = (await loadPlugin(
+    pluginDir,
+    manager,
+    hooks,
+    broker,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { publish: async (topic, payload) => { events.push({ topic, payload }); } },
+  )) as SmartbasePlugin;
+
+  const db = await smartbase.createDatabase({ title: "Books" });
+  const table = await smartbase.createTable({
+    databaseId: db.databaseId,
+    name: "invoice",
+    schema: { fields: [{ name: "amount", type: "number" }] },
+  });
+
+  const created = await smartbase.insertRecord({
+    databaseId: db.databaseId,
+    tableId: table.tableId,
+    fields: { amount: 250 },
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].topic, "invoice:created");
+  assert.equal(
+    (events[0].payload as { recordId: string }).recordId,
+    created.recordId,
+  );
+  assert.deepEqual(
+    (events[0].payload as { fields: unknown }).fields,
+    { amount: 250 },
+  );
+
+  await smartbase.updateRecord({
+    databaseId: db.databaseId,
+    tableId: table.tableId,
+    recordId: created.recordId,
+    fields: { amount: 300 },
+  });
+  assert.equal(events[1].topic, "invoice:updated");
+  assert.deepEqual(
+    (events[1].payload as { fields: unknown }).fields,
+    { amount: 300 },
+  );
+
+  await smartbase.deleteRecord({
+    databaseId: db.databaseId,
+    tableId: table.tableId,
+    recordId: created.recordId,
+  });
+  assert.equal(events[2].topic, "invoice:deleted");
+  assert.equal(
+    (events[2].payload as { recordId: string }).recordId,
+    created.recordId,
+  );
+});
+
+test("a hostile table name is sanitized into a valid, delimiter-safe topic segment", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "smartbase-events-"));
+  const manager = new StorageManager(dataDir);
+  const hooks = new HookRegistry();
+  const broker = new TaskBroker();
+  const events: Array<{ topic: string }> = [];
+  const smartbase = (await loadPlugin(
+    pluginDir,
+    manager,
+    hooks,
+    broker,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { publish: async (topic) => { events.push({ topic }); } },
+  )) as SmartbasePlugin;
+
+  const db = await smartbase.createDatabase({ title: "Evil" });
+  // A colon/wildcard-laden name must never smuggle a delimiter into the topic:
+  // every illegal char is mapped to `_`, so the emitted segment stays within
+  // the `[A-Za-z0-9_][A-Za-z0-9_.-]*` grammar (CLAUDE.md principle #2).
+  const table = await smartbase.createTable({
+    databaseId: db.databaseId,
+    name: "evil:*:name",
+    schema: { fields: [{ name: "n", type: "number" }] },
+  });
+
+  await smartbase.insertRecord({
+    databaseId: db.databaseId,
+    tableId: table.tableId,
+    fields: { n: 1 },
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].topic, "evil___name:created");
+});

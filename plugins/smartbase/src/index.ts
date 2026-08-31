@@ -395,8 +395,57 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
     return { tableId, name, schema };
   }
 
-  async function insertRecord(input: InsertRecordInput): Promise<RecordView> {
-    const databaseId = requireString(
+  /**
+   * Sanitize a table name into a single topic segment for the local domain
+   * event bus (Brief 6). The bus topic grammar is `segment[:segment]{1,3}`
+   * with segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`; a table name is caller
+   * data, so every character outside that alphabet is mapped to `_` and a
+   * leading `.`/`-` is normalized to a leading `_`. This is what stops a
+   * hostile name from smuggling a `:` delimiter or a `*` wildcard into the
+   * topic (CLAUDE.md principle #2). Returns `null` when nothing usable remains
+   * (an all-empty name), in which case no event is emitted — a storage
+   * mutation never fails because of an un-publishable event.
+   */
+  function tableEventSegment(table: PBXObject): string | null {
+    const raw = typeof table.name === "string" ? table.name : "";
+    const cleaned = raw.replace(/[^A-Za-z0-9_.-]/g, "_");
+    if (cleaned.length === 0) {
+      return null;
+    }
+    return /^[A-Za-z0-9_]/.test(cleaned) ? cleaned : `_${cleaned}`;
+  }
+
+  /**
+   * Emit a local domain event after a successful record mutation: the topic is
+   * `<sanitizedTableName>:<event>` (`invoice:created`, `invoice:updated`,
+   * `invoice:deleted`) — the canonical `:`-delimited form the local bus and the
+   * PAL engine subscribe to. The payload mirrors the returned view and carries
+   * no object references, only scalars/plain data, so it is acyclic and
+   * JSON-serializable by construction. A failed publish (no wired bus, a
+   * revoked `events:publish` permission, a malformed topic) is caught and
+   * logged: the record is already durably written, and a side-channel event
+   * must never roll a mutation back.
+   */
+  async function emitTableEvent(
+    table: PBXObject,
+    event: "created" | "updated" | "deleted",
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const segment = tableEventSegment(table);
+    if (!segment) {
+      return;
+    }
+    try {
+      await ctx.localEvents.publish(`${segment}:${event}`, payload);
+    } catch (err) {
+      console.warn(
+        `[smartbase] could not publish local event ${segment}:${event}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  async function insertRecord(input: InsertRecordInput): Promise<RecordView> {    const databaseId = requireString(
       (input as InsertRecordInput | null)?.databaseId,
       "insertRecord: databaseId",
     );
@@ -413,6 +462,12 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
     table.records = refs;
 
     await saveDatabase(databaseId, doc);
+    await emitTableEvent(table, "created", {
+      databaseId,
+      tableId,
+      recordId,
+      fields,
+    });
     return { recordId, fields };
   }
 
@@ -440,6 +495,12 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
     record.fields = merged;
 
     await saveDatabase(databaseId, doc);
+    await emitTableEvent(table, "updated", {
+      databaseId,
+      tableId,
+      recordId,
+      fields: merged,
+    });
     return { recordId, fields: merged };
   }
 
@@ -470,6 +531,11 @@ export default function activate(ctx: PluginContext): SmartbasePlugin {
     delete doc.$objects[recordId];
 
     await saveDatabase(databaseId, doc);
+    await emitTableEvent(table, "deleted", {
+      databaseId,
+      tableId,
+      recordId,
+    });
     return { recordId, deleted: true };
   }
 

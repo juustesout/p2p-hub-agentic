@@ -133,6 +133,15 @@ export interface PluginHostOptions {
     peerRateLimit?: (peerId: string) => number | undefined;
   };
   /**
+   * Brief 6 — the host-wired local domain event publisher exposed to plugins as
+   * `ctx.localEvents`. The core-server wires this to its `CoreEventBus` so
+   * plugins (e.g. SmartBase) can emit `namespace:event` mutation events that
+   * the PAL engine consumes. A bare host (no bus) leaves this absent and every
+   * plugin publish fails closed, even when a plugin declares the
+   * `events:publish` manifest permission.
+   */
+  localEvents?: { publish(topic: string, payload: unknown): Promise<void> };
+  /**
    * Anti-financial-DoS quota gate forwarded to every plugin's `ctx.ai`. The
    * gate (an `AIBudgetManager` wired by core-server) guards all in-process AI
    * calls so a plugin skill that spends LLM tokens is still bounded by the
@@ -340,6 +349,7 @@ export class PluginHost {
             this.access,
             () => this.ensureEventLayer(),
             this.options.aiBudgetGate ?? null,
+            this.options.localEvents ?? null,
           ),
           this.activationTimeoutMs,
           () =>

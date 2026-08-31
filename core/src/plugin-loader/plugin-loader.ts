@@ -28,6 +28,7 @@ import type {
   PluginContext,
   NetworkCapability,
   EventsCapability,
+  LocalEventsCapability,
 } from "./plugin-context";
 import { isPathInsideDataDir } from "../site/site-files";
 import { verifyManifestSignature, verifyPluginFiles } from "@p2p-hub/sdk";
@@ -49,6 +50,18 @@ export type EventLayerResolver = () => Promise<{
   hub: SubscriptionHub;
   adapter: RemoteEventAdapter;
 } | null>;
+
+/**
+ * The host-wired local domain event publisher handed to the {@link loadPlugin}
+ * `ctx.localEvents` capability (Brief 6). The publisher validates the topic and
+ * payload and delivers onto the host's local event bus (e.g. the core-server's
+ * {@link CoreEventBus}); `null`/absent means "no bus wired" and every plugin
+ * publish fails closed. The loader does not interpret topics/payloads — that is
+ * the bus's single enforcement point.
+ */
+export interface LocalEventPublisher {
+  publish(topic: string, payload: unknown): Promise<void>;
+}
 
 /**
  * Raised when a plugin `manifest.json` cannot be read, parsed or validated.
@@ -259,6 +272,7 @@ export async function loadPlugin(
   accessManager: AccessPassManager = new AccessPassManager(),
   resolveEventLayer: EventLayerResolver = async () => null,
   aiBudgetGate: AIBudgetGate | null = null,
+  localEventPublisher: LocalEventPublisher | null = null,
 ): Promise<unknown> {
   const manifest = await loadManifest(pluginDir);
   if (manifest.signature !== undefined) {
@@ -421,6 +435,7 @@ export async function loadPlugin(
     },
     network: buildNetworkCapability(networkRegistry),
     events: buildEventsCapability(manifest, resolveEventLayer, networkRegistry),
+    localEvents: buildLocalEventsCapability(manifest, localEventPublisher),
     access: {
       issue: async (peerId, scope, ttlMs) => {
         try {
@@ -662,6 +677,39 @@ function buildNetworkCapability(
           error: err instanceof Error ? err.message : String(err),
         };
       }
+    },
+  };
+}
+
+/**
+ * Build the Brief 6 `ctx.localEvents` capability. Where `ctx.events` publishes
+ * to *remote* subscribers, this publishes onto the host's **local** domain event
+ * bus (the one the PAL engine consumes). The capability is a fail-closed stub
+ * until BOTH hold: the plugin's manifest lists the explicit `events:publish`
+ * permission, and the host wired a local event publisher. Topic/payload hygiene
+ * is enforced by the wired bus itself — this gate only decides *who* may publish
+ * and *that* a bus exists. A bare {@link loadPlugin} call (no host, no
+ * permission) therefore throws a typed error at publish time, never delivers.
+ */
+function buildLocalEventsCapability(
+  manifest: PluginManifest,
+  publisher: LocalEventPublisher | null,
+): LocalEventsCapability {
+  return {
+    publish: async (topic, payload) => {
+      if (!manifest.permissions.includes("events:publish")) {
+        throw new Error(
+          `plugin "${manifest.id}" lacks the "events:publish" manifest ` +
+            `permission and may not emit local domain events`,
+        );
+      }
+      if (!publisher) {
+        throw new Error(
+          `plugin "${manifest.id}" cannot publish local events: this host ` +
+            `has no local event bus wired`,
+        );
+      }
+      await publisher.publish(topic, payload);
     },
   };
 }

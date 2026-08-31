@@ -378,6 +378,9 @@ function createSandboxPluginContext(runtime: SandboxRuntime): PluginContext {
         "ctx.events.registerSubscriptionGuard",
       ),
     },
+    localEvents: {
+      publish: unavailable("ctx.localEvents.publish"),
+    },
     access: {
       issue: unavailable("ctx.access.issue"),
       revoke: unavailable("ctx.access.revoke"),

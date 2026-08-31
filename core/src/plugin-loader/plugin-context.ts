@@ -127,6 +127,36 @@ export interface RemoteSubscriptionHandle {
 }
 
 /**
+ * Capability-scoped local event emitter (Brief 6). Where {@link EventsCapability}
+ * publishes to *remote* subscribers and is namespace-bound to the plugin's own
+ * `<pluginId>:` prefix, this surface is the single, deliberate exception: it
+ * publishes onto the host's **local** domain event bus (the bus the PAL engine
+ * consumes), where topics are `namespace:event` (e.g. `invoice:created`) and the
+ * namespace is a *domain* name — the PAL trigger type — never the plugin id. A
+ * storage plugin therefore emits `<tableName>:<event>` mutation events, exactly
+ * what a local PAL rule can subscribe to.
+ *
+ * Deny-by-default (CLAUDE.md principle #1): the capability exists on the
+ * context but is a fail-closed stub until BOTH hold — the plugin's manifest
+ * lists the explicit `events:publish` permission, and the host wired a local
+ * event publisher (a bare {@link PluginHost} wires none). Anything else throws
+ * a typed error at publish time and reaches no consumer. Payload/topic hygiene
+ * (depth-bounded, acyclic, JSON-serializable, valid `:`-delimiter topic) is
+ * enforced by the wired bus itself; the capability only gates *who* may publish
+ * and *that* a bus exists.
+ */
+export interface LocalEventsCapability {
+  /**
+   * Publish a local domain event on `topic`. Rejects (typed error, never a
+   * throw of transport internals) when the plugin lacks the `events:publish`
+   * manifest permission, when no local event bus is wired, or when the bus
+   * rejects the topic/payload. The host decides what the payload may contain;
+   * a plugin must not assume a payload it did not build is delivered.
+   */
+  publish(topic: string, payload: unknown): Promise<void>;
+}
+
+/**
  * Capability-scoped event surface for plugins (Stap 5). `publishRemote` is the
  * only local-event emitter and is namespace-bound (same rule as `hooks.emit`):
  * a plugin can only publish on its own `<pluginId>:` topics. `subscribeRemote`
@@ -254,6 +284,12 @@ export interface PluginContext {
    * `TopicNotExposedError`, subscribe throws `SubscriptionRejectedError`).
    */
   events: EventsCapability;
+  /**
+   * Local domain event emitter (Brief 6). See {@link LocalEventsCapability} —
+   * a fail-closed stub unless the plugin declares `events:publish` AND the host
+   * wired a local event bus.
+   */
+  localEvents: LocalEventsCapability;
   /**
    * Fase 2A access-pass capability. Never null: it is backed by the core
    * {@link AccessPassManager} even when networking is off (issuing a pass is
