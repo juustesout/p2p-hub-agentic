@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as http from "node:http";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { CoreServer } from "../app";
 import { PluginHost } from "@p2p-hub/core";
@@ -221,7 +222,7 @@ test("HTTP /api/execute maps an over-quota AI call to a controlled 429 without r
   await new Promise<void>((resolve) => llm.listen(0, "127.0.0.1", resolve));
   const llmPort = (llm.address() as { port: number }).port;
 
-  const dataDir = await fs.mkdtemp(path.join("/tmp", "ai-budget-e2e-"));
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-budget-e2e-"));
   const pluginsDir = path.join(dataDir, "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
 
