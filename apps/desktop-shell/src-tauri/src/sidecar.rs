@@ -285,6 +285,15 @@ pub fn spawn_core_sidecar(data_dir: Option<PathBuf>) -> Result<SidecarHandle, St
         .envs(sidecar_env(data_dir.as_ref()))
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    // On Windows a spawned child without `CREATE_NO_WINDOW` opens its own
+    // console window; the sidecar is a background server, so suppress it
+    // (flag 0x08000000). The stderr is deliberately inherited *inside* the
+    // shell's own context, not a new window.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
 
     let mut child = command
         .spawn()

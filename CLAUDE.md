@@ -349,6 +349,35 @@ action, not a read. Even with the Host gate in place, the route is rate-capped
 an unbounded fetch proxy. Over the cap a miss is answered 429 without dialing
 any peer; mirror *hits* are disk reads and never consult the budget.
 
+### Loopback CORS grant for the desktop shell (`/api/*` only)
+
+The Tauri webview origin (`http://tauri.localhost` on Windows/macOS,
+`tauri://localhost` on Linux) is **cross-origin** to the bridge's
+`http://127.0.0.1:<port>`, so the shell's `/api/*` fetches are blocked by the
+browser unless the server grants them. Plain-browser dev never needed this —
+the Vite proxy made every request same-origin (`apps/desktop-shell/vite.config.ts`),
+which is exactly why the installed app showed the forever-gate (dark) screen
+while dev worked. This grant (`apps/core-server/src/cors.ts`, wired in
+`handleHttp`) is deliberately narrow:
+
+- **`/api/*` only.** The tokenless `/site`, `/ui`, `/remote-site` and
+  `/peersite` surfaces get no CORS headers — they are loaded as iframes (CORS
+  does not apply) and must not gain a fetch-read surface for arbitrary sites.
+- **Origin echo, deny-by-default.** `Access-Control-Allow-Origin` echoes the
+  `Origin` header only when its host is loopback, `localhost`,
+  `tauri.localhost`, or the `tauri:` scheme. Anything else gets no CORS headers
+  at all, so a hostile page can neither read bridge responses nor send the
+  boot token (the `Authorization` header is refused in the preflight).
+- **Preflight before the token gate.** An `OPTIONS /api/*` preflight carries no
+  `Authorization` header by construction, so it is answered (204 + CORS
+  headers) *before* `isAuthorized` runs; the actual request still passes the
+  normal token gate. A preflight from a disallowed origin gets a bare 204 with
+  no CORS headers — the browser then blocks the real request. The boot token
+  stays the binding control on `/api/*`; CORS only decides whether a browser
+  may *read* what the token already let it send.
+- The `/ws` upgrade was never affected: WebSockets are not CORS-gated, and the
+  WS path already applies the Host allowlist + token gate uniformly.
+
 ## Review process for anything touching the above
 
 When asked to review or verify security-relevant work in this repo:
