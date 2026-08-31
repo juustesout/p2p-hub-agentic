@@ -2,7 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "paths": {
+      "viem": ["../../node_modules/viem/_types/index.d.ts"],
+      "viem/*": ["../../node_modules/viem/_types/*"]
+    }
   },
   "include": ["src/**/*"],
   "references": [{ "path": "../../core" }]
