@@ -33,6 +33,9 @@ const LOCK_EXT = ".lock";
 const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
 const DEFAULT_RETRY_INTERVAL_MS = 25;
 const DEFAULT_STALE_AFTER_MS = 30_000;
+/** Bounded Windows-transient retries for releasing a lock file. */
+const RELEASE_MAX_ATTEMPTS = 8;
+const RELEASE_RETRY_MS = 25;
 
 /** Lock file path for a storage file: `<dir>/.<name>.lock`. */
 export function lockPathFor(targetPath: string): string {
@@ -74,6 +77,25 @@ const heldLocks = new Set<string>();
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Transient filesystem errors that are worth retrying on Windows.
+ *
+ * On POSIX, EPERM/EACCES mean a genuine permission problem and should fail
+ * immediately. On Windows they also surface *momentary* sharing violations: a
+ * second process concurrently creating or removing the same lock file (or a
+ * rename over a target the peer briefly holds open) is reported as
+ * `EPERM`/`EBUSY`/`EACCES` by libuv, not `EEXIST`. Those races resolve in
+ * milliseconds and are retryable. Gated on `win32` so POSIX semantics stay
+ * unchanged.
+ */
+export function isWindowsRetryableError(err: unknown): boolean {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "EPERM" || code === "EBUSY" || code === "EACCES";
 }
 
 function isPidAlive(pid: number): boolean {
@@ -130,13 +152,39 @@ export async function withFileLock<T>(
   } finally {
     if (acquired) {
       heldLocks.delete(lockPath);
-      await fs.unlink(lockPath).catch((err) => {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-          throw err;
-        }
-      });
+      await releaseLock(lockPath);
     }
   }
+}
+
+/**
+ * Best-effort removal of the lock file.
+ *
+ * On Windows the unlink can transiently fail with EPERM/EACCES when another
+ * process is simultaneously trying to open the same lock file (a momentary
+ * sharing violation). Retry briefly, then fail loudly — a lock file that
+ * really cannot be removed must not be silently left behind as a live lock,
+ * because the next acquisition by *this* process would time out on its own
+ * lock.
+ */
+async function releaseLock(lockPath: string): Promise<void> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RELEASE_MAX_ATTEMPTS; attempt++) {
+    try {
+      await fs.unlink(lockPath);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return; // already gone (e.g. stolen after staleness) — nothing to do
+      }
+      if (!isWindowsRetryableError(err)) {
+        throw err;
+      }
+      lastErr = err;
+      await delay(RELEASE_RETRY_MS);
+    }
+  }
+  throw lastErr;
 }
 
 type AcquireResult = "acquired" | "held";
@@ -150,6 +198,13 @@ async function tryAcquire(
   try {
     handle = await fs.open(lockPath, "wx", 0o600);
   } catch (err) {
+    if (isWindowsRetryableError(err)) {
+      // Windows momentarily refuses CREATE_NEW while the peer is creating or
+      // removing the same lock file. That is the same "somebody else is
+      // touching it" situation as EEXIST, but there is nothing to read yet, so
+      // report it as held and let the poll loop retry.
+      return "held";
+    }
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
       throw err;
     }
@@ -185,24 +240,31 @@ async function tryAcquire(
 }
 
 async function isStale(lockPath: string, staleAfterMs: number): Promise<boolean> {
-  let raw: string;
+  let raw: string | undefined;
   try {
     raw = await fs.readFile(lockPath, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return false; // released between the EEXIST and now — a retry will win
     }
-    throw err;
+    if (!isWindowsRetryableError(err)) {
+      throw err;
+    }
+    // Windows transient sharing violation: the payload is momentarily
+    // unreadable. Fall through to the age-based staleness check below, which
+    // is the existing fallback for unreadable lock payloads.
   }
 
   let owner: LockOwner | null = null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<LockOwner>;
-    if (Number.isInteger(parsed.pid)) {
-      owner = parsed as LockOwner;
+  if (raw !== undefined) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<LockOwner>;
+      if (Number.isInteger(parsed.pid)) {
+        owner = parsed as LockOwner;
+      }
+    } catch {
+      owner = null;
     }
-  } catch {
-    owner = null;
   }
 
   if (owner) {
