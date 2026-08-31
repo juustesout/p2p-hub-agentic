@@ -46,6 +46,11 @@ import type { SitesContext } from "./routes/sites";
 import { executeRemote, serveOperator } from "./routes/operator";
 import type { OperatorContext } from "./routes/operator";
 import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, REMOTE_SITE_FETCH_RATE_LIMIT, REMOTE_SITE_FETCH_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
+import { servePal, registerPalSkills } from "./routes/pal";
+import type { PalContext } from "./routes/pal";
+import { CoreEventBus } from "./events/core-event-bus";
+import { PALManager } from "./pal/manager";
+import { PALRuleStore, palRulesFile } from "./pal/store";
 import type { CoreServerOptions } from "./options";
 import {
   acquireInstanceLock,
@@ -91,6 +96,9 @@ export class CoreServer {
   private readonly trustGate: TrustTierGate;
   private governance: GovernanceService | null = null;
   private governanceStream: GovernanceStream | null = null;
+  /** Brief 6 — the local domain event bus + PAL manager. */
+  private readonly palEventBus: CoreEventBus;
+  private pal: PALManager | null = null;
   private lanSiteAllowed = true;
   private siteToken = "";
   private peerId = "";
@@ -117,6 +125,7 @@ export class CoreServer {
     ui: UiContext;
     sites: SitesContext;
     operator: OperatorContext;
+    pal: PalContext;
   };
 
   constructor(options: CoreServerOptions) {
@@ -124,6 +133,10 @@ export class CoreServer {
     // The AI quota gate must exist before the PluginHost (whose per-plugin
     // ctx.ai providers close over it) and before registerCoreSkills.
     this.aiBudget = new AIBudgetManager(options.aiBudget);
+    // The local domain event bus (Brief 6) exists before the PluginHost
+    // because plugins receive it as `ctx.localEvents` — the host's publisher
+    // closes over this bus. The PAL manager subscribes later, in initPAL().
+    this.palEventBus = new CoreEventBus();
     this.host = new PluginHost({
       pluginsDir: options.pluginsDir,
       dataDir: options.dataDir,
@@ -136,6 +149,14 @@ export class CoreServer {
       // and every peer keeps the default budget (fail-closed, never unlimited).
       eventsOptions: {
         peerRateLimit: (peerId) => this.governance?.peerRateLimit(peerId),
+      },
+      // Brief 6: plugins with the `events:publish` manifest permission can emit
+      // local domain events (e.g. SmartBase `<table>:<event>` mutations) onto
+      // the bus the PAL engine consumes. A plugin without the permission gets a
+      // fail-closed stub from the loader — this publisher is only the delivery
+      // surface, never the authorization.
+      localEvents: {
+        publish: (topic, payload) => this.palEventBus.emit(topic, payload),
       },
     });
     this.broker = this.host.taskBroker();
@@ -207,6 +228,9 @@ export class CoreServer {
         lockVault: () => this.lockVault(),
         setNetworkPaused: (paused) => this.setNetworkPaused(paused),
         vaultState: () => this.vaultState(),
+      },
+      pal: {
+        pal: () => this.pal,
       },
     };
   }
@@ -326,6 +350,7 @@ export class CoreServer {
       wirePeerAccessConfirmations(this.host, this.trustGate, () => this.peersite());
       wireMediaAccessConfirmations(this.host, this.trustGate, () => this.media());
       await this.initGovernance();
+      await this.initPAL();
       this.booted = true;
     }
 
@@ -490,6 +515,13 @@ export class CoreServer {
       clearInterval(this.peerTimer);
       this.peerTimer = null;
     }
+    // Brief 6 graceful shutdown: stop the PAL engine's subscriptions and drop
+    // every remaining local-event-bus listener, so a restart (or a vault
+    // lock/unlock cycle) never inherits a stale rule subscription over a
+    // torn-down engine.
+    this.pal?.stop();
+    this.pal = null;
+    this.palEventBus.removeAllListeners();
     this.governanceStream?.stop();
     this.governanceStream = null;
     await this.stopP2P();
@@ -563,6 +595,44 @@ export class CoreServer {
   }
 
   // ---------------------------------------------------------------------
+  // PAL wiring
+  // ---------------------------------------------------------------------
+
+  /**
+   * Brief 6 — assemble the PAL subsystem after `host.boot()` so the broker and
+   * identity manager exist. Hydration is fail-safe per rule (a corrupt rule is
+   * skipped and logged, never a boot abort); a corrupt *file* still throws
+   * loudly. The engine consumes the same `CoreEventBus` plugins publish onto
+   * via `ctx.localEvents`, and proposes tasks through the shared TaskBroker
+   * using each rule's derived child identity (Brief 5 wiring). The
+   * `pal-ui.*` operator skills (local `httpBridgeOnly`) give the shell a
+   * rule-management bridge that remote peers can never reach.
+   */
+  private async initPAL(): Promise<void> {
+    const store = new PALRuleStore({
+      filePath: palRulesFile(this.options.dataDir),
+    });
+    const manager = new PALManager({
+      store,
+      eventBus: this.palEventBus,
+      broker: this.broker,
+      identityManager: this.host.identityManager(),
+    });
+    await manager.start();
+    this.pal = manager;
+
+    registerPalSkills({
+      broker: this.broker,
+      getPal: () => {
+        if (!this.pal) {
+          throw new Error("pal is not initialized");
+        }
+        return this.pal;
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // HTTP dispatcher
   // ---------------------------------------------------------------------
 
@@ -616,6 +686,9 @@ export class CoreServer {
         return;
       }
       if (await serveGovernance(this.routes.governance, req, res, path)) {
+        return;
+      }
+      if (await servePal(this.routes.pal, req, res, path)) {
         return;
       }
       if (await serveOperator(this.routes.operator, req, res, path)) {

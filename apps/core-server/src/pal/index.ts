@@ -110,3 +110,9 @@ export function createPALRuntime(options: PALWiringOptions): PALRuntime {
 /** Re-exported for callers that only need the primitives. */
 export { CoreEventBus, PALExecutionEngine, PALRateLimiter };
 export type { PALProposal, PALDispatchResult } from "./engine";
+
+/** Brief 6 — rule persistence + live rule-set manager. */
+export { PALRuleStore, palRulesFile, InvalidPALRuleError, DuplicatePALRuleError } from "./store";
+export type { PALRuleStoreOptions } from "./store";
+export { PALManager } from "./manager";
+export type { PALManagerOptions } from "./manager";

@@ -145,4 +145,13 @@ export class CoreEventBus {
   reset(): void {
     this.subscribers.clear();
   }
+
+  /**
+   * Graceful-shutdown alias for {@link reset}: drop every subscription when the
+   * host stops (Brief 6 lifecycle), so a restart never inherits a stale
+   * listener that would evaluate a rule against a torn-down engine.
+   */
+  removeAllListeners(): void {
+    this.reset();
+  }
 }
