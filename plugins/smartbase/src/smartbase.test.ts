@@ -351,7 +351,7 @@ test("record mutations emit sanitized local domain events (invoice:created/updat
   const table = await smartbase.createTable({
     databaseId: db.databaseId,
     name: "invoice",
-    schema: { fields: [{ name: "amount", type: "number" }] },
+    schema: { fields: [{ name: "amount", type: "number" }], emitEvents: true },
   });
 
   const created = await smartbase.insertRecord({
@@ -423,7 +423,7 @@ test("a hostile table name is sanitized into a valid, delimiter-safe topic segme
   const table = await smartbase.createTable({
     databaseId: db.databaseId,
     name: "evil:*:name",
-    schema: { fields: [{ name: "n", type: "number" }] },
+    schema: { fields: [{ name: "n", type: "number" }], emitEvents: true },
   });
 
   await smartbase.insertRecord({
@@ -433,4 +433,75 @@ test("a hostile table name is sanitized into a valid, delimiter-safe topic segme
   });
   assert.equal(events.length, 1);
   assert.equal(events[0].topic, "evil___name:created");
+});
+
+test("record mutations do NOT emit local events without an explicit per-table opt-in", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "smartbase-events-"));
+  const manager = new StorageManager(dataDir);
+  const hooks = new HookRegistry();
+  const broker = new TaskBroker();
+  const events: Array<{ topic: string; payload: unknown }> = [];
+  const smartbase = (await loadPlugin(
+    pluginDir,
+    manager,
+    hooks,
+    broker,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { publish: async (topic, payload) => { events.push({ topic, payload }); } },
+  )) as SmartbasePlugin;
+
+  const db = await smartbase.createDatabase({ title: "Ledger" });
+
+  // `emitEvents` absent (default false) — a sensitive table like invoices must
+  // stay off the bus unless the operator explicitly opts it in.
+  const noFlag = await smartbase.createTable({
+    databaseId: db.databaseId,
+    name: "invoice",
+    schema: { fields: [{ name: "amount", type: "number" }] },
+  });
+  // `emitEvents: false` — an explicit no is also respected.
+  const explicitOff = await smartbase.createTable({
+    databaseId: db.databaseId,
+    name: "contracts",
+    schema: { fields: [{ name: "signed", type: "boolean" }], emitEvents: false },
+  });
+
+  await smartbase.insertRecord({
+    databaseId: db.databaseId,
+    tableId: noFlag.tableId,
+    fields: { amount: 99999 },
+  });
+  await smartbase.updateRecord({
+    databaseId: db.databaseId,
+    tableId: noFlag.tableId,
+    recordId: (
+      await smartbase.query({ databaseId: db.databaseId, tableId: noFlag.tableId })
+    ).records[0].recordId,
+    fields: { amount: 1 },
+  });
+  await smartbase.insertRecord({
+    databaseId: db.databaseId,
+    tableId: explicitOff.tableId,
+    fields: { signed: true },
+  });
+
+  // The mutations all succeeded, but nothing touched the bus.
+  assert.equal(events.length, 0);
+
+  // A non-boolean flag is rejected loudly at table creation.
+  await assert.rejects(
+    smartbase.createTable({
+      databaseId: db.databaseId,
+      name: "broken",
+      schema: { fields: [{ name: "x", type: "number" }], emitEvents: "yes" } as unknown as TableSchema,
+    }),
+    /emitEvents must be a boolean/,
+  );
 });

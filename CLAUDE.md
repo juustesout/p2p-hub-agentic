@@ -184,6 +184,61 @@ handshake. Lessons that generalize:
    side and *after* decode on the consuming side — oversized assets fail with a
    typed error, never silent truncation.
 
+### Event fan-out: three deliberately distinct layers — not an accident, a decision
+
+There are three topic→handler fan-out mechanisms in this repo, each with a
+**sharp, non-overlapping role**. This was not accidental duplication — the
+third one was added because the first two *cannot* carry cross-plugin domain
+events, but that decision was taken implicitly during PAL v0.1 (Brief 5) and
+only written down here after review. Do not "consolidate" them, and do not
+build a fourth — when a new fan-out need appears, first decide which of these
+three it is, or prove explicitly why none fits:
+
+1. **`HookRegistry` (`core/src/hooks/hook-registry.ts`) — in-process,
+   plugin-own-namespace events.** Reachable by plugins via `ctx.hooks.on/emit`.
+   Events are namespace-bound to the emitting plugin's own id: the loader's
+   `assertOwnNamespace` requires `event.startsWith("<pluginId>:")`, and
+   cross-namespace `on` additionally needs a `hooks:on:<event>` permission.
+   This is the layer for plugin-internal ("my own lifecycle") events.
+2. **`SubscriptionHub` (`core/src/events/subscription-hub.ts`) — P2P
+   cross-peer events.** Reachable via `ctx.events.publishRemote/subscribeRemote`.
+   A topic leaves the process only at exact-match in the plugin's
+   `manifest.exposedEvents` (fail-closed), and every (peer, topic)-channel is
+   throttled by the TelemetryGate. This is the layer for *outbound*
+   event sharing with other peers.
+3. **`CoreEventBus` (`apps/core-server/src/events/core-event-bus.ts`) —
+   in-process, cross-plugin domain events.** Owned by the core-server, not the
+   shared core. Plugins publish via `ctx.localEvents.publish` (requires the
+   `events:publish` manifest permission *and* a host-wired bus — fail-closed
+   stub otherwise, see `buildLocalEventsCapability` in
+   `core/src/plugin-loader/plugin-loader.ts`); the PAL engine subscribes here.
+   Topics are exact, `:`-delimited, two-to-four segments, no wildcards
+   (`CORE_EVENT_TOPIC_RE`), payloads depth-guarded and JSON-serializable.
+   This is the layer for "an `invoice:created` domain fact that belongs to no
+   single plugin's namespace" — the case HookRegistry's plugin-id namespace
+   gate structurally forbids and SubscriptionHub's `exposedEvents` gate is not
+   about (there is no peer).
+
+Consequences that follow from the split:
+
+- **Producers opt in per surface, independently.** `events:publish` grants the
+  *capability* to reach the local bus; it does not declare *which topics*. The
+  SmartBase producer (the PAL reference producer) gates per-table: a table
+  emits mutation events only when its schema sets `emitEvents: true`
+  (default `false` — the plugin-level permission plus a per-table opt-in, the
+  `exposedEvents` discipline applied one level down). When a new producer is
+  wired to the local bus, apply the same two-step gate: capability permission
+  in the manifest **and** a per-source opt-in. A consumer that subscribes to
+  the bus must not silently inherit access to sources that never opted in.
+- **PAL rule execution is rate-capped per rule and node-wide**
+  (`PALRateLimiter`, wrapping the existing `FixedWindowLimiter`: 30/rule/hour +
+  100/node/min defaults), checked *after* a `where:`-match so non-matching
+  noise never drains a budget — the anti-runaway-loop gate for rules without
+  a condition.
+- `CoreEventBus` subscriptions are torn down by the host on stop
+  (`PALManager.stop()` + `removeAllListeners()`); a restart must never inherit
+  a stale rule subscription over a torn-down engine.
+
 ### JSON nesting depth (corrected finding — don't re-learn this)
 
 `JSON.parse` in current V8 (Node 22, V8 12.4) is **iterative**: it parses

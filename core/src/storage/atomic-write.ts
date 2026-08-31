@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { withFileLock } from "./file-lock";
+import { withFileLock, isWindowsRetryableError } from "./file-lock";
 
 /**
  * Thrown when an existing storage file is present on disk but could not be
@@ -98,7 +98,46 @@ export async function atomicWriteFileWith(
   } finally {
     await fd.close();
   }
-  await fsp.rename(tmpPath, filePath);
+  await renameWithRetry(tmpPath, filePath, fsp);
+}
+
+const RENAME_MAX_ATTEMPTS = 8;
+const RENAME_RETRY_MS = 25;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * `rename` the temp file over the target, tolerating Windows-transient
+ * failures.
+ *
+ * POSIX `rename` over an existing target is atomic, but Windows replaces the
+ * target via an internal open-and-replace that fails with EPERM/EACCES when
+ * the target is momentarily held open by another process (e.g. a peer's
+ * `readJsonFile` between our rename and its close). That race resolves in
+ * milliseconds, so retry briefly; a rename that still fails is real and is
+ * thrown loudly — never silently "succeed" without the bytes on disk.
+ */
+async function renameWithRetry(
+  from: string,
+  to: string,
+  fsp: AtomicWriteFs,
+): Promise<void> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RENAME_MAX_ATTEMPTS; attempt++) {
+    try {
+      await fsp.rename(from, to);
+      return;
+    } catch (err) {
+      if (!isWindowsRetryableError(err)) {
+        throw err;
+      }
+      lastErr = err;
+      await delay(RENAME_RETRY_MS);
+    }
+  }
+  throw lastErr;
 }
 
 /**
