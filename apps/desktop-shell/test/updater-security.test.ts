@@ -30,6 +30,10 @@ describe("Brief 4 — updater config hardening", () => {
       typeof updater.pubkey === "string" && updater.pubkey.length > 0,
       "plugins.updater.pubkey must be a non-empty string",
     );
+    assert.ok(
+      tauriConf.bundle?.createUpdaterArtifacts === true,
+      "bundle.createUpdaterArtifacts must be true so the release build produces signed updater artifacts",
+    );
   });
 
   it("pubkey decodes to a valid minisign public-key box", () => {
