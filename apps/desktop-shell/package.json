@@ -13,6 +13,7 @@
     "build:tests": "node test/build-tests.cjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "node test/build-tests.cjs && node test/run-tests.cjs",
+    "tauri": "tauri",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -23,6 +24,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",

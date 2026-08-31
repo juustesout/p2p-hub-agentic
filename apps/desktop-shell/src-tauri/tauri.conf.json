@@ -24,9 +24,18 @@
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* ws://localhost:* http://localhost:*; frame-src http://127.0.0.1:* http://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVCQzIzNkExNTcyQzQ0QTUKUldTbFJDeFhvVGJDV3h0ZVVRRmthbE5FdGlRc0ZNbWZQUzVCb0dxeXk5MjRpOU1QTFVPa1BVckcK",
+      "endpoints": [
+        "https://updates.p2phub.example/update/{{target}}/{{arch}}/{{current_version}}"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "externalBin": ["bin/p2p-hub-core"]
   }

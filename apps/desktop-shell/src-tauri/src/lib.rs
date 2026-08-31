@@ -16,6 +16,7 @@ use tauri::State;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 mod sidecar;
+mod update_guard;
 
 /// A native tier-2 confirmation request. Mirrors the `ConfirmationRequest`
 /// discriminated union in `@p2p-hub/core`; the `kind` tag selects which dialog
@@ -439,6 +440,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // Auto-update (Brief 4, supply-chain hardening). The plugin refuses
+        // unsigned artifacts (Ed25519/minisign verification against the pubkey
+        // baked into `plugins.updater.pubkey`) and non-HTTPS endpoints in
+        // release builds. The `default_version_comparator` adds the downgrade /
+        // re-install gate: only a strictly newer version is ever offered. The
+        // gate runs inside `Updater::check`, so it cannot be bypassed by
+        // calling the plugin's `plugin:updater|*` commands from the frontend.
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .default_version_comparator(update_guard::should_offer_update)
+                .build(),
+        )
         .on_window_event(|window, event| {
             // Close-to-tray (Slice 2): the window close button hides the shell
             // instead of exiting — the sidecar keeps running. Only a tray Quit

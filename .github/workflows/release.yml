@@ -1,0 +1,98 @@
+name: Release (signed updater bundles)
+
+# Builds a release of the desktop shell whose auto-update artifacts are signed
+# with the updater private key. Brief 4 (supply-chain hardening) invariants:
+#
+#   1. TAURI_SIGNING_PRIVATE_KEY is read ONLY from GitHub Secrets — never from
+#      the repository, never from a hardcoded default.
+#   2. The build FAILS (fail-closed) if the secret is missing: the `guard`
+#      step below stops before any build work, and tauri-cli additionally
+#      refuses to produce an updater bundle without the key (the `pubkey` is
+#      baked into `plugins.updater`).
+#   3. The private key must match the `plugins.updater.pubkey` in
+#      apps/desktop-shell/src-tauri/tauri.conf.json; tauri-cli warns on a
+#      mismatch and the resulting signature would be rejected at runtime.
+#
+# Operators: the secret value is the base64-encoded minisign secret key box
+# produced by `tauri signer generate` (or the keygen the Brief-4 session
+# generated). Set it as a repository Actions secret before tagging a release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  guard:
+    name: Verify signing key is configured
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail closed when the signing key is missing
+        run: |
+          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set as a GitHub " \
+                 "secret. Refusing to build an unsigned release (Brief 4 " \
+                 "invariant: 0 unsigned updates)."
+            exit 1
+          fi
+          echo "Signing key present in Secrets."
+
+  build:
+    name: Build + sign (${{ matrix.os }})
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: apps/desktop-shell/src-tauri
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Linux Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl wget file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop-shell/src-tauri
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        working-directory: .
+        run: npm ci
+      - name: Build workspace packages (tsc -b)
+        working-directory: .
+        run: npm run build
+      - name: Build core-server SEA sidecar (Tauri externalBin)
+        working-directory: .
+        run: npm run build:sea -w @p2p-hub/core-server
+      - name: Build signed release bundles
+        run: npm run tauri build -w @p2p-hub/desktop-shell
+      - name: Upload signed updater artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2p-hub-shell-${{ matrix.os }}
+          path: |
+            apps/desktop-shell/src-tauri/target/release/bundle/
+          if-no-files-found: error
