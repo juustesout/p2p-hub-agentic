@@ -69,6 +69,29 @@ describe("Brief 4 — updater config hardening", () => {
     }
   });
 
+  it("updater endpoints must not be a placeholder or reserved-registrable domain", () => {
+    // A tagged release pointing at a placeholder (or any registrable-example)
+    // domain ships an updater that silently fails — or worse, trusts whatever
+    // a third party later puts on that domain. Refuse every reserved/sample
+    // TLD and the p2phub.example placeholder outright.
+    const endpoints = tauriConf.plugins.updater.endpoints;
+    assert.ok(Array.isArray(endpoints) && endpoints.length > 0, "endpoints must be non-empty");
+    for (const endpoint of endpoints) {
+      let hostname = endpoint;
+      const schemeMatch = hostname.match(/^https:\/\/([^/]+)/);
+      if (schemeMatch) hostname = schemeMatch[1];
+      const host = hostname.split(":")[0].toLowerCase();
+      assert.ok(
+        !/\.(example|invalid|test|localhost)$/.test(host) && host !== "localhost",
+        `endpoint must not use a reserved/registrable placeholder host: ${endpoint}`,
+      );
+      assert.ok(
+        !host.includes("p2phub.example"),
+        `the old placeholder host must not ship: ${endpoint}`,
+      );
+    }
+  });
+
   it("does not enable any updater 'dangerous' transport bypasses", () => {
     const updater = tauriConf.plugins.updater;
     for (const flag of [

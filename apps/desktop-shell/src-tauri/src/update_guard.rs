@@ -61,7 +61,7 @@ mod tests {
             notes: None,
             pub_date: None,
             data: RemoteReleaseInner::Dynamic(ReleaseManifestPlatform {
-                url: Url::parse("https://updates.p2phub.example/pkg.tar.gz")
+                url: Url::parse("https://peerdisco.com/pkg.tar.gz")
                     .expect("valid test url"),
                 signature: "bogus-signature".to_string(),
             }),

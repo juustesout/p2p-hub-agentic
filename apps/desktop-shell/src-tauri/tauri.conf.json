@@ -28,7 +28,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVCQzIzNkExNTcyQzQ0QTUKUldTbFJDeFhvVGJDV3h0ZVVRRmthbE5FdGlRc0ZNbWZQUzVCb0dxeXk5MjRpOU1QTFVPa1BVckcK",
       "endpoints": [
-        "https://updates.p2phub.example/update/{{target}}/{{arch}}/{{current_version}}"
+        "https://peerdisco.com/update/{{target}}/{{arch}}/{{current_version}}"
       ]
     }
   },
