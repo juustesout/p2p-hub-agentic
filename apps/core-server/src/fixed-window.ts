@@ -31,4 +31,30 @@ export class FixedWindowLimiter {
     this.timestamps.push(now);
     return true;
   }
+
+  /** Recorded calls still inside the current window (read-only). */
+  count(): number {
+    const cutoff = Date.now() - this.windowMs;
+    let active = 0;
+    for (const t of this.timestamps) {
+      if (t >= cutoff) {
+        active++;
+      }
+    }
+    return active;
+  }
+
+  /**
+   * Whether a call would currently be allowed, WITHOUT recording it. Lets a
+   * caller combine multiple budgets and record each one only when the whole
+   * gate passes — so a refused call never consumes a slot anywhere.
+   */
+  wouldAllow(): boolean {
+    return this.count() < this.limit;
+  }
+
+  /** Drop all recorded calls (tests and unregister/teardown paths). */
+  reset(): void {
+    this.timestamps.length = 0;
+  }
 }
