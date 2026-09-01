@@ -256,7 +256,7 @@ Opdrachtverdeling (Gemini-briefs, 7A → 7D, ieder een eigen PR):
    Pijler F wordt hier vast voorbereid (vlag-parsing + snapshot-veld).
 2. **Slice 2 / Brief 7B — Snapshot & bundel**: snapshot-schema (incl. GPU-
    diagnostics, best-effort), bundel + preview + export (klembord/bestand).
-   **Klaar (PR #17)**: `collectSnapshot` (`apps/core-server/src/diagnostics/snapshot.ts`),
+   **Klaar (PR #15)**: `collectSnapshot` (`apps/core-server/src/diagnostics/snapshot.ts`),
    `buildBundle`/`bundleClipboardText` (`diagnostics/bundler.ts`),
    `GET /api/diagnostics/snapshot` + `POST /api/diagnostics/bundle`, verplichte
    whole-bundle-redactie (tweede poort naast de engine-redactie), `sections`/
