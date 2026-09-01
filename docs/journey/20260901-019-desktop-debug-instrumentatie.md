@@ -98,6 +98,30 @@ helemaal niet start (er is dan géén drain die een log schrijft), appenden we
 de fout zelf naar `<dataDir>/core-server.log` — het enige boot-geval waarin het
 log alleen kan bestaan als wij het creëren.
 
+### 019.8 — CI-flake op Node 20 (windows-latest): echte race, geen runtime-probleem
+
+De eerste CI-run van deze slice faalde op **alleen** `Node 20 (windows-latest)`
+(cel `not ok 411 — two processes writing the same file do not lose updates`).
+GitHub Copilot diagnosticeerde "Node 20 is deprecated, verwijder 20 uit de
+matrix" — dat bleek feitelijk onjuist: de stack wees naar
+`core/dist/storage/file-lock.js:281` in `isStale`. In `isStale` valt de code na
+een transiënte Windows `readFile`-sharing-violation terug op `fs.stat` van de
+lockfile; de peer had de lock ondertussen verwijderd, de onbehandelde ENOENT
+escapete en liet het lock-counter-kind crashen.
+
+Fix (`core/src/storage/file-lock.ts`): de age-check is geëxtraheerd naar
+`lockFileAgeExceeds`, dat ENOENT en transiënte Windows-fouten op de stat als
+"niet-stale" rapporteert (`false` → de poll-loop wint bij de volgende `O_EXCL`),
+nooit als crash. Dit is exact hetzelfde benigne "vrijgegeven tussen EEXIST en
+nu" contract als de bestaande readFile-ENOENT-tak. Regressietest
+`lockFileAgeExceeds: ...` in `core/src/tests/cross-process-lock.test.ts`.
+
+Daarnaast de matrix aangepast van `node: [20, 22]` naar `[22, 24]`: Node 20 is
+sinds april 2026 EOL en het gepinde libp2p-v3-stack vereist Node >= 22; de 22/24
+keuze dekt de actieve LTS-lijnen (GitHub-runners defaulten al naar 24, en de
+desktopapp moet op 24 bewezen zijn). `engines: { node: ">=22" }` in de root
+`package.json` maakt die grens expliciet voor `npm ci`.
+
 ## Alternatieven overwogen
 
 - Speculatieve boot-fix voor de 500 — afgewezen: lokaal reproduceert het pad
@@ -126,7 +150,8 @@ log alleen kan bestaan als wij het creëren.
 - Gebouwd. `tsc -b` groen; core-server `207/207` (`vault-gate.test.ts` +
   `/api/debug/log`-test: accept/permissief/token-gate); desktop-shell `53/53`
   (`core-bridge.test.ts`: `detail`-surfacing, `reportClientError` auth +
-  swallow-on-failure); `cargo check` groen.
+  swallow-on-failure); `cargo check` groen. Na 019.8: core `468/468` (+1
+  regressietest `lockFileAgeExceeds`), lock-suite 7/7 stabiel over 5 runs.
 - PR #12 (CORS + console) gemerged in `main` (`a6a62a7`); PR #13
   (stderr-redirect + instrumentatie) open.
 

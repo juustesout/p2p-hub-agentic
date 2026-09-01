@@ -2,6 +2,9 @@
   "name": "p2p-hub-agentic",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "description": "P2P hub for agentic task distribution over a local network",
   "workspaces": [
     "sdk",

@@ -7,6 +7,7 @@ import { fork } from "node:child_process";
 import {
   withFileLock,
   lockPathFor,
+  lockFileAgeExceeds,
   StorageLockTimeoutError,
 } from "../storage/file-lock";
 import { atomicWriteFile, readJsonFile } from "../storage/atomic-write";
@@ -133,6 +134,25 @@ test("a stale lock from a dead process is stolen", async () => {
 
   assert.equal(await fs.readFile(file, "utf8"), "recovered");
   await assertLockGone(file);
+});
+
+test("lockFileAgeExceeds: an existing old lock is stale; a vanished lock is never a crash", async () => {
+  const dir = await makeTmpDir("xproc-age-");
+  const lock = path.join(dir, ".counter.json.lock");
+  await fs.writeFile(lock, "{}");
+
+  // Deterministic age checks: a negative threshold makes any existing lock
+  // "older than it" (stale); a far-future threshold makes it not stale.
+  assert.equal(await lockFileAgeExceeds(lock, -1_000), true);
+  assert.equal(await lockFileAgeExceeds(lock, 60_000), false);
+
+  // The Windows CI regression: `isStale` fell back to `fs.stat` after a
+  // transient read failure, but the peer unlinked the lock in between and the
+  // ENOENT escaped and crashed the child. The stat path must report not-stale
+  // (false) and never throw for a vanished lock.
+  await fs.unlink(lock);
+  assert.equal(await lockFileAgeExceeds(lock, 60_000), false);
+  assert.equal(await lockFileAgeExceeds(lock, -1_000), false);
 });
 
 test("two processes writing the same file do not lose updates", async () => {
