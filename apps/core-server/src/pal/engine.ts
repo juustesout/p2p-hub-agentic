@@ -41,7 +41,7 @@ import {
 } from "@p2p-hub/sdk";
 import type { CoreEventBus, Disposable } from "../events/core-event-bus";
 import type { PALRateLimiter } from "./rate-limiter";
-import { logger } from "../logger";
+import { moduleLogger } from "../logger";
 
 /** A task the engine proposes — never executed by the engine itself. */
 export interface PALProposal {
@@ -174,12 +174,12 @@ export class PALExecutionEngine {
     try {
       const result = await this.dispatch(proposal);
       if (!result.ok) {
-        logger.warn(
+        moduleLogger("pal").warn(
           `[PAL] rule "${rule.id}" proposal not dispatched: ${result.detail ?? "denied"}`,
         );
       }
     } catch (err) {
-      logger.warn(err, `[PAL] rule "${rule.id}" dispatch threw`);
+      moduleLogger("pal").warn(err, `[PAL] rule "${rule.id}" dispatch threw`);
     }
   }
 }

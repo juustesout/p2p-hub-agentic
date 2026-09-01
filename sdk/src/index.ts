@@ -10,6 +10,7 @@ export * from "./boundary-guard";
 export * from "./website-contract";
 export * from "./media-contract";
 export * from "./sanitizer";
+export * from "./diagnostics/redact";
 export * from "./ai-prompt-isolation";
 export * from "./settings-risk";
 export * from "./trust-tier";

@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import pino from "pino";
+import type { Logger } from "pino";
 import pinoPretty from "pino-pretty";
+import { diagnostics } from "./diagnostics/engine";
 
 /**
  * Structured logger for the core-server runtime.
@@ -20,6 +22,11 @@ import pinoPretty from "pino-pretty";
  * to `<dataDir>/core-server.log`) the default drops to `debug` unless an
  * explicit level is set — the whole point of that log file is troubleshooting,
  * so it starts verbose instead of hiding the request trace.
+ *
+ * Diagnostics integration: every JSON record is also routed into the
+ * diagnostics engine's per-module ring buffers (see `diagnostics/engine.ts`),
+ * which is the primary viewer source for the HelpCenter log tab. Pretty (TTY)
+ * records are human text and are intentionally not parsed back.
  */
 const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "fatal", "silent"];
 const requestedLevel =
@@ -41,12 +48,22 @@ const usePretty =
  * line non-deterministic. A local bridge produces little log volume, so
  * synchronous writes are free and ordering is exact. On EPIPE (the reader
  * closed the pipe) writing stops instead of crashing the server.
+ *
+ * The same write also feeds the diagnostics engine: a JSON line is ingested
+ * into the per-module ring buffers so the HelpCenter viewer works even when
+ * the on-disk log is missing or rotated. Ingestion failures are never fatal —
+ * logging must never break because the diagnostics layer hiccuped.
  */
 let brokenPipe = false;
 const syncDest = {
   write(msg: string): void {
     if (brokenPipe) {
       return;
+    }
+    try {
+      diagnostics.ingestLine(msg);
+    } catch {
+      /* diagnostics must never break logging */
     }
     try {
       fs.writeSync(process.stdout.fd ?? 1, msg);
@@ -76,5 +93,18 @@ export const logger = usePretty
       }),
     )
   : pino({ name: "core-server", level }, syncDest);
+
+/** Whether JSON records are routed into the diagnostics ring buffers. */
+export const diagnosticsEnabled = !usePretty;
+
+/**
+ * The shared, pre-registered child logger for a diagnostics module. Logging
+ * through this tags every record with the `module` field so the engine can
+ * route it into the module's ring buffer (and the viewer can filter by it).
+ * Callers should cache the returned logger; the engine keeps one instance.
+ */
+export function moduleLogger(module: string): Logger {
+  return diagnostics.moduleLogger(module);
+}
 
 export default logger;

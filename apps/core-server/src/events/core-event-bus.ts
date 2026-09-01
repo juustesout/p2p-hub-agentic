@@ -23,7 +23,7 @@
 
 import { EVENT_TOPIC_RE } from "@p2p-hub/core";
 import { isPlainObject, validateObjectDepth } from "@p2p-hub/sdk";
-import { logger } from "../logger";
+import { moduleLogger } from "../logger";
 
 export interface CoreEvent {
   /** The exact topic the event was emitted on. */
@@ -128,7 +128,7 @@ export class CoreEventBus {
       try {
         await handler(payload, event);
       } catch (err) {
-        logger.warn(
+        moduleLogger("pal-bus").warn(
           err,
           `[core-event-bus] handler for topic "${topic}" threw`,
         );

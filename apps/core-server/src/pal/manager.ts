@@ -22,7 +22,7 @@
 import type { IdentityManager, TaskBroker } from "@p2p-hub/core";
 import type { PALRule } from "@p2p-hub/sdk";
 import { CoreEventBus } from "../events/core-event-bus";
-import { logger } from "../logger";
+import { moduleLogger } from "../logger";
 import { PALExecutionEngine } from "./engine";
 import { buildPALDispatch } from "./index";
 import { PALRateLimiter, type PALRateLimitConfig } from "./rate-limiter";
@@ -115,7 +115,7 @@ export class PALManager {
     if (this.running) {
       this.engine.start();
     }
-    logger.info(
+    moduleLogger("pal").info(
       `[PAL] rule set rebuilt with ${this.store.list().length} active rule(s)`,
     );
   }
