@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { TrustConfirmationDeniedError, TrustTierGate, isValidAgentLabel, AI_QUOTA_EXCEEDED_ERROR_CODE } from "@p2p-hub/core";
 import type { PluginHost, TaskBroker } from "@p2p-hub/core";
 import type { NetworkLightProvider } from "@p2p-hub/network-light";
+import { logger } from "../logger";
 import {
   asContactLookup,
   evaluateSettingsRisk,
@@ -285,6 +286,38 @@ export async function serveOperator(
       .identityManager()
       .deleteChildIdentity(label);
     sendJson(res, 200, { ok: true, deleted });
+    return true;
+  }
+
+  if (req.method === "POST" && pathname === "/api/debug/log") {
+    const body = (await readJsonBody(req)) as {
+      level?: unknown;
+      message?: unknown;
+      context?: unknown;
+    };
+    const level = typeof body.level === "string" ? body.level : "info";
+    const message =
+      typeof body.message === "string" && body.message.trim() !== ""
+        ? body.message.slice(0, 4_000)
+        : "webview log";
+    // The webview (plugin UI / shell) forwards its own errors here so they land
+    // in the same core-server.log. Cap the level to the known pino set and only
+    // allow JSON-serializable context (readJsonBody already depth-guards it).
+    const context =
+      body.context !== undefined && typeof body.context === "object"
+        ? (body.context as Record<string, unknown>)
+        : undefined;
+    const record = { ...(context ?? {}), source: "webview" };
+    if (level === "error" || level === "fatal") {
+      logger.error(record, `[webview] ${message}`);
+    } else if (level === "warn") {
+      logger.warn(record, `[webview] ${message}`);
+    } else if (level === "debug" || level === "trace") {
+      logger.debug(record, `[webview] ${message}`);
+    } else {
+      logger.info(record, `[webview] ${message}`);
+    }
+    sendJson(res, 200, { ok: true });
     return true;
   }
 

@@ -128,6 +128,24 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 
+  // Fatal handlers so a crash lands in the log (the desktop shell drains this
+  // process's stderr to `<dataDir>/core-server.log`). Node's defaults already
+  // print to stderr and exit non-zero; this just routes the record through the
+  // logger (with the stack in the `err` payload) so it is guaranteed on-disk
+  // and greppable. Must be registered before the ready handshake, same as the
+  // signal handlers above.
+  process.on("uncaughtException", (err) => {
+    logger.fatal(err, "[core-server] uncaught exception");
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    logger.fatal(
+      reason instanceof Error ? reason : new Error(String(reason)),
+      "[core-server] unhandled rejection",
+    );
+    process.exit(1);
+  });
+
   // Sidecar handshake (desktop shell): a single machine-readable line on
   // stdout carrying the bound port + boot token. Gated on the env flag so a
   // normal terminal run never puts the token on an unwatched stdout. The

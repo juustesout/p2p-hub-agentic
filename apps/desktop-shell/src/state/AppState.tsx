@@ -127,8 +127,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       const caps = await coreBridge.getCapabilities();
       setCapabilities(caps);
-    } catch {
-      // Server not reachable yet; keep last-known state.
+    } catch (err) {
+      // Server not reachable yet; keep last-known state. Log so the client
+      // diagnostics forwarder can surface it in the on-disk log.
+      console.error("[shell] refreshCapabilities failed", err);
     }
   }, []);
 
@@ -143,8 +145,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         model,
         masterKeyConfigured: keys.masterKeyConfigured,
       });
-    } catch {
-      // Ignore transient failures.
+    } catch (err) {
+      console.error("[shell] refreshVault failed", err);
     }
   }, []);
 
@@ -158,20 +160,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // unlocked vault view into the lock screen.
         setVault(emptyVault);
       }
-    } catch {
+    } catch (err) {
       // Core-server not reachable yet; keep last-known gate.
+      console.error("[shell] refreshHealth failed", err);
     }
   }, []);
 
   const unlockVault = useCallback(
     async (masterKey: string) => {
-      const result = await coreBridge.unlockVault(masterKey);
-      if (result.ok) {
-        await refreshHealth();
-        await refreshVault();
-        void refreshCapabilities();
+      try {
+        const result = await coreBridge.unlockVault(masterKey);
+        if (result.ok) {
+          await refreshHealth();
+          await refreshVault();
+          void refreshCapabilities();
+        } else {
+          console.error("[shell] unlock rejected", result.error);
+        }
+        return result;
+      } catch (err) {
+        console.error("[shell] unlockVault failed", err);
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
       }
-      return result;
     },
     [refreshHealth, refreshVault, refreshCapabilities],
   );

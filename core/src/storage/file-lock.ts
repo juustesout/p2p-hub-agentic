@@ -276,6 +276,31 @@ async function isStale(lockPath: string, staleAfterMs: number): Promise<boolean>
   // Payload unreadable (e.g. the creator crashed mid-acquire). Fall back to
   // age so a young, possibly-in-flight lock is given time to finish writing
   // its payload.
-  const stat = await fs.stat(lockPath);
-  return Date.now() - stat.mtimeMs > staleAfterMs;
+  return lockFileAgeExceeds(lockPath, staleAfterMs);
+}
+
+/**
+ * True when the lock file is older than `staleAfterMs`.
+ *
+ * A lock that no longer exists, or that cannot be stat'ed due to a transient
+ * Windows sharing violation, is reported as *not* stale (`false`) instead of
+ * throwing: it was released between the `EEXIST` and this call — a retry will
+ * win the `O_EXCL` race. This is the benign "vanished under us" race that must
+ * never surface as a crash (observed on Windows CI: peer unlinked between the
+ * transient readFile failure and this stat).
+ */
+export async function lockFileAgeExceeds(
+  lockPath: string,
+  staleAfterMs: number,
+): Promise<boolean> {
+  try {
+    const stat = await fs.stat(lockPath);
+    return Date.now() - stat.mtimeMs > staleAfterMs;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || isWindowsRetryableError(err)) {
+      return false;
+    }
+    throw err;
+  }
 }

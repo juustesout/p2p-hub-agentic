@@ -15,11 +15,17 @@ import pinoPretty from "pino-pretty";
  * The pretty sink is engaged only when the standard library can guarantee a
  * human is watching: `process.stdout.isTTY` and not `NODE_ENV=production`.
  * `P2P_HUB_LOG_JSON=1` forces JSON on an interactive terminal; the level is
- * `P2P_HUB_LOG_LEVEL`/`LOG_LEVEL`, default `info`.
+ * `P2P_HUB_LOG_LEVEL`/`LOG_LEVEL`, default `info`. In sidecar mode
+ * (`P2P_HUB_SIDECAR_READY=1`, i.e. the desktop shell, whose stderr is drained
+ * to `<dataDir>/core-server.log`) the default drops to `debug` unless an
+ * explicit level is set — the whole point of that log file is troubleshooting,
+ * so it starts verbose instead of hiding the request trace.
  */
 const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "fatal", "silent"];
 const requestedLevel =
-  process.env.P2P_HUB_LOG_LEVEL ?? process.env.LOG_LEVEL ?? "info";
+  process.env.P2P_HUB_LOG_LEVEL ??
+  process.env.LOG_LEVEL ??
+  (process.env.P2P_HUB_SIDECAR_READY === "1" ? "debug" : "info");
 const level = LOG_LEVELS.includes(requestedLevel) ? requestedLevel : "info";
 
 const usePretty =

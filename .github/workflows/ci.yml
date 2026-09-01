@@ -24,7 +24,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node: [20, 22]
+        # Node 20 is EOL (April 2026) and the pinned libp2p v3 stack requires
+        # Node >= 22, so 20 is no longer a supported runtime to test on. The
+        # 22/24 pair covers the two active LTS lines; GitHub runners already
+        # default to 24, so the desktop app must prove out on it.
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
         with:

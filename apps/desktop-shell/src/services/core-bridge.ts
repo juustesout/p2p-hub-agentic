@@ -309,11 +309,18 @@ export class CoreBridge {
     const body = (await res.json().catch(() => null)) as {
       ok?: boolean;
       error?: string;
+      detail?: string;
     } | null;
     if (res.ok) {
       return { ok: true };
     }
-    return { ok: false, error: body?.error ?? `unlock failed: ${res.status}` };
+    // Prefer the `detail` field (the server surfaces the real exception message
+    // there, e.g. "internal error" + reason) so the toast shows what actually
+    // happened instead of only the generic status text.
+    return {
+      ok: false,
+      error: body?.detail ?? body?.error ?? `unlock failed: ${res.status}`,
+    };
   }
 
   async lockVault(): Promise<void> {
@@ -325,6 +332,42 @@ export class CoreBridge {
       paused ? "/api/network/pause" : "/api/network/resume",
       { method: "POST" },
     );
+  }
+
+  // -------------------------------------------------------------------
+  // Client-side diagnostics
+  // -------------------------------------------------------------------
+
+  /**
+   * Forward a webview-side diagnostic into the core-server's log (and thus into
+   * the on-disk `<dataDir>/core-server.log` the desktop shell drains). This is
+   * how the UI's own errors — uncaught exceptions, rejected promises, failed
+   * fetches — become visible on the machine instead of living only in an
+   * invisible webview console. Best-effort: any failure here is swallowed.
+   */
+  async reportClientError(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    context?: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const backend = await resolveBackendConfig();
+      const token = backend.token ?? (await resolveBootToken());
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      await fetch(backend.baseUrl + "/api/debug/log", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ level, message, context }),
+      });
+    } catch {
+      // The bridge or server may be down (that is often exactly why we are
+      // reporting) — never let diagnostics add new failures.
+    }
   }
 
   // -------------------------------------------------------------------
@@ -365,8 +408,10 @@ export class CoreBridge {
         if (data.type === "event" && data.event) {
           this.emit({ event: data.event, payload: data.payload, ts: data.ts ?? Date.now() });
         }
-      } catch {
-        // Ignore malformed frames.
+      } catch (err) {
+        // Ignore malformed frames, but log them so client diagnostics can
+        // surface a misbehaving peer/server in the on-disk log.
+        console.error("[shell] malformed ws frame", err);
       }
     };
 
@@ -459,8 +504,15 @@ export class CoreBridge {
       },
     });
     if (!res.ok) {
-      const body = (await res.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(body?.error ?? `request failed: ${res.status}`);
+      const body = (await res.json().catch(() => null)) as {
+        error?: string;
+        detail?: string;
+      } | null;
+      const reason =
+        body?.detail != null
+          ? `${body?.error ?? "internal error"}: ${body.detail}`
+          : body?.error ?? `request failed: ${res.status}`;
+      throw new Error(reason);
     }
     return (await res.json()) as T;
   }
