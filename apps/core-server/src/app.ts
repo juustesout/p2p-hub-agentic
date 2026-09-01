@@ -46,6 +46,9 @@ import { servePeersite, serveRemoteSite, serveSite } from "./routes/sites";
 import type { SitesContext } from "./routes/sites";
 import { executeRemote, serveOperator } from "./routes/operator";
 import type { OperatorContext } from "./routes/operator";
+import { serveDiagnostics } from "./routes/diagnostics";
+import type { DiagnosticsContext } from "./routes/diagnostics";
+import { diagnostics } from "./diagnostics/engine";
 import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, REMOTE_SITE_FETCH_RATE_LIMIT, REMOTE_SITE_FETCH_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
 import { servePal, registerPalSkills } from "./routes/pal";
 import type { PalContext } from "./routes/pal";
@@ -127,10 +130,19 @@ export class CoreServer {
     sites: SitesContext;
     operator: OperatorContext;
     pal: PalContext;
+    diagnostics: DiagnosticsContext;
   };
 
   constructor(options: CoreServerOptions) {
     this.options = options;
+    // The diagnostics engine wires the root logger + data dir + `--safe-mode`
+    // boot flag before anything logs through a module child logger. It never
+    // touches the vault or the network — safe to configure unconditionally.
+    diagnostics.configure({
+      root: logger,
+      dataDir: options.dataDir,
+      safeMode: options.safeMode,
+    });
     // The AI quota gate must exist before the PluginHost (whose per-plugin
     // ctx.ai providers close over it) and before registerCoreSkills.
     this.aiBudget = new AIBudgetManager(options.aiBudget);
@@ -232,6 +244,9 @@ export class CoreServer {
       },
       pal: {
         pal: () => this.pal,
+      },
+      diagnostics: {
+        engine: diagnostics,
       },
     };
   }
@@ -731,6 +746,9 @@ export class CoreServer {
         return;
       }
       if (await servePal(this.routes.pal, req, res, path)) {
+        return;
+      }
+      if (await serveDiagnostics(this.routes.diagnostics, req, res, path)) {
         return;
       }
       if (await serveOperator(this.routes.operator, req, res, path)) {

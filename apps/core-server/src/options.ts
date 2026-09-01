@@ -100,4 +100,11 @@ export interface CoreServerOptions {
    * Absent ⇒ the fail-closed defaults apply (10 req/peer/hour + 30 req/node/minute).
    */
   aiBudget?: AIBudgetConfig;
+  /**
+   * `--safe-mode` boot flag (HelpCenter Pijler F). In 7A this only records the
+   * flag (visible in the diagnostics register as `bootFlags: ["safe-mode"]`) so
+   * a support flow can tell it ran in safe mode; the minimal-boot semantics
+   * (no plugins / no P2P / no identity) land in a later HelpCenter slice.
+   */
+  safeMode?: boolean;
 }

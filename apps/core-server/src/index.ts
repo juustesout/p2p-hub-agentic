@@ -43,11 +43,30 @@ function resolveDataDir(): string {
   return path.join(os.homedir(), ".p2p-hub");
 }
 
+/**
+ * `--safe-mode` boot flag (HelpCenter Pijler F): `--safe-mode` on the command
+ * line or `P2P_HUB_SAFE_MODE=1` in the environment. In 7A it is recorded and
+ * surfaced in the diagnostics register; the minimal-boot behaviour ships with
+ * a later HelpCenter slice. The flag is loud when active (startup warning) so
+ * it is never a silent fallback.
+ */
+function resolveSafeMode(argv: string[]): boolean {
+  return argv.includes("--safe-mode") || process.env.P2P_HUB_SAFE_MODE === "1";
+}
+
 async function main(): Promise<void> {
+  const safeMode = resolveSafeMode(process.argv);
   const loaded = loadConfig(process.env);
   if ("error" in loaded) {
     logger.error(`[core-server] ${loaded.error}`);
     process.exit(1);
+  }
+  if (safeMode) {
+    logger.warn(
+      `[core-server] SAFE MODE: --safe-mode/P2P_HUB_SAFE_MODE=1 active. ` +
+        `Troubleshooting mode; minimal plugin/network behaviour applies once ` +
+        `fully implemented (HelpCenter Pijler F).`,
+    );
   }
   const {
     host,
@@ -99,6 +118,7 @@ async function main(): Promise<void> {
     wanEnabled,
     wanRelayAddr,
     wanListenAddrs,
+    safeMode,
   });
 
   await server.start();
