@@ -283,16 +283,41 @@ pub fn spawn_core_sidecar(data_dir: Option<PathBuf>) -> Result<SidecarHandle, St
     command
         .args(&args)
         .envs(sidecar_env(data_dir.as_ref()))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stdout(Stdio::piped());
+
     // On Windows a spawned child without `CREATE_NO_WINDOW` opens its own
     // console window; the sidecar is a background server, so suppress it
-    // (flag 0x08000000). The stderr is deliberately inherited *inside* the
-    // shell's own context, not a new window.
+    // (flag 0x08000000) and redirect its stderr into a log file in the data
+    // dir. A GUI app has no console and inherited stderr would be dropped, so
+    // this file is the only audit trail for boot/lock failures (e.g. an
+    // "internal error" on vault unlock). The ready line never reaches stderr
+    // — it is stdout-only and the drainer keeps it out of any log, so the
+    // boot token is never persisted.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
+        let log_path = data_dir
+            .as_ref()
+            .unwrap_or(&default_data_dir())
+            .join("core-server.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| {
+                format!(
+                    "failed to open sidecar log {}: {e}",
+                    log_path.display()
+                )
+            })?;
+        command.stderr(Stdio::from(log_file));
+    }
+    // Non-Windows: keep the existing dev behaviour — the sidecar logs to the
+    // shell's own stderr, which is visible in the terminal that ran `tauri dev`.
+    #[cfg(not(windows))]
+    {
+        command.stderr(Stdio::inherit());
     }
 
     let mut child = command
