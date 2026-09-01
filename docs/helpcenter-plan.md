@@ -256,6 +256,24 @@ Opdrachtverdeling (Gemini-briefs, 7A → 7D, ieder een eigen PR):
    Pijler F wordt hier vast voorbereid (vlag-parsing + snapshot-veld).
 2. **Slice 2 / Brief 7B — Snapshot & bundel**: snapshot-schema (incl. GPU-
    diagnostics, best-effort), bundel + preview + export (klembord/bestand).
+   **Klaar (PR #17)**: `collectSnapshot` (`apps/core-server/src/diagnostics/snapshot.ts`),
+   `buildBundle`/`bundleClipboardText` (`diagnostics/bundler.ts`),
+   `GET /api/diagnostics/snapshot` + `POST /api/diagnostics/bundle`, verplichte
+   whole-bundle-redactie (tweede poort naast de engine-redactie), `sections`/
+   `sources`/`userNote` met caps (`BUNDLE_MAX_RECORDS_PER_SOURCE` =
+   `DIAGNOSTICS_MAX_READ`, `BUNDLE_MAX_TOTAL_RECORDS` = 2000, note ≤ 4000 chars).
+   Scope-keuzes: (a) de snapshot-collector leest **structureel geen secrets** —
+   vault is `locked/unlocked` + `masterKeyConfigured` (via `usesFallbackKey`,
+   onderscheidt dev-fallback van echte key zonder de waarde aan te raken),
+   peers zijn een count, plugins zijn id/name/version/kind + signature/
+   certification; (b) **geen hostname** in de snapshot (niet in de brief-lijst en
+   een onvermaskerde identifier — bewust weggelaten, verwijdert de test die het
+   eerst wel bevatte); (c) GPU-probe = `lspci` op Linux, fail-closed `null`; de
+   webview-fill-hooks (`webglRenderer`/`hardwareAcceleration`/
+   `windowScaleFactor`) blijven `null` voor de shell-slice (7C); (d) "opslaan als
+   bestand" is client-side (de API retourneert de bundle-JSON; de shell slaat
+   op), de bundel zelf is altijd `redacted: true` — er is geen onredacted
+   bundel-pad.
 3. **Slice 3 / Brief 7C — HelpCenter-UI**: venster, tabbladen, logviewer, vinkjes,
    snapshot-knop, preview; fout-toast → "toon details".
 4. **Slice 4 / Brief 7D — Chat met ons**: support-contact ingebakken (via
