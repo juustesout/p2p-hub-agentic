@@ -654,6 +654,20 @@ export class CoreServer {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
 
+    // Request trace: log every request completion with its status so the
+    // desktop log file shows the full call history (who called what, and what
+    // it answered). Errors (>=400) are warn-level, successes debug-level —
+    // sidecar mode defaults to debug (see logger.ts), so the shell's log is
+    // a complete audit trail, while a normal terminal stays quiet.
+    res.on("finish", () => {
+      const status = res.statusCode;
+      if (status >= 400) {
+        logger.warn(`[core-server] http ${req.method} ${path} -> ${status}`);
+      } else {
+        logger.debug(`[core-server] http ${req.method} ${path} -> ${status}`);
+      }
+    });
+
     // Deny-by-default host gate (DNS rebinding): the tokenless surfaces can
     // only be read through a Host header the browser cannot fake. This runs
     // before the token gate on purpose — a rebinding page must not even reach
@@ -732,8 +746,19 @@ export class CoreServer {
         sendJson(res, 400, { error: "invalid request body" });
         return;
       }
-      logger.error(err, "[core-server] request failed");
-      sendJson(res, 500, { error: "internal error" });
+      logger.error(
+        err,
+        `[core-server] request failed: ${req.method} ${path}`,
+      );
+      // Surface the real reason in the response too: the desktop shell's webview
+      // can't read the server's log file, and the UI already shows the toast —
+      // so the frontend's error report now carries the actual message instead of
+      // a bare "internal error". The stack stays server-side (logged above); only
+      // the message + code leave the process, which leaks nothing sensitive.
+      const reason =
+        err instanceof Error ? err.message : "unknown error";
+      sendJson(res, 500, { error: "internal error", detail: reason });
+      return;
     }
   }
 

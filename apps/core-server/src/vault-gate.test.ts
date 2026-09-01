@@ -218,3 +218,43 @@ test("network pause/resume toggles transports; pause while locked is refused", a
     await server.stop();
   }
 });
+
+test("/api/debug/log accepts webview diagnostics, stays token-gated and lock-open", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-gate-debuglog-"));
+  await seedVault(dataDir);
+
+  const { server, port } = await bootServer(dataDir);
+  try {
+    // A well-formed report is accepted even while the vault is LOCKED: this is
+    // the surface the lock screen's own errors ride on, so it must never be
+    // gated behind the vault.
+    const ok = await authed(port, "/api/debug/log", {
+      method: "POST",
+      body: JSON.stringify({
+        level: "error",
+        message: "unlock rejected: something blew up",
+        context: { stack: "at Unlock (LockScreen.tsx:12)" },
+      }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { ok: true });
+
+    // Permissive: a garbage level and no message degrade to sane defaults
+    // instead of erroring (a failing webview must never make things worse).
+    const garbage = await authed(port, "/api/debug/log", {
+      method: "POST",
+      body: JSON.stringify({ level: "loud", message: 42 }),
+    });
+    assert.equal(garbage.status, 200);
+
+    // The global /api boot-token gate still applies.
+    const anon = await fetch(`http://127.0.0.1:${port}/api/debug/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level: "error", message: "nope" }),
+    });
+    assert.equal(anon.status, 401);
+  } finally {
+    await server.stop();
+  }
+});

@@ -358,6 +358,22 @@ fn stop_managed_sidecar(state: &SidecarState) -> Result<(), String> {
     Ok(())
 }
 
+/// Append a shell-side line to `<dataDir>/core-server.log`. Best-effort: used
+/// for shell-level failures that occur outside the core-server process (e.g.
+/// the sidecar never spawning), so they land in the same file the user is told
+/// to inspect instead of being visible only on a stderr nobody sees.
+fn append_core_log(data_dir: &std::path::Path, line: &str) {
+    use std::io::Write;
+    let path = data_dir.join("core-server.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 /// Quit from the tray: mark the close-to-tray hook as quitting, SIGTERM the
 /// core sidecar, then exit the process.
 fn quit_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
@@ -475,10 +491,16 @@ pub fn run() {
             // A boot failure is loud (stderr) and leaves the state `None`; the
             // frontend then reports the backend as offline instead of crashing.
             let data_dir = sidecar::default_data_dir();
-            let state = match sidecar::spawn_core_sidecar(Some(data_dir)) {
+            let state = match sidecar::spawn_core_sidecar(Some(data_dir.clone())) {
                 Ok(handle) => SidecarState(Mutex::new(Some(handle))),
                 Err(err) => {
+                    // Loud on stderr AND on-disk: when the sidecar never starts
+                    // there is no core-server.log drain, so write the shell's own
+                    // failure into the same file the user will look for. This is
+                    // the one boot case where the log can only exist if we create
+                    // it ourselves.
                     eprintln!("[p2p-hub-shell] core sidecar failed to start: {err}");
+                    append_core_log(&data_dir, &format!("[p2p-hub-shell] core sidecar failed to start: {err}"));
                     SidecarState(Mutex::new(None))
                 }
             };

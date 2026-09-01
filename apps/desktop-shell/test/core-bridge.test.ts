@@ -236,6 +236,51 @@ describe("core-bridge", () => {
     assert.equal(result.error, "invalid master key");
   });
 
+  it("prefers the server's detail field on a 500 (real exception message)", async () => {
+    fetchResponse = {
+      ok: false,
+      json: async () => ({
+        ok: false,
+        error: "internal error",
+        detail: "finishBoot: EADDRINUSE 0.0.0.0:52345",
+      }),
+    } as Response;
+
+    const result = await bridge.unlockVault("the-master-key");
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "finishBoot: EADDRINUSE 0.0.0.0:52345");
+  });
+
+  it("forwards webview diagnostics to /api/debug/log with the boot token", async () => {
+    __tauri.invoke = async (command: string) =>
+      command === "get_boot_token" ? "boot-token-abc" : undefined;
+
+    await bridge.reportClientError("error", "window.onerror: boom", {
+      stack: "at x (LockScreen.tsx:12)",
+    });
+
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, "http://127.0.0.1:8787/api/debug/log");
+    const headers = fetchCalls[0].init?.headers as Record<string, string>;
+    assert.equal(headers.Authorization, "Bearer boot-token-abc");
+    const body = JSON.parse(String(fetchCalls[0].init?.body));
+    assert.equal(body.level, "error");
+    assert.equal(body.message, "window.onerror: boom");
+    assert.equal(body.context.stack, "at x (LockScreen.tsx:12)");
+  });
+
+  it("swallows report failures instead of throwing (diagnostics must not break the UI)", async () => {
+    // Simulate the exact worst case: the server is down, so the report fetch
+    // rejects with a network error.
+    globalThis.fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+
+    await bridge.reportClientError("error", "server is down");
+    // Reaching here (no throw) is the assertion.
+  });
+
   it("posts lock/pause/resume to their operator routes", async () => {
     await bridge.lockVault();
     assert.equal(fetchCalls[0].url, "http://127.0.0.1:8787/api/vault/lock");
