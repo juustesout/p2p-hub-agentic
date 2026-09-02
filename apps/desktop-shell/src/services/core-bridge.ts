@@ -10,6 +10,11 @@ import type {
   DiagnosticSnapshot,
   EffectiveSettings,
   ExecuteRequest,
+  ChatMessageRecordView,
+  HelpAgentAskResult,
+  HelpAgentProposal,
+  HelpAgentStatus,
+  HelpSupportInfo,
   RiskAssessment,
   SnapshotResponse,
   TaskResult,
@@ -420,6 +425,64 @@ export class CoreBridge {
   /** Raw snapshot type accessor for the Diagnose tab. */
   async rawSnapshot(): Promise<DiagnosticSnapshot> {
     return (await this.diagnosticsSnapshot()).snapshot;
+  }
+
+  // -------------------------------------------------------------------
+  // HelpCenter chat + help-agent (7D)
+  // -------------------------------------------------------------------
+
+  /** The baked-in support contact (configured when an operator supplied one). */
+  async helpSupport(): Promise<HelpSupportInfo> {
+    const res = await this.request<{ ok: boolean; support: HelpSupportInfo }>(
+      "/api/help/support",
+    );
+    return res.support;
+  }
+
+  /** Whether the help-agent has an AI provider configured. */
+  async helpAgentStatus(): Promise<HelpAgentStatus> {
+    return this.request<HelpAgentStatus>("/api/help/agent/status");
+  }
+
+  /** Ask the read-only help-agent one question (propose-then-confirm). */
+  async helpAgentAsk(question: string): Promise<HelpAgentAskResult> {
+    const body = await this.request<{ ok: boolean; code?: string; detail?: string } & Partial<{ proposal: HelpAgentProposal }>>(
+      "/api/help/agent/ask",
+      {
+        method: "POST",
+        body: JSON.stringify({ question }),
+      },
+    );
+    if (body.ok && body.proposal) {
+      return { ok: true, proposal: body.proposal };
+    }
+    return { ok: false, code: body.code, detail: body.detail };
+  }
+
+  /** Send one chat message to a peer via the chat plugin's httpBridgeOnly skill. */
+  async chatSendMessage(toPeerId: string, text: string): Promise<ChatMessageRecordView> {
+    const res = await this.execute({
+      serviceId: "chat",
+      method: "sendMessage",
+      arguments: { toPeerId, text },
+    });
+    if (res.status !== "ok") {
+      throw new Error(res.error ?? "send failed");
+    }
+    return res.result as ChatMessageRecordView;
+  }
+
+  /** The support thread's stored messages via the chat plugin's getThread skill. */
+  async chatThread(peerId: string): Promise<ChatMessageRecordView[]> {
+    const res = await this.execute({
+      serviceId: "chat",
+      method: "getThread",
+      arguments: { peerId },
+    });
+    if (res.status !== "ok") {
+      throw new Error(res.error ?? "load failed");
+    }
+    return (res.result as ChatMessageRecordView[]) ?? [];
   }
 
   // -------------------------------------------------------------------
