@@ -7,6 +7,9 @@
   "permissions": [
     "network:skill:chat.receiveMessage",
     "network:public:chat.receiveMessage",
+    "network:http:chat.sendMessage",
+    "network:http:chat.listThreads",
+    "network:http:chat.getThread",
     "storage:read:contacts",
     "hooks:on:tasks:taskUpdated"
   ],

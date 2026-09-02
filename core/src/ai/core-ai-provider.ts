@@ -65,6 +65,24 @@ export class CoreAIProvider {
     return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   }
 
+  /**
+   * True when an outbound text call would not immediately fail on a missing
+   * key: either a key is stored, or the configured base URL is a local
+   * endpoint (ollama etc.) that needs no key. Never leaks the key or any other
+   * secret value — it returns a single boolean. Used by the HelpCenter
+   * help-agent and settings UI to decide whether AI-backed features may show.
+   */
+  async isConfigured(): Promise<boolean> {
+    const { apiKey, baseUrl } = await this.resolve();
+    if (apiKey) {
+      return true;
+    }
+    if (!baseUrl) {
+      return false;
+    }
+    return this.isLocal(baseUrl);
+  }
+
   async generateText(
     options: AIGenerateTextOptions,
     context?: AIInvocationContext,

@@ -15,6 +15,7 @@ export * from "./diagnostics/client-gpu";
 export * from "./ai-prompt-isolation";
 export * from "./settings-risk";
 export * from "./trust-tier";
+export * from "./docs";
 export * from "./query/filter";
 export * from "./pal/types";
 export * from "./sandbox/ipc-protocol";
