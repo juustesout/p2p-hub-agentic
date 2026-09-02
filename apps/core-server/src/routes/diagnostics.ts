@@ -18,9 +18,18 @@ import { readJsonBody, sendJson } from "./helpers";
 import { logger } from "../logger";
 import { DIAGNOSTICS_MAX_READ } from "../diagnostics/ring-buffer";
 import type { DiagnosticsEngine } from "../diagnostics/engine";
+import { collectSnapshot, snapshotSummary, type SnapshotStateSource } from "../diagnostics/snapshot";
+import {
+  BUNDLE_SNAPSHOT_SECTIONS,
+  buildBundle,
+  bundleClipboardText,
+  type BundleSnapshotSection,
+} from "../diagnostics/bundler";
 
 export interface DiagnosticsContext {
   engine: DiagnosticsEngine;
+  /** Fresh snapshot-state closure (provider/vault/plugins live state). */
+  snapshotState: () => SnapshotStateSource;
 }
 
 interface LogsQuery {
@@ -141,6 +150,93 @@ export async function serveDiagnostics(
     return true;
   }
 
+  // Fresh diagnostic snapshot (HelpCenter Pijler B.1): OS + hardware + runtime
+  // + live core state in one fixed shape. Redaction-safe by construction (the
+  // collector never reads a secret; vault is locked/unlocked + a boolean).
+  if (req.method === "GET" && pathname === "/api/diagnostics/snapshot") {
+    const snapshot = await collectSnapshot(ctx.snapshotState(), ctx.engine.bootFlags);
+    sendJson(res, 200, { ok: true, snapshot, summary: snapshotSummary(snapshot) });
+    return true;
+  }
+
+  // Diagnostic bundle (HelpCenter Pijler B.2): snapshot + selected log sources
+  // + an optional note in ONE redacted payload with a visible preview. There is
+  // no automatic upload — the client copies/saves/pastes the returned bundle.
+  if (req.method === "POST" && pathname === "/api/diagnostics/bundle") {
+    const body = (await readJsonBody(req)) as {
+      sections?: unknown;
+      sources?: unknown;
+      userNote?: unknown;
+    };
+    const sections = parseSections(body.sections);
+    if (!sections.ok) {
+      sendJson(res, 400, { ok: false, error: sections.error });
+      return true;
+    }
+    const sources = parseSources(body.sources);
+    if (!sources.ok) {
+      sendJson(res, 400, { ok: false, error: sources.error });
+      return true;
+    }
+    if (body.userNote !== undefined && typeof body.userNote !== "string") {
+      sendJson(res, 400, { ok: false, error: "userNote expects a string" });
+      return true;
+    }
+    const snapshot = await collectSnapshot(ctx.snapshotState(), ctx.engine.bootFlags);
+    const bundle = buildBundle({
+      snapshot,
+      sections: sections.value,
+      sources: sources.value,
+      userNote: typeof body.userNote === "string" ? body.userNote : "",
+      reader: ctx.engine,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      bundle,
+      clipboardText: bundleClipboardText(bundle),
+      preview: bundle.preview,
+    });
+    return true;
+  }
+
   sendJson(res, 404, { error: "not found" });
   return true;
+}
+
+/** Parse the `sections` array (must be known snapshot-section ids, deduped). */
+function parseSections(raw: unknown):
+  | { ok: true; value: BundleSnapshotSection[] }
+  | { ok: false; error: string } {
+  if (raw === undefined) {
+    return { ok: true, value: [...BUNDLE_SNAPSHOT_SECTIONS] };
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, error: "sections expects a non-empty array" };
+  }
+  const seen = new Set<string>();
+  const value: BundleSnapshotSection[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string" || !BUNDLE_SNAPSHOT_SECTIONS.includes(entry as BundleSnapshotSection)) {
+      return {
+        ok: false,
+        error: `sections may only contain ${BUNDLE_SNAPSHOT_SECTIONS.join(", ")}`,
+      };
+    }
+    if (!seen.has(entry)) {
+      seen.add(entry);
+      value.push(entry as BundleSnapshotSection);
+    }
+  }
+  return { ok: true, value };
+}
+
+/** Parse the `sources` array (string source ids; the engine drops unknowns). */
+function parseSources(raw: unknown): { ok: true; value: string[] } | { ok: false; error: string } {
+  if (raw === undefined) {
+    return { ok: true, value: [] };
+  }
+  if (!Array.isArray(raw) || raw.some((entry) => typeof entry !== "string")) {
+    return { ok: false, error: "sources expects an array of source id strings" };
+  }
+  return { ok: true, value: raw as string[] };
 }

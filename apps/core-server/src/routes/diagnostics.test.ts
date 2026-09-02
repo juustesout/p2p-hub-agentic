@@ -201,3 +201,133 @@ test("diagnostics routes require the token gate (no bypass via level/source)", a
     assert.equal(source.status, 401);
   });
 });
+
+test("GET /api/diagnostics/snapshot returns the fixed snapshot shape (token-gated)", async () => {
+  await withServer(async ({ port }) => {
+    const unauthorized = await request(port, "/api/diagnostics/snapshot");
+    assert.equal(unauthorized.status, 401);
+
+    const res = await request(port, "/api/diagnostics/snapshot", { token: TOKEN });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      summary: string;
+      snapshot: {
+        system: { platform: string };
+        runtime: { nodeVersion: string };
+        hardware: { gpu: unknown };
+        network: { transportMode: string };
+        vault: { locked: boolean };
+        boot: { bootState: string };
+        plugins: unknown[];
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.ok(typeof body.summary === "string");
+    const snap = body.snapshot;
+    assert.equal(snap.system.platform, process.platform);
+    assert.equal(snap.runtime.nodeVersion, process.version);
+    assert.equal(snap.network.transportMode, "none"); // networking: false in tests
+    assert.equal(typeof snap.vault.locked, "boolean");
+    assert.ok(Array.isArray(snap.plugins));
+    // lspci may or may not exist in CI; either is valid, never a crash.
+    if (snap.hardware.gpu !== null) {
+      assert.equal((snap.hardware.gpu as { source: string }).source, "lspci");
+    }
+  });
+});
+
+test("GET /api/diagnostics/snapshot never leaks a 64-hex (peerId/boot-token shape)", async () => {
+  await withServer(async ({ port }) => {
+    const res = await request(port, "/api/diagnostics/snapshot", { token: TOKEN });
+    const body = (await res.json()) as { snapshot: unknown };
+    const json = JSON.stringify(body.snapshot);
+    assert.ok(!/\b[0-9a-f]{64}\b/.test(json), "snapshot must not contain a 64-hex value");
+  });
+});
+
+test("POST /api/diagnostics/bundle returns one redacted bundle + clipboard text", async () => {
+  await withServer(async ({ port }) => {
+    // Seed a sensitive log record through the shell-ipc webview feed.
+    const seed = await request(port, "/api/debug/log", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level: "warn", message: `peer ${PEER} failed a handshake` }),
+    });
+    assert.equal(seed.status, 200);
+
+    const res = await request(port, "/api/diagnostics/bundle", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sections: ["system", "runtime", "network", "vault"],
+        sources: ["shell-ipc"],
+        userNote: "black screen on second display",
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      bundle: {
+        redacted: boolean;
+        preview: { sections: string[]; logSources: Array<{ sourceId: string; recordCount: number }>; hasNote: boolean };
+        logs: Array<{ records: Array<{ msg: string }> }>;
+      };
+      clipboardText: string;
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.bundle.redacted, true);
+    assert.deepEqual(body.bundle.preview.sections, ["system", "runtime", "network", "vault"]);
+    assert.equal(body.bundle.preview.hasNote, true);
+    const shellIpc = body.bundle.preview.logSources.find((s) => s.sourceId === "shell-ipc");
+    assert.ok(shellIpc && shellIpc.recordCount > 0);
+
+    const bundleJson = JSON.stringify(body.bundle);
+    assert.ok(!bundleJson.includes(PEER), "bundle must be redacted end-to-end");
+    assert.ok(
+      body.bundle.logs.some((l) => l.records.some((r) => r.msg.includes("peer_9f2a…7f80"))),
+      "the masked peerId form should be present in the bundle",
+    );
+    assert.match(body.clipboardText, /p2p-hub diagnostische bundel/);
+    assert.ok(!body.clipboardText.includes(PEER), "clipboard text must be redacted");
+  });
+});
+
+test("POST /api/diagnostics/bundle is token-gated and rejects bad shapes", async () => {
+  await withServer(async ({ port }) => {
+    const unauthorized = await request(port, "/api/diagnostics/bundle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sources: [] }),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const badSections = await request(port, "/api/diagnostics/bundle", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sections: ["secrets"] }),
+    });
+    assert.equal(badSections.status, 400);
+    const badSectionsBody = (await badSections.json()) as { error: string };
+    assert.match(badSectionsBody.error, /sections may only contain/);
+
+    const badSources = await request(port, "/api/diagnostics/bundle", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sources: [42] }),
+    });
+    assert.equal(badSources.status, 400);
+
+    const badNote = await request(port, "/api/diagnostics/bundle", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userNote: 123 }),
+    });
+    assert.equal(badNote.status, 400);
+  });
+});

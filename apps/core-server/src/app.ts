@@ -49,6 +49,7 @@ import type { OperatorContext } from "./routes/operator";
 import { serveDiagnostics } from "./routes/diagnostics";
 import type { DiagnosticsContext } from "./routes/diagnostics";
 import { diagnostics } from "./diagnostics/engine";
+import type { SnapshotStateSource } from "./diagnostics/snapshot";
 import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, REMOTE_SITE_FETCH_RATE_LIMIT, REMOTE_SITE_FETCH_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
 import { servePal, registerPalSkills } from "./routes/pal";
 import type { PalContext } from "./routes/pal";
@@ -247,6 +248,7 @@ export class CoreServer {
       },
       diagnostics: {
         engine: diagnostics,
+        snapshotState: () => this.snapshotState(),
       },
     };
   }
@@ -344,6 +346,49 @@ export class CoreServer {
    */
   bootState(): "locked" | "ready" {
     return this.vaultUnlocked ? "ready" : "locked";
+  }
+
+  /**
+   * Snapshot-state closure for the diagnostics surface (HelpCenter Pijler B.1).
+   * Reads ONLY non-secret live state: the vault is a `locked`/`masterKeyConfigured`
+   * boolean pair (never the key — `usesFallbackKey` tells configured vs dev-key
+   * without touching a value), peers are a count, plugins are id/version/kind +
+   * signature/certification status. Never a peerId, never a token.
+   */
+  private snapshotState(): SnapshotStateSource {
+    const vault = this.host.vaultManager();
+    const provider = this.provider;
+    return {
+      bootState: this.bootState(),
+      networkingEnabled: this.options.networking !== false,
+      wanEnabled: this.options.wanEnabled ?? false,
+      vault: {
+        locked: !this.vaultUnlocked,
+        vaultExists: this.vaultExists,
+        networkPaused: this.networkPaused,
+        masterKeyConfigured: !vault.usesFallbackKey,
+      },
+      provider: provider
+        ? {
+            id: provider.id,
+            ready: provider.isReady(),
+            peerCount: provider.listPeers()?.length ?? 0,
+            port: provider.port,
+          }
+        : null,
+      wan: this.wanProvider
+        ? { id: this.wanProvider.id, ready: this.wanProvider.isReady() }
+        : null,
+      plugins: this.host.listPlugins().map((manifest) => ({
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        kind: String(manifest.kind),
+        signature: this.host.pluginSignature(manifest.id),
+        certification: this.host.pluginCertification(manifest.id),
+        state: this.host.pluginState(manifest.id),
+      })),
+    };
   }
 
   /**
