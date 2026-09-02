@@ -275,7 +275,14 @@ Opdrachtverdeling (Gemini-briefs, 7A → 7D, ieder een eigen PR):
    op), de bundel zelf is altijd `redacted: true` — er is geen onredacted
    bundel-pad.
 3. **Slice 3 / Brief 7C — HelpCenter-UI**: venster, tabbladen, logviewer, vinkjes,
-   snapshot-knop, preview; fout-toast → "toon details".
+   snapshot-knop, preview; fout-toast → "toon details". **Klaar (PR #16)**:
+   "Help & Diagnostiek"-venster (Diagnose/Logs/Documentatie) in de
+   desktop-shell, geopend vanuit taskbar/sidebar/startmenu en via de
+   fout-toast; logviewer met per-bron aan/uit (secure bronnen weigeren) en de
+   "toon ongeredacteerd"-poweruser-toggle; offline gebundelde Nederlandse
+   documentatie (7 artikelen, on-device zoeken); gedeelde `ClientGpuProbe`
+   (sdk) → `clientGpu` in snapshot/bundle (core-server), webview-webgl-probe in
+   de shell.
 4. **Slice 4 / Brief 7D — Chat met ons**: support-contact ingebakken (via
    `contacts`), chat-flow hergebruikt `chat.receiveMessage`; bundel-plakken in
    de chat.
