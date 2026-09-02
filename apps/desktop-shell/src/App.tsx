@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useApp } from "./state/AppState";
 import { pluginBridge } from "./services/plugin-bridge";
 import { LockScreen } from "./components/LockScreen";
@@ -11,6 +11,8 @@ import { SettingsWindow } from "./components/SettingsWindow";
 import { Toasts } from "./components/Toasts";
 import { PluginWindow } from "./components/PluginWindow";
 import { SiteViewer } from "./components/SiteViewer";
+import { HelpCenterWindow } from "./components/helpcenter/HelpCenterWindow";
+import { registerHelpCenterOpener } from "./services/help-nav";
 import { WindowManager, type ManagedWindow } from "./components/WindowManager";
 import type { CapabilityPlugin } from "./types";
 
@@ -37,6 +39,53 @@ export default function App() {
     }
   }, [capabilities]);
 
+  // Shared window opener (used by every entry point that renders a window and
+  // by the HelpCenter nav bus). Declared with useCallback because it must be
+  // available before the lock-screen gate below.
+  const openWindow = useCallback(
+    (
+      id: string,
+      title: string,
+      render: () => React.ReactNode,
+      size?: { w?: number; h?: number },
+    ) => {
+      setWindows((prev) => {
+        if (prev.some((w) => w.id === id)) {
+          return prev.map((w) => (w.id === id ? { ...w, minimized: false } : w));
+        }
+        const count = prev.length;
+        return [
+          ...prev,
+          {
+            id,
+            title,
+            x: 120 + (count % 4) * 40,
+            y: 80 + (count % 4) * 32,
+            w: size?.w ?? 720,
+            h: size?.h ?? 480,
+            minimized: false,
+            render,
+          },
+        ];
+      });
+    },
+    [],
+  );
+
+  // The "Help & Diagnostiek" window is opened by many surfaces (taskbar,
+  // sidebar, start menu, error toasts). Those surfaces publish a nav request
+  // through help-nav; this opener is what actually creates the window when it
+  // is not mounted yet.
+  useEffect(() => {
+    registerHelpCenterOpener(() => {
+      openWindow("helpcenter", "Help & Diagnostiek", () => <HelpCenterWindow />, {
+        w: 900,
+        h: 600,
+      });
+    });
+    return () => registerHelpCenterOpener(null);
+  }, [openWindow]);
+
   // Vault lock-gate (Slice 2): before the first `/api/health` read the shell
   // cannot know whether the vault is locked, so it renders a plain backdrop
   // (fail-closed — never the desktop with its stale vault view). While
@@ -47,33 +96,6 @@ export default function App() {
   if (vaultGate.locked) {
     return <LockScreen />;
   }
-
-  const openWindow = (
-    id: string,
-    title: string,
-    render: () => React.ReactNode,
-    size?: { w?: number; h?: number },
-  ) => {
-    setWindows((prev) => {
-      if (prev.some((w) => w.id === id)) {
-        return prev.map((w) => (w.id === id ? { ...w, minimized: false } : w));
-      }
-      const count = prev.length;
-      return [
-        ...prev,
-        {
-          id,
-          title,
-          x: 120 + (count % 4) * 40,
-          y: 80 + (count % 4) * 32,
-          w: size?.w ?? 720,
-          h: size?.h ?? 480,
-          minimized: false,
-          render,
-        },
-      ];
-    });
-  };
 
   const openPeerInspector = () =>
     openWindow("peer-inspector", "Peer & Capability Inspector", () => (

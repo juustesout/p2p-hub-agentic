@@ -13,6 +13,7 @@ import type {
   Capabilities,
   ConnectionState,
   ExecuteRequest,
+  HelpNavRequest,
   TaskResult,
   Toast,
   VaultGateState,
@@ -111,8 +112,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const pushToast = useCallback(
-    (title: string, body: string, kind: Toast["kind"] = "info") => {
-      const toast: Toast = { id: makeId(), title, body, kind, ts: Date.now() };
+    (
+      title: string,
+      body: string,
+      kind: Toast["kind"] = "info",
+      details?: HelpNavRequest | null,
+    ) => {
+      const toast: Toast = {
+        id: makeId(),
+        title,
+        body,
+        kind,
+        ts: Date.now(),
+        ...(details ? { details } : {}),
+      };
       setToasts((prev) => [...prev.slice(-4), toast]);
       return toast.id;
     },
@@ -257,7 +270,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         case "task:completed": {
           const payload = event.payload as { status?: unknown } | null;
           if (payload?.status === "error") {
-            pushToast("Task failed", "A task completed with an error", "error");
+            pushToast(
+              "Task failed",
+              "A task completed with an error",
+              "error",
+              // Contextual HelpCenter open: the error surface is the Logs tab.
+              { tab: "logs" },
+            );
           }
           break;
         }

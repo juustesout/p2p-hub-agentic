@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useApp } from "../state/AppState";
-import { X, Info, CheckCircle2, AlertCircle } from "lucide-react";
+import { openHelpCenter } from "../services/help-nav";
+import { X, Info, CheckCircle2, AlertCircle, ChevronRight } from "lucide-react";
 
 const ICONS = {
   info: Info,
@@ -28,6 +29,7 @@ export function Toasts() {
     <div className="pointer-events-none absolute right-4 top-4 z-50 flex w-80 flex-col gap-2">
       {toasts.map((toast) => {
         const Icon = ICONS[toast.kind];
+        const details = toast.details;
         return (
           <div
             key={toast.id}
@@ -37,6 +39,14 @@ export function Toasts() {
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-slate-100">{toast.title}</p>
               <p className="truncate text-xs text-slate-400">{toast.body}</p>
+              {details && (
+                <button
+                  onClick={() => openHelpCenter(details)}
+                  className="mt-1.5 flex items-center gap-1 rounded-md bg-sky-500/20 px-2 py-1 text-[11px] font-medium text-sky-200 hover:bg-sky-500/30"
+                >
+                  Toon details <ChevronRight size={11} />
+                </button>
+              )}
             </div>
             <button
               onClick={() => dismissToast(toast.id)}

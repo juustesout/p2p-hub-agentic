@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../state/AppState";
-import { Bot, Send, Sparkles, X, Zap } from "lucide-react";
+import { openHelpCenter } from "../services/help-nav";
+import { Bot, LifeBuoy, Send, Sparkles, X, Zap } from "lucide-react";
 
 interface ChatEntry {
   role: "user" | "assistant" | "error";
@@ -94,13 +95,23 @@ export function HermesSidebar({ open, onToggle }: HermesSidebarProps) {
             <p className="text-[10px] text-slate-500">MCP orchestrator</p>
           </div>
         </div>
-        <button
-          onClick={onToggle}
-          className="rounded-lg p-1.5 text-slate-400 hover:bg-white/10"
-          aria-label="Close Hermes"
-        >
-          <X size={18} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => openHelpCenter()}
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-white/10"
+            aria-label="Open Help & Diagnostiek"
+            title="Help & Diagnostiek"
+          >
+            <LifeBuoy size={18} />
+          </button>
+          <button
+            onClick={onToggle}
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-white/10"
+            aria-label="Close Hermes"
+          >
+            <X size={18} />
+          </button>
+        </div>
       </div>
 
       {/* Chat */}

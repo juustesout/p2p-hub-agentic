@@ -22,6 +22,11 @@ const shellRoot = path.join(__dirname, "..");
 const testDir = path.join(shellRoot, "test");
 const outDir = path.join(shellRoot, "dist-tests");
 const tauriStub = path.join(testDir, "stubs", "tauri-core.ts");
+// Mirror the vite.config.ts alias: consume the SDK from TypeScript source, not
+// its CommonJS dist. The compiled barrel is CJS whose nested `require("node:crypto")`
+// cannot be converted to a node ESM bundle; the source is ESM with importable
+// node built-ins, so it bundles cleanly here (same reason the app uses it).
+const sdkSource = path.join(shellRoot, "..", "..", "sdk", "src", "index.ts");
 
 const entryPoints = fs
   .readdirSync(testDir)
@@ -44,6 +49,15 @@ esbuild
     sourcemap: false,
     logLevel: "error",
     plugins: [
+      {
+        name: "sdk-source-alias",
+        setup(build) {
+          build.onResolve(
+            { filter: /^@p2p-hub\/sdk$/ },
+            () => ({ path: sdkSource }),
+          );
+        },
+      },
       {
         name: "tauri-core-stub",
         setup(build) {

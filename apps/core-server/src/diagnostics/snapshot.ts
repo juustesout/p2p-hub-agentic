@@ -20,6 +20,7 @@
 
 import { execFile } from "node:child_process";
 import * as os from "node:os";
+import type { ClientGpuProbe } from "@p2p-hub/sdk";
 
 /**
  * Everything the snapshot needs from the live server. Kept as a narrow,
@@ -224,17 +225,50 @@ function collectHardware(): SnapshotHardwareInfo {
 }
 
 /**
+ * Merge a sanitized desktop-shell GPU probe into the hardware section. The
+ * core server has no webview, so `webglRenderer`/`hardwareAcceleration`/
+ * `windowScaleFactor` stay null on the plain GET path; the desktop shell
+ * probes WebGL and feeds the readout in, filling exactly those three hooks.
+ * `vendor`/`renderer` from the webview probe describe the *same* GPU the
+ * `gpu` lspci section reports — if no OS probe was available we fall back to
+ * the webview's renderer string so the section is never empty.
+ */
+function mergeClientGpu(hardware: SnapshotHardwareInfo, clientGpu: ClientGpuProbe): void {
+  if (clientGpu.renderer !== null) {
+    hardware.webglRenderer = clientGpu.renderer;
+  }
+  if (clientGpu.hardwareAcceleration !== null) {
+    hardware.hardwareAcceleration = clientGpu.hardwareAcceleration;
+  }
+  if (clientGpu.windowScaleFactor !== null) {
+    hardware.windowScaleFactor = clientGpu.windowScaleFactor;
+  }
+  if (hardware.gpu === null && (clientGpu.renderer !== null || clientGpu.vendor !== null)) {
+    hardware.gpu = {
+      vendor: clientGpu.vendor,
+      renderer: clientGpu.renderer,
+      source: "shell",
+    };
+  }
+}
+
+/**
  * Collect a fresh, redaction-safe diagnostic snapshot. The OS probe (`lspci`)
  * is async and fail-closed; the rest is synchronous. `bootFlags` comes from
- * the engine (e.g. `["safe-mode"]`).
+ * the engine (e.g. `["safe-mode"]`). An optional sanitized `clientGpu` probe
+ * (from the desktop-shell webview) fills the WebGL/scale-factor hooks.
  */
 export async function collectSnapshot(
   state: SnapshotStateSource,
   bootFlags: string[] = [],
+  clientGpu: ClientGpuProbe | null = null,
 ): Promise<DiagnosticSnapshot> {
   const [gpu] = await Promise.all([probeGpu()]);
   const hardware = collectHardware();
   hardware.gpu = gpu;
+  if (clientGpu) {
+    mergeClientGpu(hardware, clientGpu);
+  }
 
   const network: SnapshotNetworkInfo = state.provider
     ? {
