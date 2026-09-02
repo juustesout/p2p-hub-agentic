@@ -164,6 +164,46 @@ test("hardware section is best-effort and fail-closed (never crashes)", async ()
   }
 });
 
+test("a sanitized clientGpu probe fills the webview hardware hooks", async () => {
+  const snapshot = await collectSnapshot(fakeState(), [], {
+    vendor: "Google Inc. (NVIDIA)",
+    renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11)",
+    hardwareAcceleration: true,
+    windowScaleFactor: 1.5,
+  });
+  const hw = snapshot.hardware;
+  assert.equal(hw.webglRenderer, "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11)");
+  assert.equal(hw.hardwareAcceleration, true);
+  assert.equal(hw.windowScaleFactor, 1.5);
+  assert.ok(["lspci", "shell"].includes(hw.gpu?.source ?? "none"));
+});
+
+test("a clientGpu with only a renderer keeps the other hooks null", async () => {
+  const snapshot = await collectSnapshot(fakeState(), [], {
+    renderer: "ANGLE (Software)",
+    hardwareAcceleration: null,
+    windowScaleFactor: null,
+    vendor: null,
+  });
+  const hw = snapshot.hardware;
+  assert.equal(hw.webglRenderer, "ANGLE (Software)");
+  assert.equal(hw.hardwareAcceleration, null);
+  assert.equal(hw.windowScaleFactor, null);
+});
+
+test("a clientGpu with only a renderer keeps the other hooks null", async () => {
+  const snapshot = await collectSnapshot(fakeState(), [], {
+    renderer: "ANGLE (Software)",
+    hardwareAcceleration: null,
+    windowScaleFactor: null,
+    vendor: null,
+  });
+  const hw = snapshot.hardware;
+  assert.equal(hw.webglRenderer, "ANGLE (Software)");
+  assert.equal(hw.hardwareAcceleration, null);
+  assert.equal(hw.windowScaleFactor, null);
+});
+
 test("the whole snapshot never carries secrets or unmasked identifiers", async () => {
   const snapshot = await collectSnapshot(fakeState(), ["safe-mode"]);
   assertNoSensitive(snapshot, "full snapshot");

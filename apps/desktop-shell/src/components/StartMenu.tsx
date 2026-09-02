@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useApp } from "../state/AppState";
 import type { CapabilityPlugin, CapabilitySkill, RemotePeer } from "../types";
-import { Search, KeyRound, Network, Puzzle, Settings, Monitor } from "lucide-react";
+import { openHelpCenter } from "../services/help-nav";
+import { Search, KeyRound, Network, Puzzle, Settings, Monitor, LifeBuoy } from "lucide-react";
 
 interface StartMenuProps {
   onClose: () => void;
@@ -186,6 +187,18 @@ export function StartMenu({
               <Network size={16} />
             </span>
             <span className="text-sm text-slate-100">Peer & Capability Inspector</span>
+          </button>
+          <button
+            onClick={() => {
+              openHelpCenter();
+              onClose();
+            }}
+            className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left glass-hover"
+          >
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/20 text-sky-300">
+              <LifeBuoy size={16} />
+            </span>
+            <span className="text-sm text-slate-100">Help & Diagnostiek</span>
           </button>
           <button
             onClick={onOpenSettings}

@@ -25,6 +25,7 @@ import {
   bundleClipboardText,
   type BundleSnapshotSection,
 } from "../diagnostics/bundler";
+import { sanitizeClientGpu, type ClientGpuProbe } from "@p2p-hub/sdk";
 
 export interface DiagnosticsContext {
   engine: DiagnosticsEngine;
@@ -54,6 +55,25 @@ function parseLimit(raw: number | undefined): number {
     return DIAGNOSTICS_MAX_READ;
   }
   return Math.min(Math.max(1, Math.floor(raw)), DIAGNOSTICS_MAX_READ);
+}
+
+/**
+ * Extract an optional `clientGpu` probe from a JSON body. Absent → null.
+ * Present-but-not-a-record → error (the shared sanitizer only understands
+ * objects). A record with unknown/malformed fields sanitizes silently to an
+ * all-null probe, which the collector treats as absent.
+ */
+function parseClientGpu(raw: unknown):
+  | { ok: true; probe: ClientGpuProbe | null }
+  | { ok: false; error: string } {
+  if (raw === undefined || raw === null) {
+    return { ok: true, probe: null };
+  }
+  const probe = sanitizeClientGpu(raw);
+  if (probe === null) {
+    return { ok: false, error: "clientGpu expects an object" };
+  }
+  return { ok: true, probe };
 }
 
 export async function serveDiagnostics(
@@ -153,8 +173,23 @@ export async function serveDiagnostics(
   // Fresh diagnostic snapshot (HelpCenter Pijler B.1): OS + hardware + runtime
   // + live core state in one fixed shape. Redaction-safe by construction (the
   // collector never reads a secret; vault is locked/unlocked + a boolean).
-  if (req.method === "GET" && pathname === "/api/diagnostics/snapshot") {
-    const snapshot = await collectSnapshot(ctx.snapshotState(), ctx.engine.bootFlags);
+  // GET collects server-side only; POST accepts an optional `clientGpu` body so
+  // the desktop-shell webview can feed its WebGL probe into the hardware hooks.
+  if (pathname === "/api/diagnostics/snapshot") {
+    let clientGpu: ClientGpuProbe | null = null;
+    if (req.method === "POST") {
+      const body = (await readJsonBody(req)) as { clientGpu?: unknown };
+      const parsed = parseClientGpu(body?.clientGpu);
+      if (!parsed.ok) {
+        sendJson(res, 400, { ok: false, error: parsed.error });
+        return true;
+      }
+      clientGpu = parsed.probe;
+    } else if (req.method !== "GET") {
+      sendJson(res, 405, { ok: false, error: "method not allowed" });
+      return true;
+    }
+    const snapshot = await collectSnapshot(ctx.snapshotState(), ctx.engine.bootFlags, clientGpu);
     sendJson(res, 200, { ok: true, snapshot, summary: snapshotSummary(snapshot) });
     return true;
   }
@@ -162,11 +197,14 @@ export async function serveDiagnostics(
   // Diagnostic bundle (HelpCenter Pijler B.2): snapshot + selected log sources
   // + an optional note in ONE redacted payload with a visible preview. There is
   // no automatic upload — the client copies/saves/pastes the returned bundle.
+  // The optional `clientGpu` body feeds the shell's WebGL probe into the
+  // bundle's snapshot hardware section.
   if (req.method === "POST" && pathname === "/api/diagnostics/bundle") {
     const body = (await readJsonBody(req)) as {
       sections?: unknown;
       sources?: unknown;
       userNote?: unknown;
+      clientGpu?: unknown;
     };
     const sections = parseSections(body.sections);
     if (!sections.ok) {
@@ -182,7 +220,16 @@ export async function serveDiagnostics(
       sendJson(res, 400, { ok: false, error: "userNote expects a string" });
       return true;
     }
-    const snapshot = await collectSnapshot(ctx.snapshotState(), ctx.engine.bootFlags);
+    const clientGpu = parseClientGpu(body.clientGpu);
+    if (!clientGpu.ok) {
+      sendJson(res, 400, { ok: false, error: clientGpu.error });
+      return true;
+    }
+    const snapshot = await collectSnapshot(
+      ctx.snapshotState(),
+      ctx.engine.bootFlags,
+      clientGpu.probe,
+    );
     const bundle = buildBundle({
       snapshot,
       sections: sections.value,

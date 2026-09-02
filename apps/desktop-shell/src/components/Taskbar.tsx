@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ConnectionIndicator } from "./ConnectionIndicator";
 import { PeerBadge } from "./PeerBadge";
+import { openHelpCenter } from "../services/help-nav";
 import {
   Grid2x2,
   Search,
@@ -8,6 +9,7 @@ import {
   KeyRound,
   Bot,
   Settings,
+  LifeBuoy,
 } from "lucide-react";
 
 function Clock() {
@@ -96,6 +98,14 @@ export function Taskbar({
           title="Search"
         >
           <Search size={20} />
+        </button>
+        <button
+          onClick={() => openHelpCenter()}
+          className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-300 transition-colors hover:bg-white/10"
+          aria-label="Help & Diagnostiek"
+          title="Help & Diagnostiek"
+        >
+          <LifeBuoy size={20} />
         </button>
         <button
           onClick={onOpenSettings}

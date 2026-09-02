@@ -246,6 +246,67 @@ test("GET /api/diagnostics/snapshot never leaks a 64-hex (peerId/boot-token shap
   });
 });
 
+test("POST /api/diagnostics/snapshot merges a clientGpu probe into the hardware hooks", async () => {
+  await withServer(async ({ port }) => {
+    const res = await request(port, "/api/diagnostics/snapshot", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clientGpu: {
+          vendor: "Google Inc.",
+          renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11)",
+          hardwareAcceleration: true,
+          windowScaleFactor: 2,
+        },
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      snapshot: { hardware: { webglRenderer: string | null; hardwareAcceleration: boolean | null; windowScaleFactor: number | null } };
+    };
+    assert.equal(body.ok, true);
+    assert.equal(
+      body.snapshot.hardware.webglRenderer,
+      "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11)",
+    );
+    assert.equal(body.snapshot.hardware.hardwareAcceleration, true);
+    assert.equal(body.snapshot.hardware.windowScaleFactor, 2);
+  });
+});
+
+test("POST /api/diagnostics/snapshot rejects a malformed clientGpu body", async () => {
+  await withServer(async ({ port }) => {
+    const res = await request(port, "/api/diagnostics/snapshot", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientGpu: "not-an-object" }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /clientGpu expects an object/);
+  });
+});
+
+test("POST /api/diagnostics/snapshot stays token-gated and rejects wrong methods", async () => {
+  await withServer(async ({ port }) => {
+    const unauthorized = await request(port, "/api/diagnostics/snapshot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientGpu: {} }),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const badMethod = await request(port, "/api/diagnostics/snapshot", {
+      method: "DELETE",
+      token: TOKEN,
+    });
+    assert.equal(badMethod.status, 405);
+  });
+});
+
 test("POST /api/diagnostics/bundle returns one redacted bundle + clipboard text", async () => {
   await withServer(async ({ port }) => {
     // Seed a sensitive log record through the shell-ipc webview feed.
@@ -292,6 +353,42 @@ test("POST /api/diagnostics/bundle returns one redacted bundle + clipboard text"
     );
     assert.match(body.clipboardText, /p2p-hub diagnostische bundel/);
     assert.ok(!body.clipboardText.includes(PEER), "clipboard text must be redacted");
+  });
+});
+
+test("POST /api/diagnostics/bundle accepts a clientGpu probe and merges it into the bundled snapshot", async () => {
+  await withServer(async ({ port }) => {
+    const res = await request(port, "/api/diagnostics/bundle", {
+      method: "POST",
+      token: TOKEN,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sections: ["hardware"],
+        sources: [],
+        clientGpu: {
+          renderer: "ANGLE (Apple, Apple M1 Pro)",
+          hardwareAcceleration: true,
+          windowScaleFactor: 1,
+          vendor: null,
+        },
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      bundle: {
+        snapshot: { hardware: { webglRenderer: string | null; gpu: { source: string } | null } };
+      };
+    };
+    assert.equal(body.ok, true);
+    assert.equal(
+      (body.bundle.snapshot.hardware as { webglRenderer: string | null }).webglRenderer,
+      "ANGLE (Apple, Apple M1 Pro)",
+    );
+    const gpu = (body.bundle.snapshot.hardware as { gpu: { source: string } | null }).gpu;
+    if (gpu !== null) {
+      assert.ok(["lspci", "shell"].includes(gpu.source));
+    }
   });
 });
 

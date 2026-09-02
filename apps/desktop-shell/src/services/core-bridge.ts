@@ -1,10 +1,17 @@
 import type {
   ActivityEvent,
+  BundleResponse,
   Capabilities,
+  ClientGpuProbe,
   ConnectionState,
+  DiagnosticsLevelName,
+  DiagnosticsLogsQuery,
+  DiagnosticsLogsResponse,
+  DiagnosticSnapshot,
   EffectiveSettings,
   ExecuteRequest,
   RiskAssessment,
+  SnapshotResponse,
   TaskResult,
   VaultGateState,
   VaultKeyMeta,
@@ -332,6 +339,87 @@ export class CoreBridge {
       paused ? "/api/network/pause" : "/api/network/resume",
       { method: "POST" },
     );
+  }
+
+  // -------------------------------------------------------------------
+  // HelpCenter diagnostics (7C) — operator-facing read/toggle surface
+  // -------------------------------------------------------------------
+
+  /**
+   * The diagnostics source register. When `source` is omitted the server also
+   * returns a bounded (50-record) tail per source; the caller normally passes
+   * `source` to fetch exactly the records of one log tab.
+   */
+  async diagnosticsLogs(query: DiagnosticsLogsQuery = {}): Promise<DiagnosticsLogsResponse> {
+    const params = new URLSearchParams();
+    if (query.source) {
+      params.set("source", query.source);
+    }
+    if (query.limit !== undefined) {
+      params.set("limit", String(query.limit));
+    }
+    if (query.level) {
+      params.set("level", query.level);
+    }
+    if (query.unredacted) {
+      params.set("unredacted", "1");
+    }
+    const qs = params.toString();
+    return this.request<DiagnosticsLogsResponse>(`/api/diagnostics/logs${qs ? `?${qs}` : ""}`);
+  }
+
+  /** Set the global diagnostics level (pino set, e.g. "debug"). */
+  async diagnosticsSetLevel(level: DiagnosticsLevelName): Promise<void> {
+    await this.request<{ ok: boolean }>("/api/diagnostics/level", {
+      method: "PATCH",
+      body: JSON.stringify({ level }),
+    });
+  }
+
+  /** Enable/disable one diagnostics source (secure sources refuse server-side). */
+  async diagnosticsSetSourceEnabled(id: string, enabled: boolean): Promise<void> {
+    await this.request<{ ok: boolean }>("/api/diagnostics/source", {
+      method: "PATCH",
+      body: JSON.stringify({ id, enabled }),
+    });
+  }
+
+  /**
+   * Collect a fresh diagnostic snapshot. Pass the shell's webview GPU probe to
+   * fill the hardware WebGL/scale-factor hooks (POST); omit it for the
+   * server-only snapshot (GET).
+   */
+  async diagnosticsSnapshot(clientGpu?: ClientGpuProbe | null): Promise<SnapshotResponse> {
+    if (clientGpu) {
+      return this.request<SnapshotResponse>("/api/diagnostics/snapshot", {
+        method: "POST",
+        body: JSON.stringify({ clientGpu }),
+      });
+    }
+    return this.request<SnapshotResponse>("/api/diagnostics/snapshot");
+  }
+
+  /** Build one redacted diagnostic bundle (snapshot sections + log sources). */
+  async createDiagnosticsBundle(req: {
+    sections: string[];
+    sources: string[];
+    userNote?: string;
+    clientGpu?: ClientGpuProbe | null;
+  }): Promise<BundleResponse> {
+    return this.request<BundleResponse>("/api/diagnostics/bundle", {
+      method: "POST",
+      body: JSON.stringify({
+        sections: req.sections,
+        sources: req.sources,
+        ...(req.userNote !== undefined ? { userNote: req.userNote } : {}),
+        ...(req.clientGpu ? { clientGpu: req.clientGpu } : {}),
+      }),
+    });
+  }
+
+  /** Raw snapshot type accessor for the Diagnose tab. */
+  async rawSnapshot(): Promise<DiagnosticSnapshot> {
+    return (await this.diagnosticsSnapshot()).snapshot;
   }
 
   // -------------------------------------------------------------------
