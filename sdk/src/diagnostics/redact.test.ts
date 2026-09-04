@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  HIGH_ENTROPY_HEX_MIN_LENGTH,
+  HIGH_ENTROPY_MIXED_MIN_LENGTH,
   isPeerId,
   maskIp,
   maskPeerId,
   redact,
+  redactHighEntropy,
   redactLines,
   redactNamedValue,
   redactStructured,
@@ -70,6 +73,78 @@ test("redact masks well-known token prefixes", () => {
 test("redact leaves ordinary prose untouched", () => {
   const msg = "message received from peer, 240 bytes, verified";
   assert.equal(redact(msg), msg);
+});
+
+test("high-entropy fallback masks a raw uppercase-hex private key (no letter/digit mix needed)", () => {
+  const seed = "9F2AB1C4D5E6F708192A3B4C5D6E7F8091A2B3C4D5E6F708192A3B4C5D6E7F80";
+  assert.ok(seed.length >= HIGH_ENTROPY_HEX_MIN_LENGTH);
+  const out = redact(`leaked key ${seed} into the log`);
+  assert.ok(!out.includes(seed));
+  assert.match(out, /\[redacted:token\]/);
+});
+
+test("high-entropy fallback masks a mixed-case hex key too", () => {
+  const mixed = "9f2aB1c4D5e6F708192A3b4C5d6E7f8091A2b3C4d5E6f708192A3b4C5d6E7f80";
+  const out = redact(`key=${mixed}`);
+  assert.ok(!out.includes(mixed));
+  assert.match(out, /\[redacted:token\]/);
+});
+
+test("high-entropy fallback masks a raw 32-hex key (shorter than a 64-hex seed)", () => {
+  const shortHex = "9f2ab1c4d5e6f708192a3b4c5d6e7f80";
+  assert.ok(shortHex.length >= HIGH_ENTROPY_HEX_MIN_LENGTH);
+  const out = redact(`token ${shortHex}`);
+  assert.ok(!out.includes(shortHex));
+  assert.match(out, /\[redacted:token\]/);
+});
+
+test("high-entropy fallback masks a prefix-less base64-style secret", () => {
+  const secret = "AbC3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3";
+  assert.ok(secret.length >= HIGH_ENTROPY_MIXED_MIN_LENGTH);
+  const out = redact(`custom plugin key: ${secret}`);
+  assert.ok(!out.includes(secret));
+  assert.match(out, /\[redacted:token\]/);
+});
+
+test("high-entropy fallback leaves a hyphenated UUID readable as a correlation id", () => {
+  const uuid = "9f2ab1c4-d5e6-4f08-9a2b-3b4c5d6e7f80";
+  assert.equal(redact(`task ${uuid} assigned`), `task ${uuid} assigned`);
+});
+
+test("high-entropy fallback leaves a long single-class word untouched", () => {
+  const word = "heelerglangnederlandswaardevolbegrip";
+  assert.ok(word.length >= HIGH_ENTROPY_MIXED_MIN_LENGTH);
+  assert.equal(redact(`sleutel: ${word}`), `sleutel: ${word}`);
+});
+
+test("high-entropy fallback stays bounded on one giant token", () => {
+  const giant = "aA".repeat(2000);
+  const start = Date.now();
+  const out = redact(`payload ${giant} end`);
+  assert.match(out, /\[redacted:token\]/);
+  assert.ok(Date.now() - start < 1000, "no ReDoS on a long candidate run");
+});
+
+test("redactHighEntropy applies to every run independently", () => {
+  assert.equal(
+    redactHighEntropy("keep 9F2AB1C4D5E6F708192A3B4C5D6E7F8091A2B3C4D5E6F708192A3B4C5D6E7F80 keep"),
+    "keep [redacted:token] keep",
+  );
+  assert.equal(
+    redactHighEntropy("plain 9f2ab1c4-d5e6-4f08-9a2b-3b4c5d6e7f80 id"),
+    "plain 9f2ab1c4-d5e6-4f08-9a2b-3b4c5d6e7f80 id",
+  );
+});
+
+test("redactStructured entropy-masks a secret stored under a benign key", () => {
+  const out = redactStructured({
+    module: "thirdparty",
+    info: "attach key AbC3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3 here",
+    meta: { ref: "9f2ab1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80" },
+  }) as Record<string, any>;
+  assert.equal(out.module, "thirdparty");
+  assert.equal(out.info, "attach key [redacted:token] here");
+  assert.equal(out.meta.ref, "[redacted:token]");
 });
 
 test("redactLines applies the filter per line (multi-line export)", () => {
