@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { HELP_DOCS } from "../../assets/docs";
+import type { DocsFocus } from "../../types";
 import type { HelpDoc } from "./docs";
 import { groupDocs, searchDocs } from "./docs";
 import { MarkdownDocView } from "./MarkdownView";
@@ -9,11 +10,20 @@ import { BookOpen, ChevronRight, LifeBuoy, Search } from "lucide-react";
  * The Documentation tab of the HelpCenter (Pijler E / Brief 7C): an offline,
  * searchable knowledge base bundled into the app. Left column lists the docs
  * (categorized, or ranked search hits); the right column renders the selected
- * article from its bundled markdown.
+ * article from its bundled markdown. The optional `focus` prop (7D) lets the
+ * Help-agent tab open a cited article directly.
  */
-export function DocsTab() {
+export function DocsTab({ focus }: { focus?: DocsFocus | null }) {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (focus) {
+      setSelectedId(focus.docId);
+      setQuery("");
+    }
+    // Only react to a *new* focus token (token bumped per request).
+  }, [focus?.token, focus?.docId]);
 
   const results = useMemo(() => searchDocs(HELP_DOCS, query), [query]);
   const groups = useMemo(() => groupDocs(HELP_DOCS), []);

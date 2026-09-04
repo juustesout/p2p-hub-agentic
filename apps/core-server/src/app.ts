@@ -53,6 +53,9 @@ import type { SnapshotStateSource } from "./diagnostics/snapshot";
 import { MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS, REMOTE_SITE_FETCH_RATE_LIMIT, REMOTE_SITE_FETCH_RATE_WINDOW_MS, sendJson } from "./routes/helpers";
 import { servePal, registerPalSkills } from "./routes/pal";
 import type { PalContext } from "./routes/pal";
+import { serveHelpCenter } from "./routes/help-center";
+import type { HelpCenterContext } from "./routes/help-center";
+import { HelpCenterService } from "./help-center/service";
 import { CoreEventBus } from "./events/core-event-bus";
 import { PALManager } from "./pal/manager";
 import { PALRuleStore, palRulesFile } from "./pal/store";
@@ -104,6 +107,8 @@ export class CoreServer {
   /** Brief 6 — the local domain event bus + PAL manager. */
   private readonly palEventBus: CoreEventBus;
   private pal: PALManager | null = null;
+  /** Brief 7D — the HelpCenter help-agent + support contact service. */
+  private readonly helpCenter: HelpCenterService;
   private lanSiteAllowed = true;
   private siteToken = "";
   private peerId = "";
@@ -132,6 +137,7 @@ export class CoreServer {
     operator: OperatorContext;
     pal: PalContext;
     diagnostics: DiagnosticsContext;
+    helpCenter: HelpCenterContext;
   };
 
   constructor(options: CoreServerOptions) {
@@ -194,6 +200,20 @@ export class CoreServer {
       probeSkill: () => this.broker.listSkills().find((s) => !s.localOnly)?.skill,
       broadcast: (event, payload) => this.broadcast(event, payload),
     });
+    // Brief 7D: the HelpCenter service lazily builds its CoreAIProvider (the
+    // single component that may read the `ai.*` vault secrets) from the host's
+    // vault manager once it exists; the state snapshot it reasons over is a
+    // secret-free closure over the live lock/network/pause fields.
+    this.helpCenter = new HelpCenterService({
+      vault: () => this.host.vaultManager(),
+      aiBudget: this.aiBudget,
+      state: () => ({
+        safeMode: this.options.safeMode === true,
+        networkPaused: this.networkPaused,
+        vaultExists: this.vaultExists,
+        vaultUnlocked: this.vaultUnlocked,
+      }),
+    });
     this.routes = this.buildRoutes();
   }
 
@@ -249,6 +269,9 @@ export class CoreServer {
       diagnostics: {
         engine: diagnostics,
         snapshotState: () => this.snapshotState(),
+      },
+      helpCenter: {
+        service: this.helpCenter,
       },
     };
   }
@@ -794,6 +817,9 @@ export class CoreServer {
         return;
       }
       if (await serveDiagnostics(this.routes.diagnostics, req, res, path)) {
+        return;
+      }
+      if (await serveHelpCenter(this.routes.helpCenter, req, res, path)) {
         return;
       }
       if (await serveOperator(this.routes.operator, req, res, path)) {

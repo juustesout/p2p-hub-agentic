@@ -16,6 +16,7 @@ import {
   transportLabel,
 } from "./logic";
 import { bundleFilename, bundleJson, copyToClipboard, downloadTextFile } from "./export";
+import { rememberLastBundle } from "./bundle-slot";
 import {
   Activity,
   AlertTriangle,
@@ -150,6 +151,7 @@ export function DiagnoseTab() {
         clientGpu: probeWebglGpu(),
       });
       setBundle(res);
+      rememberLastBundle(res.clipboardText);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

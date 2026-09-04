@@ -101,7 +101,7 @@ export interface VaultModelInfo {
 }
 
 /** Which main view of the HelpCenter a nav request targets. */
-export type HelpTabId = "diagnose" | "logs" | "docs";
+export type HelpTabId = "diagnose" | "logs" | "docs" | "chat" | "agent";
 
 /**
  * A targeted HelpCenter view request (Pijler C / Brief 7C): open a specific
@@ -330,4 +330,64 @@ export interface BundleResponse {
   bundle: DiagnosticBundle;
   clipboardText: string;
   preview: DiagnosticBundle["preview"];
+}
+
+// ---------------------------------------------------------------------------
+// HelpCenter chat + help-agent (7D) — DTOs mirroring the core-server /api/help
+// surface and the chat plugin's httpBridgeOnly skills
+// ---------------------------------------------------------------------------
+
+/** The baked-in support contact (server-resolved; configured = has a peerId). */
+export interface HelpSupportInfo {
+  peerId: string | null;
+  displayName: string;
+  configured: boolean;
+}
+
+export interface HelpAgentStatus {
+  ok: boolean;
+  available: boolean;
+}
+
+export interface HelpSourceRef {
+  docId: string;
+  title: string;
+}
+
+/** A read-only proposal: the answer plus steps the operator takes themselves. */
+export interface HelpAgentProposal {
+  question: string;
+  answer: string;
+  steps: string[];
+  sources: HelpSourceRef[];
+}
+
+export type HelpAgentAskResult =
+  | { ok: true; proposal: HelpAgentProposal }
+  | {
+      ok: false;
+      code?: string;
+      detail?: string;
+    };
+
+/** One stored chat message as exposed by the chat plugin's getThread. */
+export interface ChatMessageRecordView {
+  fromPeerId: string;
+  toPeerId: string;
+  text: string;
+  sentAt: string;
+  verified: boolean;
+}
+
+export interface ChatThreadSummaryView {
+  peerId: string;
+  lastMessageAt: string;
+  messageCount: number;
+}
+
+/** A one-shot "open this article" focus handed to the Documentation tab. */
+export interface DocsFocus {
+  docId: string;
+  /** Bumped per request so the tab re-selects even for the same docId. */
+  token: number;
 }

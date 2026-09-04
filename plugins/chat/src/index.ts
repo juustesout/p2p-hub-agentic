@@ -492,14 +492,19 @@ export default function activate(ctx: PluginContext): ChatPlugin {
     });
   }
 
+  // The shell-facing chat skills are a local operator privilege
+  // (`httpBridgeOnly`): the desktop shell reaches them over the token-gated
+  // local HTTP bridge, and they are structurally unreachable from the network.
+  // Requires the manifest `network:http:chat.*` permissions. `receiveMessage`
+  // below remains the only network-reachable skill.
   ctx.skills.register(
     "sendMessage",
     async (payload) => sendMessage(payload as SendMessageInput),
-    { localOnly: true },
+    { httpBridgeOnly: true },
   );
 
   ctx.skills.register("listThreads", async () => listThreads(), {
-    localOnly: true,
+    httpBridgeOnly: true,
   });
 
   ctx.skills.register(
@@ -511,7 +516,7 @@ export default function activate(ctx: PluginContext): ChatPlugin {
       }
       return getThread(peerId);
     },
-    { localOnly: true },
+    { httpBridgeOnly: true },
   );
 
   ctx.skills.register(
